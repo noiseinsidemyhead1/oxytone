@@ -293,9 +293,11 @@ impl Queue {
         self.current().map(|e| e.id)
     }
 
+    /// Le tour suivant (répétition de la file) n'est pas ajouté ici : il l'est
+    /// au passage au morceau suivant (sinon le morceau en cours réapparaissait
+    /// aussitôt dans une file vide).
     pub fn set_repeat(&mut self, repeat: Repeat) {
         self.repeat = repeat;
-        self.top_up();
     }
 
     /// Active ou coupe l'aléatoire : la suite est reconstruite avec **toute** la
@@ -308,8 +310,9 @@ impl Queue {
         if self.current.is_none() {
             return;
         }
+        // Pas de nouveau tour ici (voir `set_repeat`) : changer l'aléatoire ne
+        // doit jamais ajouter le morceau en cours à la file.
         self.rebuild_upcoming();
-        self.top_up();
     }
 
     // ----- ajouts -----
@@ -464,6 +467,10 @@ impl Queue {
 
     /// Fin naturelle du morceau : avance et rend le nouveau courant.
     pub fn advance_auto(&mut self) -> Option<QueueId> {
+        // Répétition de la file et suite vide : le nouveau tour commence ici.
+        if self.upcoming_len() == 0 {
+            self.top_up();
+        }
         let id = self.peek_auto_next()?.id;
         self.set_current(id);
         Some(id)

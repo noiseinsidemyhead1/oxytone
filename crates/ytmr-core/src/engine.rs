@@ -1684,6 +1684,50 @@ mod tests {
         .await;
     }
 
+    /// Le cas de l'utilisateur : un morceau en cours, rien derrière ; activer
+    /// puis couper l'aléatoire (radio automatique active, qui renvoie le
+    /// morceau lui-même et sa version clip ; répétition de la file aussi).
+    #[tokio::test]
+    async fn toggling_shuffle_never_adds_the_playing_track() {
+        let mut clip = track(0);
+        clip.video_id = "v0clip".into();
+        clip.title = "t0 (Official Video)".into();
+        for repeat in [Repeat::Off, Repeat::All] {
+            let player = FakePlayer::new();
+            let resolver = Arc::new(FakeResolver::default());
+            let core = start_full(
+                &player,
+                true,
+                vec![track(0), clip.clone()],
+                Arc::clone(&resolver),
+                None,
+            );
+            core.send(Command::PlayTracks {
+                tracks: vec![track(0)],
+                start: 0,
+            })
+            .await
+            .unwrap();
+            until("chargement", || !player.calls().is_empty()).await;
+            player.emit(PlayerEvent::Started(EntryId(1)));
+            core.send(Command::SetRepeat(repeat)).await.unwrap();
+            for on in [true, false, true, false] {
+                core.send(Command::SetShuffle(on)).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                let queue = core.queue();
+                let copies = queue
+                    .entries
+                    .iter()
+                    .filter(|e| e.track.same_song(&track(0)))
+                    .count();
+                assert_eq!(
+                    copies, 1,
+                    "aléatoire {on}, répétition {repeat:?} : le morceau en cours est apparu {copies} fois"
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     async fn resolves_the_next_ten_tracks_in_background() {
         let player = FakePlayer::new();
