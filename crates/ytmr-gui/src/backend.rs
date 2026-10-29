@@ -1,8 +1,8 @@
 //! Démarrage et arrêt de tout ce qui tourne derrière la fenêtre.
 //!
 //! En clair : on lance mpv, on se connecte au catalogue, on démarre le moteur
-//! de lecture et le serveur local qui sert l'interface et l'API. La fenêtre
-//! n'a plus qu'à afficher l'adresse de ce serveur.
+//! de lecture et, si la config le demande, le serveur local pour le deck CYD.
+//! L'interface parle directement au moteur, sans passer par le réseau.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -19,20 +19,30 @@ use ytmr_media::Covers;
 use ytmr_player::{Dependencies, MpvPlayer, YtDlpResolver};
 
 pub struct Backend {
-    pub url: String,
-    core: CoreHandle,
+    pub core: CoreHandle,
+    pub catalog: Arc<Catalog>,
+    pub covers: Arc<Covers>,
     core_task: JoinHandle<()>,
-    server_task: JoinHandle<std::io::Result<()>>,
-    stop_server: oneshot::Sender<()>,
+    server: Option<(JoinHandle<std::io::Result<()>>, oneshot::Sender<()>)>,
+}
+
+impl std::fmt::Debug for Backend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Backend").finish_non_exhaustive()
+    }
 }
 
 impl Backend {
     pub async fn start(config: &Config, paths: &AppPaths) -> Result<Self> {
         let addr = SocketAddr::new(config.api.bind, config.api.port);
         // D'abord le port : s'il est pris, ytmr est sans doute déjà ouvert.
-        let listener = TcpListener::bind(addr).await.with_context(|| {
-            format!("le port {addr} est déjà utilisé (ytmr est peut-être déjà ouvert)")
-        })?;
+        let listener = if config.api.enabled {
+            Some(TcpListener::bind(addr).await.with_context(|| {
+                format!("le port {addr} est déjà utilisé (ytmr est peut-être déjà ouvert)")
+            })?)
+        } else {
+            None
+        };
 
         let deps = Dependencies::detect(
             config.player.mpv_path.as_deref(),
@@ -84,20 +94,26 @@ impl Backend {
                 .then(|| config.api.token.clone())
                 .flatten(),
         };
-        let state = AppState::new(core.clone(), catalog, covers, guard);
-        let (stop_server, stopped) = oneshot::channel();
-        let server_task = tokio::spawn(ytmr_api::serve(listener, state, async {
-            let _ = stopped.await;
-        }));
+        let server = listener.map(|listener| {
+            let state = AppState::new(
+                core.clone(),
+                Arc::clone(&catalog),
+                Arc::clone(&covers),
+                guard,
+            );
+            let (stop, stopped) = oneshot::channel();
+            let task = tokio::spawn(ytmr_api::serve(listener, state, async {
+                let _ = stopped.await;
+            }));
+            (task, stop)
+        });
 
-        // La fenêtre passe toujours par la boucle locale, même si l'API écoute sur le LAN.
-        let url = format!("http://127.0.0.1:{}/", config.api.port);
         Ok(Self {
-            url,
             core,
+            catalog,
+            covers,
             core_task,
-            server_task,
-            stop_server,
+            server,
         })
     }
 
@@ -107,11 +123,13 @@ impl Backend {
             tracing::warn!(error = %e, "arrêt du moteur");
         }
         let _ = self.core_task.await;
-        let _ = self.stop_server.send(());
-        match self.server_task.await {
-            Ok(Err(e)) => tracing::warn!(error = %e, "arrêt du serveur"),
-            Err(e) => tracing::warn!(error = %e, "tâche du serveur"),
-            Ok(Ok(())) => {}
+        if let Some((task, stop)) = self.server {
+            let _ = stop.send(());
+            match task.await {
+                Ok(Err(e)) => tracing::warn!(error = %e, "arrêt du serveur"),
+                Err(e) => tracing::warn!(error = %e, "tâche du serveur"),
+                Ok(Ok(())) => {}
+            }
         }
     }
 }

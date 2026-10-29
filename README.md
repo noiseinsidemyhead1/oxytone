@@ -6,11 +6,36 @@ Projet en cours de développement : voir [`ytmr-plan.md`](ytmr-plan.md) pour le 
 
 ## Prérequis
 
-- Rust stable (1.85 minimum)
+- Rust stable (1.88 minimum)
 - Windows : Build Tools Visual Studio avec la charge de travail « Développement Desktop en C++ »
 - `mpv` et `yt-dlp` dans le PATH, plus un moteur JavaScript pour yt-dlp (`deno` conseillé, `node` accepté)
   - Windows : `scoop bucket add extras && scoop install mpv yt-dlp deno`
   - CachyOS / Arch : `sudo pacman -S mpv yt-dlp deno`
+
+## Utilisation
+
+```sh
+cargo run --release -p ytmr
+```
+
+Raccourcis : `Espace` lecture/pause, `←`/`→` ±10 s, `Ctrl+←`/`Ctrl+→` précédent/suivant, `Ctrl+F` rechercher, `Échap` retour.
+
+Pour la qualité Premium (Opus ~264 kb/s), mettre dans `config.toml`, section `[player]` : `cookies_from_browser = "firefox"` (YouTube connecté dans Firefox).
+
+## Performances mesurées
+
+Windows 11, build release, 2026-10-29 :
+
+| Mesure | Résultat |
+|---|---|
+| Mémoire privée de l'appli au repos | ~21 Mo (+ mpv ~38 Mo) |
+| Après recherche et navigation (jaquettes en mémoire) | ~37 Mo |
+| CPU pendant la lecture | 0,1 % |
+| Clic « Lecture » sur un album ouvert → son | 0,4 s (morceau préparé à l'ouverture) |
+| Enchaînement entre deux morceaux | ~7 ms de silence |
+| `/api/v1/state` | 342 octets, < 1 ms |
+
+Le rendu est logiciel (tiny-skia) : le rendu GPU coûtait 90 à 190 Mo de plus, rien que pour le pilote graphique. Pour l'activer quand même : variable d'environnement `ICED_BACKEND=wgpu`.
 
 ## Utilisation (CLI)
 

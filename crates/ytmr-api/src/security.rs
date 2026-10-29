@@ -80,8 +80,7 @@ pub async fn guard(State(state): State<AppState>, request: Request, next: Next) 
             return reject(StatusCode::FORBIDDEN, "origine non autorisée");
         }
     }
-    let is_api = request.uri().path().starts_with("/api/");
-    if is_api && !guard.token_ok(headers, request.uri().query()) {
+    if !guard.token_ok(headers, request.uri().query()) {
         return reject(StatusCode::UNAUTHORIZED, "token manquant ou invalide");
     }
     next.run(request).await

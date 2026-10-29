@@ -8,7 +8,7 @@ Client YouTube Music natif en Rust (CachyOS + Windows 11). Le plan de référenc
 - **Jamais d'extraction de flux YouTube** (signature, `n`, PO tokens). La lecture passe exclusivement par mpv (processus fils, JSON IPC) qui appelle yt-dlp.
 - `ytmr-core` est la seule source de vérité. La GUI et l'API envoient des commandes et s'abonnent aux événements (`broadcast` pour les événements, `watch` pour l'état courant). Aucune logique métier dans la GUI ou l'API.
 - Lecture derrière un trait async `Player`.
-- **Pas de GUI iced** (abandonnée le 2026-10-29) : l'interface est une app web Svelte 5 + Vite (`web/`), embarquée dans le binaire, affichée dans une fenêtre native wry + tao qui charge l'UI servie par `ytmr-api`. L'UI ne parle qu'à l'API HTTP/WS, comme le deck CYD. Priorité : rapidité (jaquettes pré-redimensionnées et en cache côté Rust, bundle léger) et design soigné.
+- **GUI native iced 0.14** (`ytmr-gui`), rendu logiciel tiny-skia par défaut. Une interface web (webview) a été essayée et **refusée par l'utilisateur** (« une autre app pas performante ») : ne pas y revenir. La GUI parle directement au `CoreHandle` (même processus) ; l'API ne sert qu'au CYD et aux télécommandes. Priorités de l'utilisateur : rapidité, légèreté, design soigné avec jaquettes.
 - N'inventer aucune API de crate : `cargo add`, puis vérifier les signatures dans `~/.cargo/registry/src` ou sur docs.rs (critique pour ytmapi-rs, souvlaki et iced).
 - Pas de `unwrap()`/`expect()` hors tests (lint clippy du workspace). `thiserror` dans les libs, `anyhow` dans les binaires, logs avec `tracing`.
 - `#[cfg(windows)]` / `#[cfg(unix)]` uniquement là où c'est inévitable (IPC mpv). Chemins via `directories` (`ytmr_core::AppPaths`).
@@ -33,7 +33,7 @@ cargo run -p ytmr-cli -- doctor                     # vérifie mpv, yt-dlp, mote
 cargo run -p ytmr-cli -- search daft punk           # recherche
 cargo run -p ytmr-cli -- play daft punk around the world      # + radio (autoplay)
 cargo run -p ytmr-cli -- play --all --no-autoplay daft punk     # tous les résultats en file
-cargo run -p ytmr                                   # binaire GUI
+cargo run --release -p ytmr                         # l'appli (le debug est lent pour le décodage d'images)
 RUST_LOG=ytmr_player::mpv::ipc=trace,ytmr_core=debug cargo run -p ytmr-cli -- play …   # IPC mpv + décisions du core
 cargo test -p ytmr-catalog -- --ignored             # tests réseau
 ```
@@ -61,6 +61,18 @@ Sécurité (`security.rs`) : `Host` limité aux noms de loopback en mode local (
 
 Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (téléchargement + Lanczos), 1,7 ms depuis le cache.
 
+## GUI (`ytmr-gui`)
+
+- `app.rs` : état + `update` (architecture Elm) ; `views.rs` : widgets ; `style.rs` : palette et styles ; `icons.rs` : icônes SVG en ligne ; `backend.rs` : démarrage/arrêt de mpv, catalogue, core, API.
+- La fenêtre s'ouvre tout de suite ; le backend démarre dans un `Task` (`Message::BackendReady`). Fermer la fenêtre (`exit_on_close_request: false`) arrête d'abord mpv proprement.
+- Les changements du core arrivent par `Task::stream(core_updates)` (watch + broadcast) : `Subscription::run_with` exige des données `Hash`.
+- Jaquettes : `Covers::get_rgba` décode en tâche de fond, `image::Handle::from_rgba` ; cache `(cover_id, taille)` dans `App`. Teinte de page : `Covers::accent` puis `style::accent_from_rgb`.
+- Préchargement : survol d'un morceau > 450 ms, premier résultat de recherche et premier morceau d'un album ouvert → `Command::Prefetch`. Mesuré : clic « Lecture » → son en 0,4 s.
+- **Rendu** (`apps/ytmr/src/main.rs::configure_renderer`) : `ICED_BACKEND=tiny-skia` par défaut. Mesuré (release, 2026-10-29) : ~21 Mo privés au repos, ~37 Mo après navigation, 0,1 % CPU en lecture ; avec le GPU : 109 Mo (iGPU DX12) à 207 Mo (RTX 5060). Si GPU : `WGPU_BACKEND=dx12` sous Windows (OpenGL fait planter le démarrage : 0xC0000005) et `WGPU_POWER_PREF=low`. `set_var` est `unsafe` en Rust 2024 : lint `unsafe_code = "deny"` au workspace, autorisé seulement là.
+- iced 0.14 exige Rust 1.88 (`rust-version` du workspace) ; `cargo add` choisit sinon la 0.13.
+- Ombres floues + rendu logiciel = petits points clairs aux coins : pas d'ombre floue sur les grandes pochettes.
+- Tests visuels sous Windows : scripts PowerShell (capture via `DwmGetWindowAttribute` + `CopyFromScreen`, clics via `SetCursorPos`/`mouse_event`) **avec `SetProcessDPIAware()`**, sinon les coordonnées sont décalées de 125 %. Ne jamais simuler clavier/souris quand l'utilisateur se sert de l'appli.
+
 ## Emplacements à l'exécution
 
 | | Linux | Windows |
@@ -77,7 +89,7 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 | 1 — Lecture headless (catalogue, mpv IPC, CLI) | validée sous Windows ; à vérifier sous CachyOS |
 | 2 — Core et file d'attente (préchargement, radio) | validée sous Windows ; à vérifier sous CachyOS |
 | 3 — API et jaquettes | validée sous Windows (curl, WebSocket, RGB565 décodée) |
-| 4 — Interface web (Svelte 5 + Vite, fenêtre wry/tao) | à faire |
+| 4 — GUI native iced | validée sous Windows (recherche, album, artiste, file, lecture) |
 | 5 — Firmware CYD | à faire |
 | 6 — Authentification et bibliothèque | à faire |
 | 7 — Intégration OS | à faire |

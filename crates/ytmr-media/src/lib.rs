@@ -169,6 +169,17 @@ impl Covers {
         Ok(data.into())
     }
 
+    /// Jaquette décodée en pixels RGBA (`size * size * 4` octets), prête à
+    /// afficher sans décodage dans le fil de l'interface.
+    pub async fn get_rgba(&self, id: &str, size: u32) -> Result<Vec<u8>, MediaError> {
+        let jpeg = self.get(id, size, CoverFormat::Jpeg).await?;
+        tokio::task::spawn_blocking(move || {
+            Ok(image::load_from_memory(&jpeg)?.to_rgba8().into_raw())
+        })
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+    }
+
     /// Couleur dominante (vive) de la jaquette, pour teinter une interface.
     pub async fn accent(&self, id: &str) -> Result<[u8; 3], MediaError> {
         let source = self.source(id).await?;

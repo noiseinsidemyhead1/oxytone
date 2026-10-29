@@ -28,8 +28,7 @@ ytmr/                      (workspace Cargo)
 │   ├── ytmr-api/         serveur HTTP + WebSocket (axum) pour le CYD et autres clients
 │   ├── ytmr-media/       jaquettes : cache disque, resize, conversion RGB565
 │   ├── ytmr-os/          MPRIS (Linux) / SMTC (Windows) via souvlaki
-│   └── ytmr-gui/         fenêtre native (wry + tao) qui affiche l'interface web
-├── web/                  interface Svelte 5 + Vite, compilée et embarquée dans le binaire
+│   └── ytmr-gui/         interface native iced (rendu logiciel tiny-skia) + assemblage de l'appli
 └── apps/
     ├── ytmr/             binaire GUI (assemble tout)
     └── ytmr-cli/         binaire headless (debug, usage sans GUI)
@@ -44,7 +43,7 @@ ytmr/                      (workspace Cargo)
 | Abstraction lecture | trait `Player` | permet de passer à `libmpv2` (intégré) ou `rodio` plus tard sans toucher au reste |
 | Async | `tokio` | standard, requis par ytmapi-rs et axum |
 | API | `axum` (HTTP + WebSocket) | léger, idiomatique |
-| GUI | Svelte 5 + Vite dans une webview `wry` + `tao` | interface web soignée et légère (~20 Ko de JS), fenêtre native (WebView2 / WebKitGTK) ; la même UI marche aussi dans un navigateur ou sur téléphone |
+| GUI | `iced` 0.14, rendu logiciel `tiny-skia` | pur Rust, architecture Elm ; la webview (WebView2) a été essayée puis écartée le 2026-10-29 : ~133 Mo pour une page vide. Le rendu GPU d'iced coûte 90 à 190 Mo de pilote graphique ; tiny-skia ~21 Mo pour 0,1 % de CPU |
 | Intégration OS | `souvlaki` | une seule API pour MPRIS (Linux) et SMTC (Windows) : touches média, overlay Windows |
 | Images | `image` + cache disque | resize et encodage des jaquettes |
 | Config / chemins | `serde` + `toml` + `directories` | `~/.config/ytmr` sous Linux, `%APPDATA%\ytmr` sous Windows |
@@ -55,8 +54,7 @@ ytmr/                      (workspace Cargo)
 ### Flux de données
 
 ```
-UI web (webview) ──HTTP/WS──▶ API (axum) ──commandes──▶ core
-CYD / téléphone  ──HTTP/WS──▶ API (axum)
+GUI (iced) ──────────commandes──────────▶ core ◀──commandes── API (axum) ◀── CYD / téléphone
                             │
               événements (tokio::broadcast)
                             │
@@ -66,7 +64,7 @@ CYD / téléphone  ──HTTP/WS──▶ API (axum)
      (mpv)    (ytmapi-rs)     (jaquettes)  (souvlaki)
 ```
 
-Le `core` est la seule source de vérité. L'UI web et le deck CYD sont deux clients de la même API.
+Le `core` est la seule source de vérité. La GUI (en direct, dans le même processus) et l'API (pour le CYD) ne sont que deux télécommandes.
 
 ## 3. API pour le CYD (nouvelle, sur mesure)
 
@@ -109,9 +107,9 @@ Validation : tests unitaires sur la file d'attente ; enchaînement automatique d
 `ytmr-api` + `ytmr-media` (cache, resize, RGB565).
 Validation : `curl` sur toutes les routes, client WS de test (`websocat`), une jaquette RGB565 décodée correctement par un petit script de vérification.
 
-**Phase 4 — Interface web** *(ex-phase 6, avancée à la demande de l'utilisateur le 2026-10-29 ; remplace iced)*
-Front Svelte 5 + Vite dans `web/`, embarqué dans le binaire ; fenêtre native wry + tao qui charge l'UI servie par `ytmr-api`. Routes d'API en plus pour l'UI : recherche, album, artiste, ajout à la file. Vues : recherche, artiste, album, file d'attente, lecteur avec grande jaquette. Jaquettes servies redimensionnées en WebP/JPEG par `ytmr-media`.
-Validation : navigation fluide, jaquettes instantanées depuis le cache, mesures RAM/CPU et temps de démarrage notés dans le README.
+**Phase 4 — GUI native iced** *(ex-phase 6, avancée à la demande de l'utilisateur le 2026-10-29)*
+Vues : accueil « en cours » (grande jaquette, teinte tirée de la pochette, à suivre), recherche (morceaux, albums, artistes), album, artiste, file d'attente, barre de lecture. Jaquettes décodées hors du fil d'affichage, préparation du morceau survolé ou de la page ouverte.
+Validation : navigation fluide, jaquettes instantanées depuis le cache, mesures RAM/CPU notées dans le README.
 
 **Phase 5 — Firmware CYD**
 Adapter le firmware à la nouvelle API (WS pour l'état, HTTP pour les commandes et la jaquette RGB565) et supprimer le relais Python.

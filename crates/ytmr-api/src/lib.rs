@@ -1,8 +1,7 @@
-//! Serveur HTTP + WebSocket (axum) pour l'interface, le deck CYD et les autres télécommandes.
+//! Serveur HTTP + WebSocket (axum) pour le deck CYD et les autres télécommandes.
 //!
 //! En clair : une porte d'entrée réseau qui traduit les requêtes en ordres pour
-//! le core, et qui sert aussi l'interface web compilée. Aucune logique de
-//! lecture ici : tout passe par [`CoreHandle`].
+//! le core. Aucune logique de lecture ici : tout passe par [`CoreHandle`].
 
 mod dto;
 mod security;
@@ -15,10 +14,9 @@ use std::time::Duration;
 
 use axum::Router;
 use axum::extract::{Path, Query, State};
-use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -36,13 +34,6 @@ use crate::dto::{
 const MAX_QUEUE_PAGE: usize = 200;
 const MAX_QUERY_LEN: usize = 200;
 const MAX_VOLUME: u8 = 100;
-
-/// Interface compilée (`web/dist`). En debug, relue depuis le disque à chaque
-/// requête : un `npm run build` suffit, sans recompiler Rust.
-#[derive(RustEmbed)]
-#[folder = "$CARGO_MANIFEST_DIR/../../web/dist"]
-#[allow_missing = true]
-struct Ui;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -115,7 +106,7 @@ pub fn router(state: AppState) -> Router {
 
     Router::new()
         .nest("/api/v1", api)
-        .fallback(static_file)
+        .fallback(not_found)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             security::guard,
@@ -455,50 +446,8 @@ async fn accent(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult 
         .into_response())
 }
 
-// ----- interface web -----
+// ----- divers -----
 
-const UI_MISSING: &str = "<!doctype html><meta charset=utf-8><title>ytmr</title>\
-<body style=\"font:16px system-ui;background:#111;color:#eee;padding:2rem\">\
-<h1>Interface non compilée</h1><p>Dans le dossier du projet : \
-<code>cd web &amp;&amp; npm install &amp;&amp; npm run build</code>, puis recharger.</p>";
-
-async fn static_file(uri: Uri) -> Response {
-    let path = uri.path().trim_start_matches('/');
-    if path.starts_with("api/") {
-        return ApiError(StatusCode::NOT_FOUND, "route inconnue".into()).into_response();
-    }
-    let path = if path.is_empty() { "index.html" } else { path };
-    if let Some(file) = Ui::get(path) {
-        let mime = mime_guess::from_path(path).first_or_octet_stream();
-        // Les fichiers de Vite sous assets/ ont une empreinte dans leur nom.
-        let cache = if path.starts_with("assets/") {
-            "public, max-age=31536000, immutable"
-        } else {
-            "no-cache"
-        };
-        return (
-            [
-                (header::CONTENT_TYPE, mime.as_ref().to_owned()),
-                (header::CACHE_CONTROL, cache.to_owned()),
-            ],
-            file.data,
-        )
-            .into_response();
-    }
-    // Application monopage : toute route inconnue renvoie l'index.
-    match Ui::get("index.html") {
-        Some(index) => (
-            [
-                (header::CONTENT_TYPE, "text/html; charset=utf-8"),
-                (header::CACHE_CONTROL, "no-cache"),
-            ],
-            index.data,
-        )
-            .into_response(),
-        None => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            UI_MISSING,
-        )
-            .into_response(),
-    }
+async fn not_found() -> Response {
+    ApiError(StatusCode::NOT_FOUND, "route inconnue".into()).into_response()
 }

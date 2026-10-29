@@ -10,3 +10,13 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+fastrand = "2.5.0"
+iced = { version = "0.14", features = ["image", "tokio", "advanced", "svg"] }
+tokio = { version = "1.54.1", features = ["rt", "net", "sync", "time", "macros"] }
+tracing = "0.1.44"
+ytmr-api = { version = "0.1.0", path = "../ytmr-api" }
+ytmr-catalog = { version = "0.1.0", path = "../ytmr-catalog" }
+ytmr-core = { version = "0.1.0", path = "../ytmr-core" }
+ytmr-media = { version = "0.1.0", path = "../ytmr-media" }
+ytmr-player = { version = "0.1.0", path = "../ytmr-player" }
