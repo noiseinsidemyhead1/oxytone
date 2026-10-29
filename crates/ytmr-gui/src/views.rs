@@ -14,8 +14,8 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, Load, Message, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT,
-    THUMB, View,
+    App, CARD, HERO, Load, Message, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, Route,
+    SEARCH_INPUT, THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -390,6 +390,15 @@ pub(crate) fn icon_tip<'a>(
     .gap(6)
     .delay(std::time::Duration::from_millis(400))
     .into()
+}
+
+/// Texte coupé à `max` caractères avec « … » (iced ne sait pas le faire seul).
+pub(crate) fn ellipsize(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
+    if s.chars().count() <= max {
+        return s.into();
+    }
+    let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end()).into()
 }
 
 pub(crate) fn section_title(title: &str) -> El<'_> {
@@ -1123,17 +1132,12 @@ fn queue_panel(app: &App) -> El<'_> {
     let list: El<'_> = if entries.is_empty() {
         muted("La file est vide.")
     } else {
+        let drag = app.queue_drag;
+        let accent = app.accent;
         virtual_list(entries.len(), QROW_H, range, |i| {
             let entry = &entries[i];
             let current = app.queue.current == Some(i);
-            let past = app.queue.current.is_some_and(|c| i < c);
-            let title_color = if current {
-                app.accent
-            } else if past {
-                style::TEXT_FAINT
-            } else {
-                style::TEXT
-            };
+            let title_color = if current { accent } else { style::TEXT };
             let content = row![
                 track_cover(app, &entry.track, 36.0),
                 container(
@@ -1157,20 +1161,71 @@ fn queue_panel(app: &App) -> El<'_> {
             ]
             .spacing(10)
             .align_y(Alignment::Center);
-            container(
-                mouse_area(
-                    button(content)
+            // Pas de bouton ici : il garderait le clic pour lui. Un clic bref
+            // lance le morceau, un clic maintenu le déplace (voir `QueueDrag`).
+            let held = drag.is_some_and(|d| d.from == i && d.moved);
+            let hovered =
+                drag.is_none() && app.hovered.as_deref() == Some(entry.track.video_id.as_str());
+            let background = if held {
+                Some(style::alpha(accent, 0.24))
+            } else if hovered {
+                Some(style::alpha(accent, 0.16))
+            } else if current {
+                Some(style::alpha(accent, 0.12))
+            } else {
+                None
+            };
+            let body = container(content)
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .align_y(Alignment::Center)
+                .padding(Padding::from([5, 8]))
+                .style(move |_| iced::widget::container::Style {
+                    background: background.map(Into::into),
+                    text_color: Some(style::TEXT),
+                    border: iced::Border {
+                        radius: 8.0.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                });
+            // Trait d'insertion là où le morceau va tomber.
+            let marker: El<'_> = match drag {
+                Some(d) if d.moved && d.over == i && d.from != i => container(
+                    container(Space::new())
                         .width(Length::Fill)
-                        .padding(Padding::from([5, 8]))
-                        .style(style::row(current, app.accent))
-                        .on_press(Message::JumpTo(entry.id)),
+                        .height(Length::Fixed(2.0))
+                        .style(move |_| iced::widget::container::Style {
+                            background: Some(accent.into()),
+                            ..Default::default()
+                        }),
                 )
-                .on_enter(Message::Hover(entry.track.video_id.clone()))
-                .on_exit(Message::Unhover),
-            )
-            .height(Length::Fixed(QROW_H))
-            .align_y(Alignment::Center)
-            .into()
+                .height(Length::Fill)
+                .align_y(if d.over < d.from {
+                    Alignment::Start
+                } else {
+                    Alignment::End
+                })
+                .into(),
+                _ => Space::new().into(),
+            };
+            let area = mouse_area(stack![body, marker])
+                .on_press(Message::QueueDrag(QueueDrag::Press(i)))
+                .on_enter(if drag.is_some() {
+                    Message::QueueDrag(QueueDrag::Over(i))
+                } else {
+                    Message::Hover(entry.track.video_id.clone())
+                })
+                .on_exit(Message::Unhover)
+                .interaction(if drag.is_some_and(|d| d.moved) {
+                    iced::mouse::Interaction::Grabbing
+                } else {
+                    iced::mouse::Interaction::Pointer
+                });
+            container(area)
+                .height(Length::Fixed(QROW_H))
+                .align_y(Alignment::Center)
+                .into()
         })
     };
 
@@ -1254,7 +1309,7 @@ fn player_bar(app: &App) -> El<'_> {
             18.0,
             style::TEXT,
             Message::Previous,
-            "Précédent (Ctrl+←)".into()
+            "Précédent".into()
         ),
         play,
         icon_tip(
@@ -1262,7 +1317,7 @@ fn player_bar(app: &App) -> El<'_> {
             18.0,
             style::TEXT,
             Message::Next,
-            "Suivant (Ctrl+→)".into()
+            "Suivant".into()
         ),
         icon_tip(
             repeat_icon,

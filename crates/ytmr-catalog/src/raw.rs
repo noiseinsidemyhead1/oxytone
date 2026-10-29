@@ -18,6 +18,8 @@ use ytmr_core::track::parse_duration;
 pub(crate) struct RawPost {
     pub path: &'static str,
     pub body: Map<String, Value>,
+    /// Paramètres d'URL (jeton de continuation…).
+    pub query: Vec<(&'static str, String)>,
 }
 
 #[derive(Debug)]
@@ -39,7 +41,10 @@ impl PostQuery for RawPost {
         self.body.clone()
     }
     fn params(&self) -> Vec<(&str, Cow<'_, str>)> {
-        Vec::new()
+        self.query
+            .iter()
+            .map(|(k, v)| (*k, Cow::from(v.as_str())))
+            .collect()
     }
     fn path(&self) -> &str {
         self.path
@@ -58,6 +63,7 @@ pub(crate) fn songs_search(query: &str) -> RawPost {
     RawPost {
         path: "search",
         body,
+        query: Vec::new(),
     }
 }
 
@@ -150,7 +156,7 @@ pub(crate) fn search_songs(page: &Value) -> Vec<Track> {
     items.into_iter().filter_map(search_song).collect()
 }
 
-fn search_song(item: &Value) -> Option<Track> {
+pub(crate) fn search_song(item: &Value) -> Option<Track> {
     let video_id = video_id(item)?;
     let title = flex_runs(item, 0)?
         .first()?

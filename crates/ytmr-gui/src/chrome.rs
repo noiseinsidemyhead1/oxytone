@@ -1,7 +1,8 @@
 //! Cadre de la fenêtre : barre de titre maison et bords redimensionnables.
 //!
 //! En clair : la fenêtre n'a plus la barre de titre de Windows. ytmr dessine
-//! la sienne (noire, avec réduire / agrandir / fermer) : on la saisit pour
+//! la sienne (même fond que les barres latérales, avec réduire / agrandir /
+//! fermer) : on la saisit pour
 //! déplacer la fenêtre, un double-clic l'agrandit. Sans cadre système, les
 //! bords ne se tirent plus d'eux-mêmes : de fines zones invisibles le long des
 //! bords redonnent le redimensionnement.
@@ -68,7 +69,7 @@ fn window_button<'a>(ic: Icon, message: Message, danger: bool) -> El<'a> {
                     if danger {
                         Color::from_rgb8(0xc4, 0x2b, 0x1c).into()
                     } else {
-                        style::SURFACE_HI.into()
+                        style::alpha(Color::WHITE, 0.08).into()
                     }
                 }),
                 text_color: style::TEXT,
@@ -88,7 +89,7 @@ pub fn title_bar(app: &App) -> El<'_> {
     )
     .on_press(Message::Window(Win::Drag))
     .on_double_click(Message::Window(Win::ToggleMaximize));
-    row![
+    let bar = row![
         grip,
         window_button(Icon::Minimize, Message::Window(Win::Minimize), false),
         window_button(
@@ -103,7 +104,19 @@ pub fn title_bar(app: &App) -> El<'_> {
         window_button(Icon::Close, Message::CloseRequested, true),
     ]
     .height(Length::Fixed(TITLE_H))
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Center);
+    // Même fond que les barres latérales et la barre de lecture, avec le même
+    // filet de séparation : la fenêtre forme un seul cadre.
+    column![
+        container(bar).style(style::sidebar),
+        container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fixed(1.0))
+            .style(|_| container::Style {
+                background: Some(style::LINE.into()),
+                ..container::Style::default()
+            }),
+    ]
     .into()
 }
 

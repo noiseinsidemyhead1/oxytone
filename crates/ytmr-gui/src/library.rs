@@ -20,6 +20,7 @@ use ytmr_catalog::CatalogError;
 use ytmr_catalog::account::{
     Account, LIKED_ID, Playlist, PlaylistSummary, PlaylistUpdate, Privacy, Profile,
 };
+use ytmr_catalog::home::{HomeItem, HomeKind, HomeShelf};
 use ytmr_core::{Command, Track};
 
 use crate::app::{App, CARD, HERO, Load, Message, Route, THUMB};
@@ -39,9 +40,9 @@ pub const RENAME_INPUT: &str = "renommer-playlist";
 const PLAYLIST_TTL: Duration = Duration::from_secs(30 * 60);
 const LIST_TTL: Duration = Duration::from_secs(30 * 60);
 const LIKED_TTL: Duration = Duration::from_secs(60 * 60);
-const HISTORY_TTL: Duration = Duration::from_secs(10 * 60);
-/// Après une écoute signalée, l'historique peut être redemandé plus tôt.
-const HISTORY_STALE_TTL: Duration = Duration::from_secs(3 * 60);
+const HOME_TTL: Duration = Duration::from_secs(15 * 60);
+/// Après une écoute signalée, « Réécouter » peut être redemandé plus tôt.
+const HOME_STALE_TTL: Duration = Duration::from_secs(3 * 60);
 
 /// Poignée clonable vers le compte (le jeton n'apparaît jamais dans les logs).
 #[derive(Debug, Clone)]
@@ -83,10 +84,10 @@ pub struct LibraryState {
     /// à la fin seulement si une version en cache est déjà à l'écran.
     pub streaming: Option<Streaming>,
     pub profile: Option<Profile>,
-    /// Écoutés récemment (historique du compte).
-    pub history: Option<Load<Vec<Track>>>,
-    history_stale: bool,
-    history_at: Option<Instant>,
+    /// Rangées de l'accueil de YouTube Music.
+    pub home: Option<Load<Vec<HomeShelf>>>,
+    home_stale: bool,
+    home_at: Option<Instant>,
     /// Recherche dans la playlist ouverte.
     pub filter: String,
     /// Playlists créées pendant cette session : YouTube met quelques secondes
@@ -165,7 +166,9 @@ pub enum Lib {
     /// Mise à jour forcée de la playlist ouverte.
     Refresh,
     ProfileLoaded(Result<Profile, String>),
-    HistoryLoaded(Result<Vec<Track>, String>),
+    HomeLoaded(Result<Vec<HomeShelf>, String>),
+    /// Morceau d'une rangée de l'accueil (rangée, carte).
+    PlayHome(usize, usize),
     Disconnect,
     Reconnect,
     Reported(Result<(), String>),
@@ -206,30 +209,50 @@ fn call<T: Send + 'static>(
 }
 
 impl App {
-    /// Écoutés récemment : rechargés à l'accueil quand une écoute a été signalée.
-    pub fn load_history(&mut self) -> Task<Message> {
-        let op = self.lib.ready().map(|a| async move { a.history().await });
+    /// Accueil de YouTube Music : la version en cache s'affiche tout de suite,
+    /// la fraîche la remplace à son arrivée.
+    pub fn load_home(&mut self) -> Task<Message> {
+        let op = self.lib.ready().map(|a| async move { a.home().await });
         if op.is_none() {
             return Task::none();
         }
-        if self.lib.history.is_none() {
-            self.lib.history = Some(Load::Loading);
+        let mut tasks = Vec::new();
+        if self.lib.home.is_none() {
+            let cached: Option<Vec<HomeShelf>> = self
+                .lib
+                .cache_dir
+                .as_deref()
+                .and_then(|dir| crate::collection::read_json(&dir.join("home.json")));
+            self.lib.home = Some(match cached {
+                Some(shelves) => {
+                    tasks.push(self.want_home_covers(&shelves));
+                    Load::Ready(shelves)
+                }
+                None => Load::Loading,
+            });
         }
-        call(op, Lib::HistoryLoaded)
+        tasks.push(call(op, Lib::HomeLoaded));
+        Task::batch(tasks)
+    }
+
+    /// Toutes les pochettes de l'accueil (gardées : elles restent affichées).
+    fn want_home_covers(&mut self, shelves: &[HomeShelf]) -> Task<Message> {
+        let ids: Vec<_> = shelves
+            .iter()
+            .flat_map(|s| &s.items)
+            .map(|i| self.url_cover(i.thumbnail_url.as_deref()))
+            .collect();
+        Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)))
     }
 
     pub fn refresh_home(&mut self) -> Task<Message> {
-        let age = self.lib.history_at.map(|t| t.elapsed());
+        let age = self.lib.home_at.map(|t| t.elapsed());
         let due = match age {
             None => true,
-            Some(age) if self.lib.history_stale => age > HISTORY_STALE_TTL,
-            Some(age) => age > HISTORY_TTL,
+            Some(age) if self.lib.home_stale => age > HOME_STALE_TTL,
+            Some(age) => age > HOME_TTL,
         };
-        if due {
-            self.load_history()
-        } else {
-            Task::none()
-        }
+        if due { self.load_home() } else { Task::none() }
     }
 
     /// Signale à YouTube le morceau qui commence (une fois par entrée de file).
@@ -245,7 +268,7 @@ impl App {
         if op.is_none() {
             return Task::none();
         }
-        self.lib.history_stale = true;
+        self.lib.home_stale = true;
         call(op, Lib::Reported)
     }
 
@@ -520,7 +543,7 @@ impl App {
                     self.load_playlists(),
                     liked,
                     profile,
-                    self.load_history(),
+                    self.load_home(),
                     self.load_collection(),
                 ];
                 if let Route::Playlist(id) = self.route.clone() {
@@ -563,22 +586,43 @@ impl App {
                     Task::none()
                 }
             },
-            Lib::HistoryLoaded(result) => match result {
-                Ok(tracks) => {
-                    self.lib.history_stale = false;
-                    self.lib.history_at = Some(Instant::now());
-                    // Toute la rangée (40 cartes), jamais libérée : elle reste affichée.
-                    let task = self.want_track_covers(tracks.iter().take(40), CARD);
-                    self.lib.history = Some(Load::Ready(tracks));
+            Lib::HomeLoaded(result) => match result {
+                Ok(shelves) => {
+                    self.lib.home_stale = false;
+                    self.lib.home_at = Some(Instant::now());
+                    if let Some(dir) = &self.lib.cache_dir {
+                        write_json(&dir.join("home.json"), &shelves);
+                    }
+                    let task = self.want_home_covers(&shelves);
+                    self.lib.home = Some(Load::Ready(shelves));
                     task
                 }
                 Err(e) => {
-                    if !matches!(self.lib.history, Some(Load::Ready(_))) {
-                        self.lib.history = Some(Load::Failed(e));
+                    tracing::warn!("accueil : {e}");
+                    if !matches!(self.lib.home, Some(Load::Ready(_))) {
+                        self.lib.home = Some(Load::Failed(e));
                     }
                     Task::none()
                 }
             },
+            Lib::PlayHome(shelf, index) => {
+                // Le morceau cliqué, puis ceux qui le suivent dans la rangée.
+                let Some(Load::Ready(shelves)) = &self.lib.home else {
+                    return Task::none();
+                };
+                let Some(items) = shelves.get(shelf).map(|s| &s.items) else {
+                    return Task::none();
+                };
+                let start = items[..index.min(items.len())]
+                    .iter()
+                    .filter(|i| i.track.is_some())
+                    .count();
+                let tracks: Vec<Track> = items.iter().filter_map(|i| i.track.clone()).collect();
+                if start >= tracks.len() {
+                    return Task::none();
+                }
+                self.send(Command::PlayTracks { tracks, start })
+            }
             Lib::Reported(result) => {
                 if let Err(e) = result {
                     tracing::debug!("écoute non signalée à YouTube : {e}");
@@ -590,7 +634,8 @@ impl App {
                 self.lib.profile = None;
                 self.lib.playlists = None;
                 self.lib.playlist = None;
-                self.lib.history = None;
+                self.lib.home = None;
+                self.lib.home_at = None;
                 self.lib.liked.clear();
                 self.lib.liked_count = None;
                 self.lib.streaming = None;
@@ -1567,35 +1612,134 @@ fn confirm_panel(title: &str) -> El<'_> {
 
 // ----- accueil -----
 
-/// Carte d'un morceau (rangée « Écoutés récemment »).
-fn track_card<'a>(app: &App, track: &'a Track) -> El<'a> {
-    let id = app.track_cover(track);
-    mouse_area(
-        button(
-            column![
-                cover(app.cover(id.as_deref(), CARD), 150.0, 8.0),
-                text(&track.title)
+/// Identifiants des rangées horizontales de l'accueil (défilement animé).
+const HOME_SHELVES: [&str; 16] = [
+    "accueil-0",
+    "accueil-1",
+    "accueil-2",
+    "accueil-3",
+    "accueil-4",
+    "accueil-5",
+    "accueil-6",
+    "accueil-7",
+    "accueil-8",
+    "accueil-9",
+    "accueil-10",
+    "accueil-11",
+    "accueil-12",
+    "accueil-13",
+    "accueil-14",
+    "accueil-15",
+];
+pub const PLAYLISTS_SHELF: &str = "rangee-playlists";
+/// Mosaïque « Réécouter » : 4 × 4 au plus.
+const GRID_MAX: usize = 16;
+
+/// Action d'une carte de l'accueil : ouvrir la page, ou lire le morceau.
+fn home_open(item: &HomeItem, shelf: usize, index: usize) -> Message {
+    match item.kind {
+        HomeKind::Album => Message::Navigate(Route::Album(item.id.clone())),
+        HomeKind::Playlist => Message::Navigate(Route::Playlist(item.id.clone())),
+        HomeKind::Artist => Message::Navigate(Route::Artist(item.id.clone())),
+        HomeKind::Song => Message::Lib(Lib::PlayHome(shelf, index)),
+    }
+}
+
+/// Carte d'une rangée de l'accueil.
+fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> El<'a> {
+    let id = app.url_cover(item.thumbnail_url.as_deref());
+    let artist = item.kind == HomeKind::Artist;
+    let card = button(
+        column![
+            cover(
+                app.cover(id.as_deref(), CARD),
+                150.0,
+                if artist { 75.0 } else { 8.0 }
+            ),
+            text(crate::views::ellipsize(&item.title, 19))
+                .size(14)
+                .font(SEMIBOLD)
+                .wrapping(iced::widget::text::Wrapping::None),
+            text(crate::views::ellipsize(&item.subtitle, 24))
+                .size(12)
+                .color(style::TEXT_DIM)
+                .wrapping(iced::widget::text::Wrapping::None),
+        ]
+        .spacing(6)
+        .width(Length::Fixed(150.0))
+        .clip(true),
+    )
+    .padding(8)
+    .style(style::card)
+    .on_press(home_open(item, shelf, index));
+    match &item.track {
+        // Survol d'un morceau : préchargement, comme dans les listes.
+        Some(track) => mouse_area(card)
+            .on_enter(Message::Hover(track.video_id.clone()))
+            .on_exit(Message::Unhover)
+            .into(),
+        None => card.into(),
+    }
+}
+
+/// Case de la mosaïque « Réécouter » : petite pochette et titre.
+fn grid_tile<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> El<'a> {
+    let id = app.url_cover(item.thumbnail_url.as_deref());
+    let radius = if item.kind == HomeKind::Artist {
+        28.0
+    } else {
+        6.0
+    };
+    button(
+        row![
+            cover(app.cover(id.as_deref(), CARD), 56.0, radius),
+            container(
+                text(&item.title)
                     .size(14)
                     .font(SEMIBOLD)
-                    .width(Length::Fixed(150.0)),
-                text(&track.artist)
-                    .size(12)
-                    .color(style::TEXT_DIM)
-                    .width(Length::Fixed(150.0)),
-            ]
-            .spacing(6),
-        )
-        .padding(8)
-        .style(style::card)
-        .on_press(Message::Play(vec![track.clone()], 0)),
+                    .wrapping(iced::widget::text::Wrapping::None),
+            )
+            .width(Length::Fill)
+            .clip(true),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center),
     )
-    .on_enter(Message::Hover(track.video_id.clone()))
-    .on_exit(Message::Unhover)
+    .width(Length::Fill)
+    .padding(Padding {
+        top: 0.0,
+        right: 12.0,
+        bottom: 0.0,
+        left: 0.0,
+    })
+    .style(style::grid_tile(app.accent))
+    .on_press(home_open(item, shelf, index))
     .into()
 }
 
-pub const HISTORY_SHELF: &str = "rangee-historique";
-pub const PLAYLISTS_SHELF: &str = "rangee-playlists";
+fn home_grid<'a>(app: &App, shelf: usize, items: &'a [HomeItem]) -> El<'a> {
+    // Albums, playlists, EP et artistes : les morceaux seuls font doublon avec l'historique.
+    let picked: Vec<(usize, &HomeItem)> = items
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| i.kind != HomeKind::Song)
+        .take(GRID_MAX)
+        .collect();
+    let columns = if app.center_width() < 760.0 { 2 } else { 4 };
+    let mut grid = column![].spacing(8);
+    for line in picked.chunks(columns) {
+        let mut r = row![].spacing(8);
+        for (index, item) in line {
+            r = r.push(grid_tile(app, item, shelf, *index));
+        }
+        // Dernière ligne incomplète : les cases gardent la même largeur.
+        for _ in line.len()..columns {
+            r = r.push(Space::new().width(Length::Fill));
+        }
+        grid = grid.push(r);
+    }
+    grid.into()
+}
 
 /// Rangée horizontale ; Shift + molette la fait glisser en douceur.
 fn shelf<'a>(items: Vec<El<'a>>, id: &'static str) -> El<'a> {
@@ -1615,30 +1759,31 @@ fn shelf<'a>(items: Vec<El<'a>>, id: &'static str) -> El<'a> {
     .into()
 }
 
-/// Sections de l'accueil liées au compte (écoutés récemment, playlists).
+/// La rangée « Réécouter » de YouTube devient la mosaïque du haut.
+fn is_listen_again(shelf: &HomeShelf) -> bool {
+    let t = shelf.title.to_lowercase();
+    t.starts_with("réécouter") || t.starts_with("listen again")
+}
+
+/// Sections de l'accueil liées au compte : mosaïque « Réécouter », playlists,
+/// puis les rangées de YouTube Music (mix, nouveautés, recommandations).
 pub fn home_sections(app: &App) -> Option<El<'_>> {
     app.lib.ready()?;
     let mut page = column![].spacing(28);
-    match &app.lib.history {
-        Some(Load::Ready(tracks)) if !tracks.is_empty() => {
-            page = page.push(
-                column![
-                    section_title("Écoutés récemment"),
-                    shelf(
-                        tracks.iter().take(40).map(|t| track_card(app, t)).collect(),
-                        HISTORY_SHELF
-                    ),
-                ]
-                .spacing(10),
-            );
-        }
+    let shelves: &[HomeShelf] = match &app.lib.home {
+        Some(Load::Ready(shelves)) => shelves,
         Some(Load::Loading) | None => {
-            page = page.push(column![
-                section_title("Écoutés récemment"),
-                loading("Chargement…")
-            ]);
+            page = page.push(loading("Chargement de l'accueil…"));
+            &[]
         }
-        _ => {}
+        Some(Load::Failed(_)) => &[],
+    };
+    if let Some((index, top)) = shelves.iter().enumerate().find(|(_, s)| is_listen_again(s))
+        && top.items.iter().any(|i| i.kind != HomeKind::Song)
+    {
+        page = page.push(
+            column![section_title(&top.title), home_grid(app, index, &top.items)].spacing(12),
+        );
     }
     if let Some(Load::Ready(list)) = &app.lib.playlists {
         let mut tiles = vec![liked_tile(app)];
@@ -1655,6 +1800,27 @@ pub fn home_sections(app: &App) -> Option<El<'_>> {
                 ]
                 .align_y(Alignment::Center),
                 shelf(tiles, PLAYLISTS_SHELF),
+            ]
+            .spacing(10),
+        );
+    }
+    let rows = shelves
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !is_listen_again(s))
+        .zip(HOME_SHELVES);
+    for ((index, s), id) in rows {
+        page = page.push(
+            column![
+                section_title(&s.title),
+                shelf(
+                    s.items
+                        .iter()
+                        .enumerate()
+                        .map(|(i, item)| home_card(app, item, index, i))
+                        .collect(),
+                    id
+                ),
             ]
             .spacing(10),
         );

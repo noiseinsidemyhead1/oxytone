@@ -331,6 +331,25 @@ pub fn link(_: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// Case de la mosaïque de l'accueil : fond discret, teinté au survol.
+pub fn grid_tile(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| button::Style {
+        background: Some(
+            match status {
+                button::Status::Hovered | button::Status::Pressed => alpha(accent, 0.16),
+                _ => SURFACE_HI,
+            }
+            .into(),
+        ),
+        text_color: TEXT,
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
 /// Carte d'album ou d'artiste dans une grille.
 pub fn card(_: &Theme, status: button::Status) -> button::Style {
     button::Style {

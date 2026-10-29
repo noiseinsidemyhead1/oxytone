@@ -5,6 +5,7 @@
 //! si YouTube change son API interne, seul ce crate est à adapter.
 
 pub mod account;
+pub mod home;
 mod raw;
 
 pub use raw::normalize_query;

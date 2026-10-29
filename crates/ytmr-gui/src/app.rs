@@ -124,7 +124,6 @@ pub enum Message {
     CycleRepeat,
     ToggleAutoplay,
     ToggleQueue,
-    JumpTo(QueueId),
     Remove(QueueId),
     ClearQueue,
     Hover(String),
@@ -140,6 +139,8 @@ pub enum Message {
     DragStart(Panel),
     DragMove(f32),
     DragEnd,
+    /// Glisser-déposer dans la file d'attente.
+    QueueDrag(QueueDrag),
     WindowResized(f32),
     /// Molette + Shift sur une rangée horizontale.
     WheelH(&'static str, f32),
@@ -177,6 +178,23 @@ pub enum Message {
 pub enum Panel {
     Left,
     Right,
+}
+
+/// Étapes d'un glisser-déposer dans la file (indices de la file affichée).
+#[derive(Debug, Clone, Copy)]
+pub enum QueueDrag {
+    Press(usize),
+    Over(usize),
+    Release,
+}
+
+/// Morceau saisi : d'où il part, au-dessus de quelle ligne il est.
+#[derive(Debug, Clone, Copy)]
+pub struct QueueDragState {
+    pub from: usize,
+    pub over: usize,
+    /// La souris a quitté la ligne de départ : ce n'est plus un simple clic.
+    pub moved: bool,
 }
 
 /// Partie visible d'une liste défilante.
@@ -284,6 +302,7 @@ pub struct App {
     pub queue_width: f32,
     window_width: f32,
     dragging: Option<Panel>,
+    pub queue_drag: Option<QueueDragState>,
     /// Point de départ du glissement : (x de la souris, largeur d'alors).
     drag_anchor: Option<(f32, f32)>,
     ui_file: Option<std::path::PathBuf>,
@@ -360,6 +379,7 @@ impl App {
             queue_width: RIGHT_DEFAULT,
             window_width: 1320.0,
             dragging: None,
+            queue_drag: None,
             drag_anchor: None,
             ui_file: Some(config.1.cache_dir.join("ui.json")),
             pending_route: None,
@@ -417,6 +437,15 @@ impl App {
                 _ => None,
             }));
         }
+        // Morceau saisi dans la file : il tombe au relâchement, où qu'il soit.
+        if self.queue_drag.is_some() {
+            subscriptions.push(iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::QueueDrag(QueueDrag::Release)),
+                _ => None,
+            }));
+        }
         if self.route == Route::NowPlaying {
             subscriptions.push(iced::event::listen_with(|event, _, _| match event {
                 iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
@@ -434,6 +463,60 @@ impl App {
             subscriptions.push(window::frames().map(Message::Frame));
         }
         Subscription::batch(subscriptions)
+    }
+
+    /// Largeur de la colonne centrale (entre les barres latérales).
+    pub fn center_width(&self) -> f32 {
+        let queue = if self.show_queue {
+            self.queue_width
+        } else {
+            0.0
+        };
+        (self.window_width - self.left_width - queue).max(0.0)
+    }
+
+    fn queue_drag_step(&mut self, step: QueueDrag) -> Task<Message> {
+        match step {
+            QueueDrag::Press(i) => {
+                self.queue_drag = Some(QueueDragState {
+                    from: i,
+                    over: i,
+                    moved: false,
+                });
+                Task::none()
+            }
+            QueueDrag::Over(i) => {
+                if let Some(d) = &mut self.queue_drag {
+                    d.moved |= i != d.from;
+                    d.over = i;
+                }
+                Task::none()
+            }
+            QueueDrag::Release => {
+                let Some(d) = self.queue_drag.take() else {
+                    return Task::none();
+                };
+                let Some(entry) = self.queue.entries.get(d.from) else {
+                    return Task::none();
+                };
+                let id = entry.id;
+                if !d.moved {
+                    return self.send(Command::JumpTo(id));
+                }
+                // Le morceau en cours reste en tête : rien ne passe devant lui.
+                let first = usize::from(self.queue.current.is_some());
+                if d.from < first || d.over == d.from {
+                    return Task::none();
+                }
+                let to = d.over.max(first);
+                // Affiché tout de suite ; le core confirme juste après.
+                let queue = Arc::make_mut(&mut self.queue);
+                let moved = queue.entries.remove(d.from);
+                let at = to.min(queue.entries.len());
+                queue.entries.insert(at, moved);
+                self.send(Command::Move { id, to })
+            }
+        }
     }
 
     fn backend(&self) -> Option<&Backend> {
@@ -1213,7 +1296,6 @@ impl App {
                 self.save_ui();
                 Task::none()
             }
-            Message::JumpTo(id) => self.send(Command::JumpTo(id)),
             Message::Remove(id) => self.send(Command::Remove(id)),
             Message::ClearQueue => self.send(Command::ClearUpcoming),
             Message::Hover(video_id) => {
@@ -1309,6 +1391,7 @@ impl App {
                 }
                 Task::none()
             }
+            Message::QueueDrag(step) => self.queue_drag_step(step),
             Message::DragEnd => {
                 self.dragging = None;
                 self.drag_anchor = None;

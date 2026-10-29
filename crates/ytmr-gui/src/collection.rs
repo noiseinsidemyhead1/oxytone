@@ -318,7 +318,7 @@ impl App {
     }
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
+pub(crate) fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
     let text = std::fs::read_to_string(path).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -327,14 +327,15 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
 pub fn heart<'a>(app: &App, on: bool, message: Message, tip: &str) -> El<'a> {
     crate::views::icon_tip(
         if on { Icon::HeartFilled } else { Icon::Heart },
-        18.0,
+        16.0,
         if on { app.accent } else { style::TEXT_DIM },
         message,
         tip.to_owned(),
     )
 }
 
-/// Carte avec un cœur à côté du titre.
+/// Carte avec un cœur à côté du titre (survol comme les autres cartes).
+/// Le titre est coupé avant le cœur : il ne passe plus dessous.
 fn card<'a>(
     app: &App,
     url: Option<&str>,
@@ -345,31 +346,38 @@ fn card<'a>(
     like: Option<El<'a>>,
 ) -> El<'a> {
     let id = app.url_cover(url);
+    let max = if like.is_some() { 16 } else { 20 };
     let mut title_row = row![
-        text(title)
-            .size(14)
-            .font(SEMIBOLD)
-            .wrapping(iced::widget::text::Wrapping::None)
-            .width(Length::Fill)
+        container(
+            text(crate::views::ellipsize(title, max))
+                .size(14)
+                .font(SEMIBOLD)
+                .wrapping(iced::widget::text::Wrapping::None)
+        )
+        .width(Length::Fill)
+        .clip(true)
     ]
     .align_y(Alignment::Center)
-    .spacing(4);
+    .spacing(2);
     if let Some(like) = like {
         title_row = title_row.push(like);
     }
     let body = column![
-        button(cover(app.cover(id.as_deref(), CARD), 164.0, radius))
-            .padding(0)
-            .style(style::link)
-            .on_press(open.clone()),
-        container(title_row).width(Length::Fixed(164.0)).clip(true),
-        text(subtitle)
+        cover(app.cover(id.as_deref(), CARD), 164.0, radius),
+        container(title_row).width(Length::Fixed(164.0)),
+        text(crate::views::ellipsize(&subtitle, 26).into_owned())
             .size(12)
             .color(style::TEXT_DIM)
+            .wrapping(iced::widget::text::Wrapping::None)
             .width(Length::Fixed(164.0)),
     ]
     .spacing(6);
-    container(body).padding(10).into()
+    // Le cœur est un bouton dans le bouton : il garde son clic pour lui.
+    button(body)
+        .padding(10)
+        .style(style::card)
+        .on_press(open)
+        .into()
 }
 
 fn sorted<T>(

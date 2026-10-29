@@ -32,6 +32,7 @@ use ytmapi_rs::{YtMusic, YtMusicBuilder};
 use ytmr_core::Track;
 use ytmr_core::track::parse_duration;
 
+use crate::home::HomeShelf;
 use crate::{AlbumSummary, ArtistSummary, CatalogError, largest_thumbnail};
 
 /// Playlist des titres likés.
@@ -294,6 +295,26 @@ impl Account {
         }
         self.yt.remove_playlist_items(edit_id(id), targets).await?;
         Ok(())
+    }
+
+    /// Rangées de l'accueil de YouTube Music (réécouter, mix, recommandations).
+    /// La page arrive en plusieurs morceaux : on en lit quelques-uns.
+    pub async fn home(&self) -> Result<Vec<HomeShelf>, CatalogError> {
+        const PAGES: usize = 4;
+        let raw = self.yt.raw_json_query(crate::home::home_query()).await?;
+        let mut page: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        let mut shelves = crate::home::parse_shelves(&page);
+        for _ in 1..PAGES {
+            let Some(token) = continuation_token(&page) else {
+                break;
+            };
+            let Ok(raw) = self.yt.raw_json_query(crate::home::home_next(&token)).await else {
+                break;
+            };
+            page = serde_json::from_str(&raw).unwrap_or(Value::Null);
+            shelves.extend(crate::home::parse_shelves(&page));
+        }
+        Ok(shelves)
     }
 
     /// Nom, @pseudo et photo du compte (menu « compte » de YouTube Music).
@@ -685,6 +706,25 @@ pub fn video_ids(tracks: &[Track]) -> std::collections::HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lecture seule : rangées de l'accueil.
+    #[tokio::test]
+    #[ignore = "nécessite YTMR_TEST_COOKIE"]
+    async fn reads_home() {
+        let cookie = std::env::var("YTMR_TEST_COOKIE").unwrap();
+        let account = Account::connect(&cookie).await.unwrap();
+        let shelves = account.home().await.unwrap();
+        for s in &shelves {
+            let kinds: Vec<_> = s.items.iter().map(|i| i.kind).collect();
+            println!(
+                "{} : {} cartes {:?}",
+                s.title,
+                s.items.len(),
+                &kinds[..kinds.len().min(4)]
+            );
+        }
+        assert!(!shelves.is_empty());
+    }
 
     /// Lecture seule : albums enregistrés et artistes suivis.
     #[tokio::test]
