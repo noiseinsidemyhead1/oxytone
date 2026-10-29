@@ -150,6 +150,31 @@ impl Queue {
         self.insert_at(at, tracks)
     }
 
+    /// Ajout de la radio : en mode aléatoire, les nouveaux titres sont répartis
+    /// au hasard dans la suite (sauf le tout prochain, déjà préchargé) au lieu
+    /// de s'empiler à la fin dans l'ordre de la radio.
+    pub fn append_mixed(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
+        let count = tracks.len();
+        let ids = self.append(tracks);
+        if self.unshuffled.is_none() {
+            return ids;
+        }
+        let first_free = self.current.map_or(0, |i| i + 2);
+        for _ in 0..count {
+            let Some(entry) = self.entries.pop() else {
+                break;
+            };
+            let len = self.entries.len();
+            let at = if first_free >= len {
+                len
+            } else {
+                self.rng.usize(first_free..=len)
+            };
+            self.entries.insert(at, entry);
+        }
+        ids
+    }
+
     /// Insère juste après le morceau courant (« lire ensuite »).
     pub fn insert_next(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
         let at = self.current.map_or(0, |i| i + 1);
@@ -323,6 +348,31 @@ mod tests {
 
     fn tracks(range: std::ops::Range<u32>) -> Vec<Track> {
         range.map(track).collect()
+    }
+
+    #[test]
+    fn radio_tracks_are_mixed_in_when_shuffled() {
+        let mut q = Queue::with_rng(fastrand::Rng::with_seed(3));
+        q.replace(tracks(0..4), 0);
+        q.set_shuffle(true);
+        let next = q.upcoming()[0].id;
+        q.append_mixed(tracks(10..30));
+        assert_eq!(q.entries().len(), 24);
+        assert_eq!(
+            q.upcoming()[0].id,
+            next,
+            "le prochain (préchargé) ne bouge pas"
+        );
+        let tail: Vec<_> = q.entries()[4..]
+            .iter()
+            .map(|e| e.track.title.clone())
+            .collect();
+        let in_order: Vec<_> = (10..30).map(|n| format!("titre {n}")).collect();
+        assert_ne!(tail, in_order, "les titres de la radio sont mélangés");
+        q.set_shuffle(false);
+        let titles: Vec<_> = q.entries().iter().map(|e| e.track.title.clone()).collect();
+        let all: Vec<_> = (0..4).chain(10..30).map(|n| format!("titre {n}")).collect();
+        assert_eq!(titles, all, "sans aléatoire, l'ordre d'origine revient");
     }
 
     fn titles(q: &Queue) -> Vec<String> {

@@ -30,6 +30,8 @@ pub const CARD: u32 = 320;
 pub const HERO: u32 = 640;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
+/// Attente maximale des pochettes avant d'afficher des résultats de recherche.
+const SEARCH_COVERS_WAIT: Duration = Duration::from_millis(700);
 /// Survol prolongé avant de préparer un morceau (évite de lancer yt-dlp en
 /// passant simplement la souris sur une liste).
 const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(250);
@@ -139,6 +141,15 @@ pub enum Message {
     /// Pochette préchargée en tâche de fond.
     BacklogCover(String, u32, Result<image::Handle, String>),
     Frame(std::time::Instant),
+    /// Résultats de recherche affichés même si des pochettes manquent encore.
+    SearchReveal(u64),
+    /// « Lecture » / « Aléatoire » de la page d'album ou d'artiste ouverte.
+    PlayAlbum(bool),
+    PlayArtist(bool),
+    ToggleFullscreen,
+    /// Clic sur le nom de l'artiste : (page connue, nom à chercher sinon).
+    OpenArtist(Option<String>, String),
+    ArtistFound(Result<Option<String>, String>),
     Lib(crate::library::Lib),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
@@ -213,7 +224,19 @@ pub struct App {
     pub artist: Option<(String, Load<Artist>)>,
     covers: HashMap<(String, u32), Option<image::Handle>>,
     accents: HashMap<String, Color>,
+    /// Teinte du morceau en cours (barre du bas, file), en fondu.
     pub accent: Color,
+    accent_fade: Fade,
+    /// Teinte de la page affichée (sa pochette), en fondu. Jamais mélangée
+    /// avec celle du morceau en cours.
+    pub page_accent: Color,
+    page_fade: Fade,
+    /// Requête dont les résultats sont affichés.
+    pub search_shown: String,
+    /// Résultats reçus, en attente de leurs pochettes (au plus ~0,7 s).
+    search_pending: Option<(u64, String, SearchAll)>,
+    search_inflight: bool,
+    pub fullscreen: bool,
     pub show_queue: bool,
     pub seek_preview: Option<f32>,
     muted_volume: Option<u8>,
@@ -274,6 +297,13 @@ impl App {
             covers: HashMap::new(),
             accents: HashMap::new(),
             accent: style::DEFAULT_ACCENT,
+            accent_fade: Fade::new(style::DEFAULT_ACCENT),
+            page_accent: style::DEFAULT_ACCENT,
+            page_fade: Fade::new(style::DEFAULT_ACCENT),
+            search_shown: String::new(),
+            search_pending: None,
+            search_inflight: false,
+            fullscreen: false,
             show_queue: true,
             seek_preview: None,
             muted_volume: None,
@@ -346,7 +376,11 @@ impl App {
             }));
         }
         // Une image par rafraîchissement de l'écran, seulement pendant une animation.
-        if self.scrolling.is_animating() || self.is_loading() {
+        if self.scrolling.is_animating()
+            || self.is_loading()
+            || self.accent_fade.is_running()
+            || self.page_fade.is_running()
+        {
             subscriptions.push(window::frames().map(Message::Frame));
         }
         Subscription::batch(subscriptions)
@@ -368,14 +402,6 @@ impl App {
     pub fn url_cover(&self, url: Option<&str>) -> Option<String> {
         let url = url?;
         self.backend().map(|b| b.covers.register(url))
-    }
-
-    /// Teinte tirée d'une pochette (celle du morceau en cours si inconnue).
-    pub fn accent_for(&self, cover_id: Option<&str>) -> Color {
-        cover_id
-            .and_then(|id| self.accents.get(id))
-            .copied()
-            .unwrap_or(self.accent)
     }
 
     /// Demande la teinte d'une pochette si elle n'est pas encore connue.
@@ -650,7 +676,7 @@ impl App {
     }
 
     pub fn is_loading(&self) -> bool {
-        self.pending_route.is_some() || self.lib.streaming.is_some()
+        self.pending_route.is_some() || self.lib.streaming.is_some() || self.search_inflight
     }
 
     /// Remet la page centrale en haut (nouvelle recherche dans une playlist…).
@@ -665,7 +691,9 @@ impl App {
         self.history.push(previous);
         self.scrolling.reset(PAGE_SCROLL);
         self.page_view.offset = 0.0;
-        Task::batch([self.open(route), scroll_top()])
+        let open = self.open(route);
+        self.update_page_accent();
+        Task::batch([open, scroll_top()])
     }
 
     /// Charge les données de la page (album, artiste) si besoin.
@@ -710,9 +738,14 @@ impl App {
     }
 
     fn run_search(&mut self) -> Task<Message> {
-        let query = self.search_query.trim().to_owned();
+        let query = ytmr_catalog::normalize_query(&self.search_query);
         if query.is_empty() {
             self.search = None;
+            self.search_inflight = false;
+            self.search_pending = None;
+            return Task::none();
+        }
+        if query == self.search_shown && matches!(self.search, Some(Load::Ready(_))) {
             return Task::none();
         }
         let Some(catalog) = self.backend().map(|b| Arc::clone(&b.catalog)) else {
@@ -723,6 +756,9 @@ impl App {
         if self.search.is_none() {
             self.search = Some(Load::Loading);
         }
+        self.search_inflight = true;
+        self.loading_since
+            .get_or_insert_with(std::time::Instant::now);
         Task::perform(
             async move { catalog.search_all(&query).await.map_err(|e| e.to_string()) },
             move |r| Message::SearchDone(seq, r),
@@ -760,7 +796,9 @@ impl App {
                     self.route = route.clone();
                     self.scrolling.reset(PAGE_SCROLL);
                     self.page_view.offset = 0.0;
-                    Task::batch([self.open(route), scroll_top()])
+                    let open = self.open(route);
+                    self.update_page_accent();
+                    Task::batch([open, scroll_top()])
                 }
                 None => Task::none(),
             },
@@ -797,11 +835,11 @@ impl App {
                 match result {
                     Ok(results) => {
                         let mut tasks = vec![self.want_track_covers(&results.songs, THUMB)];
-                        for album in &results.albums {
+                        for album in results.albums.iter().take(12) {
                             let id = self.url_cover(album.thumbnail_url.as_deref());
                             tasks.push(self.want_cover(id, CARD));
                         }
-                        for artist in &results.artists {
+                        for artist in results.artists.iter().take(8) {
                             let id = self.url_cover(artist.thumbnail_url.as_deref());
                             tasks.push(self.want_cover(id, CARD));
                         }
@@ -810,10 +848,19 @@ impl App {
                         for track in results.songs.iter().take(3).rev() {
                             tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
                         }
-                        self.search = Some(Load::Ready(results));
+                        // On attend les pochettes (0,7 s au plus) : les résultats
+                        // s'affichent d'un coup, complets.
+                        let query = ytmr_catalog::normalize_query(&self.search_query);
+                        self.search_pending = Some((seq, query, results));
+                        self.try_reveal_search(false);
+                        tasks.push(Task::perform(
+                            tokio::time::sleep(SEARCH_COVERS_WAIT),
+                            move |()| Message::SearchReveal(seq),
+                        ));
                         Task::batch(tasks)
                     }
                     Err(e) => {
+                        self.search_inflight = false;
                         self.search = Some(Load::Failed(e));
                         Task::none()
                     }
@@ -878,7 +925,67 @@ impl App {
                     }
                     Err(e) => tracing::debug!(error = %e, "jaquette indisponible"),
                 }
+                if self.search_pending.is_some() {
+                    self.try_reveal_search(false);
+                }
                 Task::none()
+            }
+            Message::SearchReveal(seq) => {
+                if self
+                    .search_pending
+                    .as_ref()
+                    .is_some_and(|(s, _, _)| *s == seq)
+                {
+                    self.try_reveal_search(true);
+                }
+                Task::none()
+            }
+            Message::PlayAlbum(shuffle) => match &self.album {
+                Some((_, Load::Ready(album))) => {
+                    let tracks = album.tracks.clone();
+                    self.play_list(tracks, shuffle)
+                }
+                _ => Task::none(),
+            },
+            Message::PlayArtist(shuffle) => match &self.artist {
+                Some((_, Load::Ready(artist))) => {
+                    let tracks = artist.songs.clone();
+                    self.play_list(tracks, shuffle)
+                }
+                _ => Task::none(),
+            },
+            Message::ToggleFullscreen => {
+                self.fullscreen = !self.fullscreen;
+                let mode = if self.fullscreen {
+                    window::Mode::Fullscreen
+                } else {
+                    window::Mode::Windowed
+                };
+                window::oldest().and_then(move |id| window::set_mode(id, mode))
+            }
+            Message::OpenArtist(id, name) => match id {
+                Some(id) => self.navigate(Route::Artist(id)),
+                // Pas d'identifiant (morceau de radio) : on cherche l'artiste par son nom.
+                None => {
+                    let Some(catalog) = self.backend().map(|b| Arc::clone(&b.catalog)) else {
+                        return Task::none();
+                    };
+                    self.loading_since
+                        .get_or_insert_with(std::time::Instant::now);
+                    self.search_inflight = true;
+                    Task::perform(
+                        async move { catalog.find_artist(&name).await.map_err(|e| e.to_string()) },
+                        Message::ArtistFound,
+                    )
+                }
+            },
+            Message::ArtistFound(result) => {
+                self.search_inflight = false;
+                match result {
+                    Ok(Some(id)) => self.navigate(Route::Artist(id)),
+                    Ok(None) => self.show_toast("Page de l'artiste introuvable".to_owned()),
+                    Err(e) => self.show_toast(format!("Recherche de l'artiste impossible : {e}")),
+                }
             }
             Message::AccentLoaded(id, result) => {
                 let Ok(rgb) = result else {
@@ -887,8 +994,9 @@ impl App {
                 let color = style::accent_from_rgb(rgb);
                 self.accents.insert(id.clone(), color);
                 if self.current_cover().as_deref() == Some(id.as_str()) {
-                    self.accent = color;
+                    self.accent_fade.set(self.accent, color);
                 }
+                self.update_page_accent();
                 Task::none()
             }
             Message::Play(tracks, start) => self.send(Command::PlayTracks { tracks, start }),
@@ -1051,9 +1159,14 @@ impl App {
                 Task::none()
             }
             Message::Frame(now) => {
-                if let Some(since) = self.loading_since {
+                if self.is_loading() {
+                    let since = *self.loading_since.get_or_insert(now);
                     self.loading_phase = now.saturating_duration_since(since).as_secs_f32();
+                } else {
+                    self.loading_since = None;
                 }
+                self.accent = self.accent_fade.at(now);
+                self.page_accent = self.page_fade.at(now);
                 self.scrolling.frame(now)
             }
             Message::WheelH(id, lines) => {
@@ -1075,6 +1188,92 @@ impl App {
             Message::Noop => Task::none(),
             Message::ShutdownDone => iced::exit(),
         }
+    }
+
+    /// Lecture d'une liste, dans l'ordre ou en aléatoire.
+    fn play_list(&mut self, tracks: Vec<Track>, shuffle: bool) -> Task<Message> {
+        if tracks.is_empty() {
+            return Task::none();
+        }
+        if shuffle {
+            self.update(Message::PlayShuffled(tracks))
+        } else {
+            self.send(Command::PlayTracks { tracks, start: 0 })
+        }
+    }
+
+    /// Affiche les résultats en attente si leurs pochettes sont là (ou `force`).
+    fn try_reveal_search(&mut self, force: bool) {
+        let Some((_, _, results)) = &self.search_pending else {
+            return;
+        };
+        let loaded = |id: Option<String>, size: u32| {
+            id.is_none_or(|id| matches!(self.covers.get(&(id, size)), Some(Some(_))))
+        };
+        let ready = results
+            .songs
+            .iter()
+            .take(10)
+            .all(|t| loaded(self.track_cover(t), THUMB))
+            && results
+                .albums
+                .iter()
+                .take(12)
+                .all(|a| loaded(self.url_cover(a.thumbnail_url.as_deref()), CARD))
+            && results
+                .artists
+                .iter()
+                .take(8)
+                .all(|a| loaded(self.url_cover(a.thumbnail_url.as_deref()), CARD));
+        if !(ready || force) {
+            return;
+        }
+        if let Some((_, query, results)) = self.search_pending.take() {
+            self.search_shown = query;
+            self.search = Some(Load::Ready(results));
+            self.search_inflight = false;
+        }
+    }
+
+    /// Pochette qui donne sa teinte à la page affichée.
+    fn page_cover(&self) -> Option<String> {
+        match &self.route {
+            Route::Album(id) => match &self.album {
+                Some((cur, Load::Ready(a))) if cur == id => {
+                    self.url_cover(a.thumbnail_url.as_deref())
+                }
+                _ => None,
+            },
+            Route::Artist(id) => match &self.artist {
+                Some((cur, Load::Ready(a))) if cur == id => {
+                    self.url_cover(a.thumbnail_url.as_deref())
+                }
+                _ => None,
+            },
+            Route::Playlist(id) => match &self.lib.playlist {
+                Some((cur, Load::Ready(p))) if cur == id => {
+                    if id == ytmr_catalog::account::LIKED_ID {
+                        p.tracks.first().and_then(|t| self.track_cover(t))
+                    } else {
+                        self.url_cover(p.thumbnail_url.as_deref())
+                    }
+                }
+                _ => None,
+            },
+            _ => self.current_cover(),
+        }
+    }
+
+    /// Fait glisser la teinte de la page vers celle de sa pochette (connue).
+    pub(crate) fn update_page_accent(&mut self) {
+        let target = match &self.route {
+            Route::Album(_) | Route::Artist(_) | Route::Playlist(_) => self
+                .page_cover()
+                .and_then(|id| self.accents.get(&id).copied())
+                .unwrap_or(style::NEUTRAL_ACCENT),
+            _ => self.accent_fade.to,
+        };
+        self.page_fade.set(self.page_accent, target);
     }
 
     pub fn current_cover(&self) -> Option<String> {
@@ -1101,9 +1300,10 @@ impl App {
                     return report;
                 }
                 let cover = self.current_cover();
-                if let Some(color) = cover.as_ref().and_then(|id| self.accents.get(id)) {
-                    self.accent = *color;
+                if let Some(color) = cover.as_ref().and_then(|id| self.accents.get(id)).copied() {
+                    self.accent_fade.set(self.accent, color);
                 }
+                self.update_page_accent();
                 Task::batch([
                     report,
                     self.want_cover(cover.clone(), HERO),
@@ -1136,9 +1336,8 @@ impl App {
             }
             Key::Named(key::Named::ArrowRight) => self.seek_by(10.0),
             Key::Named(key::Named::ArrowLeft) => self.seek_by(-10.0),
-            Key::Character("f" | "k") if modifiers.control() => {
-                Task::batch([self.navigate(Route::Search), operation::focus(SEARCH_INPUT)])
-            }
+            Key::Character("f" | "k") if modifiers.control() => operation::focus(SEARCH_INPUT),
+            Key::Named(key::Named::F11) => self.update(Message::ToggleFullscreen),
             Key::Named(key::Named::Escape) | Key::Named(key::Named::BrowserBack) => {
                 self.update(Message::Back)
             }
@@ -1156,6 +1355,60 @@ impl App {
             .map_or(f32::MAX, |d| d.as_secs_f32() - 1.0);
         let target = (self.state.position.as_secs_f32() + delta).clamp(0.0, max.max(0.0));
         self.send(Command::Seek(Duration::from_secs_f32(target)))
+    }
+}
+
+/// Durée du fondu entre deux teintes.
+const FADE: Duration = Duration::from_millis(600);
+
+/// Teinte qui glisse d'une couleur à l'autre (pas de changement brutal).
+#[derive(Debug, Clone, Copy)]
+struct Fade {
+    from: Color,
+    to: Color,
+    since: Option<std::time::Instant>,
+}
+
+impl Fade {
+    fn new(color: Color) -> Self {
+        Self {
+            from: color,
+            to: color,
+            since: None,
+        }
+    }
+
+    /// Nouvelle cible ; le fondu part de la couleur affichée `current`.
+    fn set(&mut self, current: Color, to: Color) {
+        if to == self.to {
+            return;
+        }
+        self.from = current;
+        self.to = to;
+        self.since = Some(std::time::Instant::now());
+    }
+
+    fn is_running(&self) -> bool {
+        self.since.is_some()
+    }
+
+    fn at(&mut self, now: std::time::Instant) -> Color {
+        let Some(since) = self.since else {
+            return self.to;
+        };
+        let t = (now.saturating_duration_since(since).as_secs_f32() / FADE.as_secs_f32()).min(1.0);
+        if t >= 1.0 {
+            self.since = None;
+            return self.to;
+        }
+        // Douce au départ et à l'arrivée.
+        let t = t * t * (3.0 - 2.0 * t);
+        let mix = |a: f32, b: f32| a + (b - a) * t;
+        Color::from_rgb(
+            mix(self.from.r, self.to.r),
+            mix(self.from.g, self.to.g),
+            mix(self.from.b, self.to.b),
+        )
     }
 }
 

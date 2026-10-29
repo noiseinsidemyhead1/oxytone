@@ -161,6 +161,7 @@ pub enum Lib {
     Removed(String, Result<(), String>),
     /// Lecture de la playlist ouverte à partir de la ligne donnée.
     PlayAt(usize),
+    PlayShuffled,
     /// Mise à jour forcée de la playlist ouverte.
     Refresh,
     ProfileLoaded(Result<Profile, String>),
@@ -500,6 +501,13 @@ impl App {
                 }
                 Task::batch(tasks)
             }
+            Lib::PlayShuffled => match &self.lib.playlist {
+                Some((_, Load::Ready(playlist))) if !playlist.tracks.is_empty() => {
+                    let tracks = playlist.tracks.clone();
+                    self.update(Message::PlayShuffled(tracks))
+                }
+                _ => Task::none(),
+            },
             Lib::PlayAt(index) => match &self.lib.playlist {
                 Some((_, Load::Ready(playlist))) if index < playlist.tracks.len() => {
                     let tracks = playlist.tracks.clone();
@@ -728,6 +736,9 @@ impl App {
                 let toast = self.show_toast(format!("« {} » ajouté à « {title} »", track.title));
                 let video_id = track.video_id.clone();
                 let target = playlist_id.clone();
+                // Affiché tout de suite : playlist ouverte, cache et compteur.
+                self.edit_cached(&playlist_id, |p| p.tracks.push(track.clone()));
+                self.bump_count(&playlist_id, 1);
                 let op = self
                     .lib
                     .ready()
@@ -735,8 +746,11 @@ impl App {
                 Task::batch([toast, call(op, move |r| Lib::Added(playlist_id.clone(), r))])
             }
             Lib::Added(playlist_id, result) => match result {
-                Ok(()) => self.refresh_if_open(&playlist_id),
-                Err(e) => self.show_toast(format!("Ajout refusé : {e}")),
+                Ok(()) => Task::none(),
+                Err(e) => Task::batch([
+                    self.show_toast(format!("Ajout refusé : {e}")),
+                    self.refresh_if_open(&playlist_id),
+                ]),
             },
             Lib::NewNameInput(name) => {
                 self.lib.new_name = name;
@@ -853,6 +867,10 @@ impl App {
                 };
                 if let Some(Load::Ready(list)) = &mut self.lib.playlists {
                     list.retain(|p| p.id != id);
+                    if let Some(dir) = &self.lib.cache_dir {
+                        write_list(dir, list);
+                        let _ = std::fs::remove_file(playlist_file(dir, &id));
+                    }
                 }
                 let toast = self.show_toast(format!("Playlist « {title} » supprimée"));
                 let nav = self.go_to(Route::Library);
@@ -871,12 +889,13 @@ impl App {
                 ]),
             },
             Lib::RemoveTrack(playlist_id, video_id) => {
-                if let Some((id, Load::Ready(p))) = &mut self.lib.playlist
-                    && *id == playlist_id
-                {
+                let mut removed = 0;
+                self.edit_cached(&playlist_id, |p| {
+                    let before = p.tracks.len();
                     p.tracks.retain(|t| t.video_id != video_id);
-                }
-                self.save_open_playlist();
+                    removed = before - p.tracks.len();
+                });
+                self.bump_count(&playlist_id, -(removed as i64));
                 let target = playlist_id.clone();
                 let op = self
                     .lib
@@ -916,6 +935,46 @@ impl App {
                 p.tracks.insert(0, track.clone());
             }
             self.save_open_playlist();
+        }
+    }
+
+    /// Modifie une playlist là où elle est : à l'écran si elle est ouverte,
+    /// sinon dans son cache disque (sa prochaine ouverture sera juste).
+    fn edit_cached(&mut self, playlist_id: &str, mut edit: impl FnMut(&mut Playlist)) {
+        if let Some((id, Load::Ready(p))) = &mut self.lib.playlist
+            && id == playlist_id
+        {
+            edit(p);
+            self.save_open_playlist();
+            return;
+        }
+        if let Some(dir) = &self.lib.cache_dir
+            && let Some(mut p) = read_playlist(dir, playlist_id)
+        {
+            edit(&mut p);
+            write_playlist(dir, &p);
+        }
+    }
+
+    /// Met à jour « N titres » sur la carte de la playlist.
+    fn bump_count(&mut self, playlist_id: &str, delta: i64) {
+        if delta == 0 {
+            return;
+        }
+        let Some(Load::Ready(list)) = &mut self.lib.playlists else {
+            return;
+        };
+        let Some(p) = list.iter_mut().find(|p| p.id == playlist_id) else {
+            return;
+        };
+        let digits: String = p.tracks_text.chars().filter(char::is_ascii_digit).collect();
+        let count = digits.parse::<i64>().unwrap_or(0) + delta;
+        p.tracks_text = match count.max(0) {
+            1 => "1 titre".to_owned(),
+            n => format!("{n} titres"),
+        };
+        if let Some(dir) = &self.lib.cache_dir {
+            write_list(dir, list);
         }
     }
 
@@ -1229,7 +1288,7 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     .join(" · ");
 
     let title_or_edit: El<'a> = match &app.lib.renaming {
-        Some(name) if !liked => text_input("Nom de la playlist", name)
+        Some(name) if !liked && playlist.owned => text_input("Nom de la playlist", name)
             .id(RENAME_INPUT)
             .on_input(|n| Message::Lib(Lib::RenameInput(n)))
             .on_submit(Message::Lib(Lib::RenameCommit))
@@ -1248,7 +1307,7 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     )]
     .spacing(4)
     .align_y(Alignment::Center);
-    if !liked {
+    if !liked && playlist.owned {
         actions = actions
             .push(icon_tip(
                 Icon::Edit,
@@ -1273,14 +1332,8 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
                 "Supprimer la playlist".into(),
             ));
     }
-    let progress: El<'a> = match &app.lib.streaming {
-        Some(s) if s.received > 0 || playlist.tracks.is_empty() => {
-            muted(format!("Mise à jour… {} titres reçus", s.received))
-        }
-        Some(_) => muted("Mise à jour…"),
-        None => Space::new().height(Length::Fixed(0.0)).into(),
-    };
-    let subtitle = column![muted(details), progress, title_or_edit, actions].spacing(6);
+    // Le nombre de titres (dans `details`) monte en direct pendant le chargement.
+    let subtitle = column![muted(details), title_or_edit, actions].spacing(6);
 
     let cover_id = if liked {
         playlist.tracks.first().and_then(|t| app.track_cover(t))
@@ -1298,7 +1351,10 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         },
         &playlist.title,
         subtitle.into(),
-        &playlist.tracks,
+        (!playlist.tracks.is_empty()).then_some((
+            Message::Lib(Lib::PlayAt(0)),
+            Message::Lib(Lib::PlayShuffled),
+        )),
     );
 
     // Seules les lignes visibles sont construites, et le clic ne transporte
@@ -1337,12 +1393,18 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         crate::views::virtual_list(shown.len(), crate::views::ROW_H, range, |row| {
             let i = shown[row];
             let track = &playlist.tracks[i];
+            // Les playlists des autres ne se modifient pas.
             let remove = if liked {
-                Message::Lib(Lib::ToggleLike(track.clone()))
+                Some(Message::Lib(Lib::ToggleLike(track.clone())))
+            } else if playlist.owned {
+                Some(Message::Lib(Lib::RemoveTrack(
+                    id.to_owned(),
+                    track.video_id.clone(),
+                )))
             } else {
-                Message::Lib(Lib::RemoveTrack(id.to_owned(), track.video_id.clone()))
+                None
             };
-            track_row(app, track, None, Message::Lib(Lib::PlayAt(i)), Some(remove))
+            track_row(app, track, None, Message::Lib(Lib::PlayAt(i)), remove)
         })
     };
     column![

@@ -162,6 +162,22 @@ impl Catalog {
         })
     }
 
+    /// Page d'artiste correspondant à un nom (morceaux de radio sans identifiant).
+    pub async fn find_artist(&self, name: &str) -> Result<Option<String>, CatalogError> {
+        let results = self
+            .client()
+            .await?
+            .search_artists(normalize_query(name))
+            .await?;
+        let wanted = name.trim().to_lowercase();
+        // Le nom exact d'abord, sinon le premier résultat.
+        let exact = results
+            .iter()
+            .find(|a| a.artist.trim().to_lowercase() == wanted)
+            .or(results.first());
+        Ok(exact.map(|a| a.browse_id.get_raw().to_owned()))
+    }
+
     pub async fn album(&self, id: &str) -> Result<Album, CatalogError> {
         let album = self
             .client()

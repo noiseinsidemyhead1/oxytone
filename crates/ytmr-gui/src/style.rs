@@ -11,6 +11,9 @@ use iced::{Background, Border, Color, Gradient, Shadow, Theme, Vector, color, gr
 // Noir pur pour le fond : les pixels d'un écran OLED s'éteignent vraiment.
 // Les panneaux restent à peine plus clairs pour garder la structure.
 pub const BG: Color = color!(0x000000);
+/// Teinte d'une page dont la pochette n'est pas encore analysée : neutre,
+/// pour ne pas emprunter celle du morceau en cours.
+pub const NEUTRAL_ACCENT: Color = color!(0xb8b8c4);
 pub const SURFACE: Color = color!(0x0a0a0c);
 pub const SURFACE_HI: Color = color!(0x16161a);
 pub const SURFACE_HOVER: Color = color!(0x1f1f25);

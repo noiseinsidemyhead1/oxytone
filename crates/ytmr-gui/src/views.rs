@@ -165,13 +165,16 @@ fn main_layout(app: &App) -> El<'_> {
         Route::Library => library::library_page(app),
         Route::Playlist(_) => library::playlist_page(app),
     };
-    let mut middle = row![
-        sidebar(app),
-        resize_handle(Panel::Left),
-        container(column![loading_bar(app), page])
-            .width(Length::Fill)
-            .height(Length::Fill)
-    ];
+    // La barre de chargement passe par-dessus la page : elle ne la décale pas
+    // (sinon une bande noire de 3 px restait au-dessus du dégradé).
+    let page = container(stack![page, loading_bar(app)])
+        .width(Length::Fill)
+        .height(Length::Fill);
+    // Grande vue « En cours » : plein écran, aucune barre latérale.
+    if app.route == Route::NowPlaying {
+        return column![page, player_bar(app)].into();
+    }
+    let mut middle = row![sidebar(app), resize_handle(Panel::Left), page];
     if app.show_queue {
         middle = middle
             .push(resize_handle(Panel::Right))
@@ -184,7 +187,7 @@ fn main_layout(app: &App) -> El<'_> {
 fn loading_bar(app: &App) -> El<'_> {
     const HEIGHT: f32 = 3.0;
     if !app.is_loading() {
-        return Space::new().height(Length::Fixed(HEIGHT)).into();
+        return Space::new().into();
     }
     // Un segment qui va et vient (de 0 à 1 puis retour, ~1,2 s par aller).
     let t = (app.loading_phase / 1.2) % 2.0;
@@ -232,7 +235,6 @@ fn resize_handle<'a>(panel: Panel) -> El<'a> {
 fn sidebar(app: &App) -> El<'_> {
     let nav = |label: &'static str, ic: Icon, route: Route| {
         let active = app.route == route
-            || (route == Route::Search && matches!(app.route, Route::Album(_) | Route::Artist(_)))
             || (route == Route::Library && matches!(app.route, Route::Playlist(_)));
         let color = if active { app.accent } else { style::TEXT_DIM };
         button(
@@ -267,7 +269,6 @@ fn sidebar(app: &App) -> El<'_> {
             search,
             column![
                 nav("Accueil", Icon::Home, Route::Home),
-                nav("Recherche", Icon::Search, Route::Search),
                 nav("Bibliothèque", Icon::Library, Route::Library),
             ]
             .spacing(4),
@@ -484,7 +485,11 @@ pub(crate) fn track_row<'a>(
         .current
         .as_ref()
         .is_some_and(|e| e.track.video_id == track.video_id);
-    let title_color = if playing { app.accent } else { style::TEXT };
+    let title_color = if playing {
+        app.page_accent
+    } else {
+        style::TEXT
+    };
     let leading: El<'a> = match number {
         Some(n) => container(text(n.to_string()).size(14).color(style::TEXT_FAINT))
             .width(Length::Fixed(28.0))
@@ -520,7 +525,7 @@ pub(crate) fn track_row<'a>(
             button(row_content)
                 .width(Length::Fill)
                 .padding(Padding::from([6, 10]))
-                .style(style::row(playing, app.accent))
+                .style(style::row(playing, app.page_accent))
                 .on_press(on_play),
         )
         .on_enter(Message::Hover(track.video_id.clone()))
@@ -668,6 +673,27 @@ fn now_playing(app: &App) -> El<'_> {
         );
     }
     info = info.push(quality_badge(app));
+    info = info.push(
+        row![
+            button(text("Revenir").size(13).font(SEMIBOLD))
+                .padding(Padding::from([8, 16]))
+                .style(style::pill_ghost)
+                .on_press(Message::Back),
+            button(
+                text(if app.fullscreen {
+                    "Quitter le plein écran (F11)"
+                } else {
+                    "Plein écran (F11)"
+                })
+                .size(13)
+                .font(SEMIBOLD)
+            )
+            .padding(Padding::from([8, 16]))
+            .style(style::pill_ghost)
+            .on_press(Message::ToggleFullscreen),
+        ]
+        .spacing(10),
+    );
     container(
         row![big, info.width(Length::Fill)]
             .spacing(40)
@@ -732,17 +758,36 @@ fn quality_badge(app: &App) -> El<'_> {
 }
 
 fn search_page(app: &App) -> El<'_> {
+    let query = app.search_query.trim();
+    let invite = |title: &'static str, hint: &'static str| -> El<'_> {
+        container(
+            column![
+                icon(Icon::Search, 40.0, style::TEXT_FAINT),
+                text(title).size(24).font(BOLD),
+                muted(hint),
+            ]
+            .spacing(12)
+            .align_x(Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into()
+    };
+    if query.is_empty() {
+        return invite(
+            "Que veux-tu écouter ?",
+            "Tape un titre, un artiste ou un album dans la barre de recherche.",
+        );
+    }
+    // Les résultats précédents restent affichés pendant la recherche suivante
+    // (barre de chargement en haut) : pas de page « Chargement… ».
     let body: El<'_> = match &app.search {
-        None => container(muted("Tape quelque chose dans la recherche."))
-            .padding(Padding::from([40, 0]))
-            .into(),
-        Some(Load::Loading) => loading("Recherche…"),
+        None | Some(Load::Loading) => return invite("Recherche…", " "),
         Some(Load::Failed(e)) => error_box(e),
         Some(Load::Ready(results)) => search_results(app, results),
     };
     scroll_page(column![
         container(
-            text(format!("Résultats pour « {} »", app.search_query.trim()))
+            text(format!("Résultats pour « {} »", app.search_shown))
                 .size(26)
                 .font(BOLD)
         )
@@ -814,9 +859,12 @@ pub(crate) fn page_header<'a>(
     kicker: String,
     title: &'a str,
     subtitle: El<'a>,
-    tracks: &[Track],
+    // (lecture, aléatoire) ; `None` pour une liste vide.
+    play: Option<(Message, Message)>,
 ) -> El<'a> {
-    let accent = app.accent_for(cover_id.as_deref());
+    let (play, shuffle) = play.unzip();
+    // Une seule teinte par page : celle de sa pochette, jamais celle du morceau en cours.
+    let accent = app.page_accent;
     let art = container(cover(app.cover(cover_id.as_deref(), HERO), 220.0, radius))
         .style(style::cover_frame_round(radius));
     let actions = row![
@@ -830,7 +878,7 @@ pub(crate) fn page_header<'a>(
         )
         .padding(Padding::from([10, 22]))
         .style(style::pill(accent))
-        .on_press_maybe((!tracks.is_empty()).then(|| Message::Play(tracks.to_vec(), 0))),
+        .on_press_maybe(play),
         button(
             row![
                 icon(Icon::Shuffle, 16.0, style::TEXT),
@@ -841,7 +889,7 @@ pub(crate) fn page_header<'a>(
         )
         .padding(Padding::from([10, 20]))
         .style(style::pill_ghost)
-        .on_press_maybe((!tracks.is_empty()).then(|| Message::PlayShuffled(tracks.to_vec()))),
+        .on_press_maybe(shuffle),
     ]
     .spacing(12);
     let header = container(
@@ -915,7 +963,7 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
         album.kind.to_uppercase(),
         &album.title,
         subtitle.into(),
-        &album.tracks,
+        (!album.tracks.is_empty()).then_some((Message::PlayAlbum(false), Message::PlayAlbum(true))),
     );
     let mut list = column![].spacing(2);
     for (i, track) in album.tracks.iter().enumerate() {
@@ -961,7 +1009,8 @@ fn artist_body<'a>(app: &'a App, artist: &'a Artist) -> El<'a> {
         "ARTISTE".to_owned(),
         &artist.name,
         subtitle,
-        &artist.songs,
+        (!artist.songs.is_empty())
+            .then_some((Message::PlayArtist(false), Message::PlayArtist(true))),
     );
     let mut page = column![].spacing(28);
     if !artist.songs.is_empty() {
@@ -1112,7 +1161,17 @@ fn player_bar(app: &App) -> El<'_> {
                     .style(style::link)
                     .on_press(Message::Navigate(Route::NowPlaying)),
                 container(
-                    column![title, line(&track.artist, 13).color(style::TEXT_DIM)].spacing(3)
+                    column![
+                        title,
+                        button(line(&track.artist, 13).color(style::TEXT_DIM))
+                            .padding(0)
+                            .style(style::link)
+                            .on_press(Message::OpenArtist(
+                                track.artist_id.clone(),
+                                main_artist(&track.artist).to_owned()
+                            )),
+                    ]
+                    .spacing(3)
                 )
                 .clip(true),
                 account_buttons(app, track),
@@ -1261,6 +1320,16 @@ Ajoute des titres similaires quand la file se termine",
 }
 
 // ----- formatage -----
+
+/// Premier nom d'une liste d'artistes (« A, B & C » → « A »).
+fn main_artist(artists: &str) -> &str {
+    artists
+        .split([',', '&'])
+        .next()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .unwrap_or(artists)
+}
 
 fn on_off(on: bool) -> &'static str {
     if on { "activée" } else { "désactivée" }

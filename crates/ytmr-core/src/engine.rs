@@ -297,6 +297,8 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         paused: false,
         radio_inflight: false,
         radio_seed: None,
+        radio_used: HashSet::new(),
+        radio_retries: 0,
         warming: HashSet::new(),
         warm_wanted: VecDeque::new(),
         resume_at,
@@ -366,6 +368,10 @@ struct Engine<P, R, C> {
     radio_inflight: bool,
     /// Dernier morceau ayant servi de graine à la radio (évite de redemander en boucle).
     radio_seed: Option<QueueId>,
+    /// Morceaux déjà utilisés comme graine (`video_id`).
+    radio_used: HashSet<String>,
+    /// Essais avec une autre graine quand la radio n'apporte que des doublons.
+    radio_retries: u8,
     /// Morceaux en cours de résolution d'anticipation.
     warming: HashSet<String>,
     /// Morceaux à résoudre d'avance, par ordre de priorité.
@@ -510,6 +516,11 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             }
             Command::SetAutoplay(on) => {
                 self.state.autoplay = on;
+                if on {
+                    // Remise en route : la radio repart du morceau courant.
+                    self.radio_seed = None;
+                    self.radio_retries = 0;
+                }
                 self.refresh_preload().await;
                 Ok(())
             }
@@ -861,14 +872,43 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             return;
         }
         self.radio_seed = Some(seed.id);
+        self.radio_retries = 0;
+        let video_id = seed.track.video_id.clone();
+        self.fetch_radio(video_id);
+    }
+
+    fn fetch_radio(&mut self, video_id: String) {
+        self.radio_used.insert(video_id.clone());
         self.radio_inflight = true;
         let radio = Arc::clone(&self.radio);
-        let video_id = seed.track.video_id.clone();
         self.tasks.spawn(async move {
             TaskDone::Radio {
                 result: radio.radio(&video_id).await,
             }
         });
+    }
+
+    /// Nouvelle graine pour la radio, parmi les derniers morceaux de la file.
+    fn retry_radio(&mut self) {
+        const MAX_RETRIES: u8 = 3;
+        if self.radio_retries >= MAX_RETRIES || !self.state.autoplay {
+            return;
+        }
+        self.radio_retries += 1;
+        let candidates: Vec<String> = self
+            .queue
+            .entries()
+            .iter()
+            .rev()
+            .take(30)
+            .map(|e| e.track.video_id.clone())
+            .filter(|v| !self.radio_used.contains(v))
+            .collect();
+        if candidates.is_empty() {
+            return;
+        }
+        let seed = candidates[fastrand::usize(..candidates.len())].clone();
+        self.fetch_radio(seed);
     }
 
     async fn on_task(&mut self, done: TaskDone) {
@@ -953,11 +993,17 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                             }
                         }
                         tracing::debug!(added = fresh.len(), "radio");
-                        if !fresh.is_empty() {
+                        if fresh.is_empty() {
+                            // Tout était déjà dans la file (radio déjà jouée depuis ce
+                            // morceau) : on repart d'un autre titre récent.
+                            self.retry_radio();
+                            return;
+                        }
+                        {
                             let was_idle_at_end = self.current_entry.is_none()
                                 && self.state.status == Status::Idle
                                 && self.queue.current().is_some();
-                            let ids = self.queue.append(fresh);
+                            let ids = self.queue.append_mixed(fresh);
                             self.queue_dirty = true;
                             if was_idle_at_end && let Some(&first) = ids.first() {
                                 // La file s'était épuisée en attendant la radio.
@@ -1507,6 +1553,30 @@ mod tests {
                 .contains(&Call::Enqueue("src:v10:Quality".into()))
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn radio_comes_back_after_being_switched_off_and_on() {
+        let player = FakePlayer::new();
+        let radio = vec![track(10), track(11), track(12)];
+        let core = start(&player, false, radio);
+        core.send(Command::PlayTracks {
+            tracks: tracks(0..1),
+            start: 0,
+        })
+        .await
+        .unwrap();
+        core.send(Command::SetAutoplay(true)).await.unwrap();
+        until("radio ajoutée", || core.queue().entries.len() == 4).await;
+        core.send(Command::SetAutoplay(false)).await.unwrap();
+        core.send(Command::PlayTracks {
+            tracks: tracks(0..1),
+            start: 0,
+        })
+        .await
+        .unwrap();
+        core.send(Command::SetAutoplay(true)).await.unwrap();
+        until("radio de nouveau", || core.queue().entries.len() == 4).await;
     }
 
     #[tokio::test(start_paused = true)]
