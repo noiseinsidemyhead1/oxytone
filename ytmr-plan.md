@@ -28,7 +28,8 @@ ytmr/                      (workspace Cargo)
 │   ├── ytmr-api/         serveur HTTP + WebSocket (axum) pour le CYD et autres clients
 │   ├── ytmr-media/       jaquettes : cache disque, resize, conversion RGB565
 │   ├── ytmr-os/          MPRIS (Linux) / SMTC (Windows) via souvlaki
-│   └── ytmr-gui/         interface iced
+│   └── ytmr-gui/         fenêtre native (wry + tao) qui affiche l'interface web
+├── web/                  interface Svelte 5 + Vite, compilée et embarquée dans le binaire
 └── apps/
     ├── ytmr/             binaire GUI (assemble tout)
     └── ytmr-cli/         binaire headless (debug, usage sans GUI)
@@ -43,7 +44,7 @@ ytmr/                      (workspace Cargo)
 | Abstraction lecture | trait `Player` | permet de passer à `libmpv2` (intégré) ou `rodio` plus tard sans toucher au reste |
 | Async | `tokio` | standard, requis par ytmapi-rs et axum |
 | API | `axum` (HTTP + WebSocket) | léger, idiomatique |
-| GUI | `iced` | pur Rust, rendu GPU (wgpu), architecture Elm prévisible |
+| GUI | Svelte 5 + Vite dans une webview `wry` + `tao` | interface web soignée et légère (~20 Ko de JS), fenêtre native (WebView2 / WebKitGTK) ; la même UI marche aussi dans un navigateur ou sur téléphone |
 | Intégration OS | `souvlaki` | une seule API pour MPRIS (Linux) et SMTC (Windows) : touches média, overlay Windows |
 | Images | `image` + cache disque | resize et encodage des jaquettes |
 | Config / chemins | `serde` + `toml` + `directories` | `~/.config/ytmr` sous Linux, `%APPDATA%\ytmr` sous Windows |
@@ -54,7 +55,8 @@ ytmr/                      (workspace Cargo)
 ### Flux de données
 
 ```
-GUI (iced) ──commandes──▶ core ◀──commandes── API (axum) ◀── CYD / téléphone
+UI web (webview) ──HTTP/WS──▶ API (axum) ──commandes──▶ core
+CYD / téléphone  ──HTTP/WS──▶ API (axum)
                             │
               événements (tokio::broadcast)
                             │
@@ -64,7 +66,7 @@ GUI (iced) ──commandes──▶ core ◀──commandes── API (axum) ◀
      (mpv)    (ytmapi-rs)     (jaquettes)  (souvlaki)
 ```
 
-Le `core` est la seule source de vérité. La GUI et l'API ne sont que deux télécommandes équivalentes.
+Le `core` est la seule source de vérité. L'UI web et le deck CYD sont deux clients de la même API.
 
 ## 3. API pour le CYD (nouvelle, sur mesure)
 
@@ -107,17 +109,17 @@ Validation : tests unitaires sur la file d'attente ; enchaînement automatique d
 `ytmr-api` + `ytmr-media` (cache, resize, RGB565).
 Validation : `curl` sur toutes les routes, client WS de test (`websocat`), une jaquette RGB565 décodée correctement par un petit script de vérification.
 
-**Phase 4 — Firmware CYD**
+**Phase 4 — Interface web** *(ex-phase 6, avancée à la demande de l'utilisateur le 2026-10-29 ; remplace iced)*
+Front Svelte 5 + Vite dans `web/`, embarqué dans le binaire ; fenêtre native wry + tao qui charge l'UI servie par `ytmr-api`. Routes d'API en plus pour l'UI : recherche, album, artiste, ajout à la file. Vues : recherche, artiste, album, file d'attente, lecteur avec grande jaquette. Jaquettes servies redimensionnées en WebP/JPEG par `ytmr-media`.
+Validation : navigation fluide, jaquettes instantanées depuis le cache, mesures RAM/CPU et temps de démarrage notés dans le README.
+
+**Phase 5 — Firmware CYD**
 Adapter le firmware à la nouvelle API (WS pour l'état, HTTP pour les commandes et la jaquette RGB565) et supprimer le relais Python.
 Validation : le deck affiche titre, progression et jaquette, et contrôle la lecture.
 
-**Phase 5 — Authentification et bibliothèque**
+**Phase 6 — Authentification et bibliothèque**
 Cookie navigateur (`cookie.txt`), playlists, likes, historique, bibliothèque.
 Validation : les playlists perso s'affichent et se lisent.
-
-**Phase 6 — GUI iced**
-Vues : recherche, artiste, album, playlist, file d'attente, lecteur. Jaquettes chargées en async, UI jamais bloquée.
-Validation : navigation fluide, mesures RAM/CPU relevées et notées dans le README.
 
 **Phase 7 — Intégration OS**
 souvlaki (MPRIS / SMTC), touches média, notification de changement de piste, icône de tray (optionnelle).

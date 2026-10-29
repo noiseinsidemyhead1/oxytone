@@ -8,6 +8,7 @@ Client YouTube Music natif en Rust (CachyOS + Windows 11). Le plan de référenc
 - **Jamais d'extraction de flux YouTube** (signature, `n`, PO tokens). La lecture passe exclusivement par mpv (processus fils, JSON IPC) qui appelle yt-dlp.
 - `ytmr-core` est la seule source de vérité. La GUI et l'API envoient des commandes et s'abonnent aux événements (`broadcast` pour les événements, `watch` pour l'état courant). Aucune logique métier dans la GUI ou l'API.
 - Lecture derrière un trait async `Player`.
+- **Pas de GUI iced** (abandonnée le 2026-10-29) : l'interface est une app web Svelte 5 + Vite (`web/`), embarquée dans le binaire, affichée dans une fenêtre native wry + tao qui charge l'UI servie par `ytmr-api`. L'UI ne parle qu'à l'API HTTP/WS, comme le deck CYD. Priorité : rapidité (jaquettes pré-redimensionnées et en cache côté Rust, bundle léger) et design soigné.
 - N'inventer aucune API de crate : `cargo add`, puis vérifier les signatures dans `~/.cargo/registry/src` ou sur docs.rs (critique pour ytmapi-rs, souvlaki et iced).
 - Pas de `unwrap()`/`expect()` hors tests (lint clippy du workspace). `thiserror` dans les libs, `anyhow` dans les binaires, logs avec `tracing`.
 - `#[cfg(windows)]` / `#[cfg(unix)]` uniquement là où c'est inévitable (IPC mpv). Chemins via `directories` (`ytmr_core::AppPaths`).
@@ -64,8 +65,8 @@ Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque
 | 1 — Lecture headless (catalogue, mpv IPC, CLI) | validée sous Windows ; à vérifier sous CachyOS |
 | 2 — Core et file d'attente | à faire |
 | 3 — API et jaquettes | à faire |
-| 4 — Firmware CYD | à faire |
-| 5 — Authentification et bibliothèque | à faire |
-| 6 — GUI iced | à faire |
+| 4 — Interface web (Svelte 5 + Vite, fenêtre wry/tao) | à faire |
+| 5 — Firmware CYD | à faire |
+| 6 — Authentification et bibliothèque | à faire |
 | 7 — Intégration OS | à faire |
 | 8 — Packaging | à faire |
