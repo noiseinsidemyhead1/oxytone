@@ -133,6 +133,11 @@ pub enum Message {
     DragMove(f32),
     DragEnd,
     WindowResized(f32),
+    /// Molette + Shift sur une rangée horizontale.
+    WheelH(&'static str, f32),
+    ShelfScrolled(&'static str, iced::widget::scrollable::Viewport),
+    /// Pochette préchargée en tâche de fond.
+    BacklogCover(String, u32, Result<image::Handle, String>),
     Frame(std::time::Instant),
     Lib(crate::library::Lib),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
@@ -224,7 +229,17 @@ pub struct App {
     pub queue_width: f32,
     window_width: f32,
     dragging: Option<Panel>,
+    /// Point de départ du glissement : (x de la souris, largeur d'alors).
+    drag_anchor: Option<(f32, f32)>,
     ui_file: Option<std::path::PathBuf>,
+    /// Page demandée mais pas encore chargée : on reste sur la page actuelle
+    /// (barre de chargement en haut) et on y passe dès que c'est prêt.
+    pub pending_route: Option<Route>,
+    /// Début de l'animation de la barre de chargement.
+    pub loading_since: Option<std::time::Instant>,
+    pub loading_phase: f32,
+    cover_backlog: std::collections::VecDeque<(String, u32)>,
+    backlog_inflight: usize,
     shutting_down: bool,
 }
 
@@ -274,9 +289,20 @@ impl App {
             queue_width: RIGHT_DEFAULT,
             window_width: 1320.0,
             dragging: None,
-            ui_file: None,
+            drag_anchor: None,
+            ui_file: Some(config.1.cache_dir.join("ui.json")),
+            pending_route: None,
+            loading_since: None,
+            loading_phase: 0.0,
+            cover_backlog: std::collections::VecDeque::new(),
+            backlog_inflight: 0,
             shutting_down: false,
         };
+        let mut app = app;
+        // Largeurs des barres et cache de la bibliothèque disponibles dès
+        // l'ouverture, avant même que le backend ait fini de démarrer.
+        app.load_ui();
+        app.lib.cache_dir = Some(config.1.cache_dir.join("library"));
         (app, start)
     }
 
@@ -320,7 +346,7 @@ impl App {
             }));
         }
         // Une image par rafraîchissement de l'écran, seulement pendant une animation.
-        if self.scrolling.is_animating() {
+        if self.scrolling.is_animating() || self.is_loading() {
             subscriptions.push(window::frames().map(Message::Frame));
         }
         Subscription::batch(subscriptions)
@@ -464,6 +490,63 @@ impl App {
         self.want_track_covers(&tracks, THUMB)
     }
 
+    /// Pochettes à précharger en tâche de fond (après celles qui sont visibles).
+    pub(crate) fn backlog_covers(
+        &mut self,
+        ids: impl IntoIterator<Item = String>,
+        size: u32,
+    ) -> Task<Message> {
+        for id in ids {
+            if !self.covers.contains_key(&(id.clone(), size)) {
+                self.cover_backlog.push_back((id, size));
+            }
+        }
+        self.pump_backlog()
+    }
+
+    fn pump_backlog(&mut self) -> Task<Message> {
+        const MAX_BACKLOG_INFLIGHT: usize = 3;
+        let Some(covers) = self.backend().map(|b| Arc::clone(&b.covers)) else {
+            return Task::none();
+        };
+        let mut tasks = Vec::new();
+        while self.backlog_inflight < MAX_BACKLOG_INFLIGHT {
+            let Some((id, size)) = self.cover_backlog.pop_front() else {
+                break;
+            };
+            if self.covers.contains_key(&(id.clone(), size)) {
+                continue;
+            }
+            self.covers.insert((id.clone(), size), None);
+            self.backlog_inflight += 1;
+            let covers = Arc::clone(&covers);
+            tasks.push(Task::perform(
+                async move {
+                    let result = covers
+                        .get_rgba(&id, size)
+                        .await
+                        .map(|rgba| image::Handle::from_rgba(size, size, rgba))
+                        .map_err(|e| e.to_string());
+                    (id, result)
+                },
+                move |(id, result)| Message::BacklogCover(id, size, result),
+            ));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Pochettes des cartes de la bibliothèque.
+    pub(crate) fn want_list_covers(&mut self) -> Task<Message> {
+        let ids: Vec<Option<String>> = match &self.lib.playlists {
+            Some(Load::Ready(list)) => list
+                .iter()
+                .map(|p| self.url_cover(p.thumbnail_url.as_deref()))
+                .collect(),
+            _ => return Task::none(),
+        };
+        Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)))
+    }
+
     fn load_ui(&mut self) {
         let Some(path) = &self.ui_file else {
             return;
@@ -511,8 +594,73 @@ impl App {
 
     fn navigate(&mut self, route: Route) -> Task<Message> {
         if self.route == route {
+            // Re-cliquer sur la pochette en grand ramène à la page d'avant.
+            return if route == Route::NowPlaying {
+                self.update(Message::Back)
+            } else {
+                Task::none()
+            };
+        }
+        if self.pending_route.as_ref() == Some(&route) {
             return Task::none();
         }
+        if self.needs_loading(&route) {
+            // On charge d'abord, on change de page ensuite.
+            self.pending_route = Some(route.clone());
+            self.loading_since = Some(std::time::Instant::now());
+            return self.open(route);
+        }
+        self.pending_route = None;
+        self.switch_to(route)
+    }
+
+    /// Page dont les données ne sont pas encore là (ni en mémoire, ni en cache).
+    fn needs_loading(&self, route: &Route) -> bool {
+        match route {
+            Route::Album(id) => !matches!(&self.album, Some((cur, Load::Ready(_))) if cur == id),
+            Route::Artist(id) => !matches!(&self.artist, Some((cur, Load::Ready(_))) if cur == id),
+            Route::Playlist(id) => {
+                let shown = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if cur == id);
+                !shown && !crate::library::has_cache(&self.lib, id)
+            }
+            _ => false,
+        }
+    }
+
+    /// Données arrivées pour `route` : si on l'attendait, on y va.
+    pub(crate) fn arrived(&mut self, route: &Route) -> Task<Message> {
+        if self.pending_route.as_ref() == Some(route) {
+            self.pending_route = None;
+            self.loading_since = None;
+            self.switch_to(route.clone())
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Le chargement attendu a échoué : on reste où on est, avec un message.
+    pub(crate) fn arrival_failed(&mut self, route: &Route, error: &str) -> Task<Message> {
+        if self.pending_route.as_ref() == Some(route) {
+            self.pending_route = None;
+            self.loading_since = None;
+            self.show_toast(format!("Chargement impossible : {error}"))
+        } else {
+            Task::none()
+        }
+    }
+
+    pub fn is_loading(&self) -> bool {
+        self.pending_route.is_some() || self.lib.streaming.is_some()
+    }
+
+    /// Remet la page centrale en haut (nouvelle recherche dans une playlist…).
+    pub(crate) fn scroll_page_top(&mut self) -> Task<Message> {
+        self.scrolling.reset(PAGE_SCROLL);
+        self.page_view.offset = 0.0;
+        scroll_top()
+    }
+
+    fn switch_to(&mut self, route: Route) -> Task<Message> {
         let previous = std::mem::replace(&mut self.route, route.clone());
         self.history.push(previous);
         self.scrolling.reset(PAGE_SCROLL);
@@ -554,7 +702,7 @@ impl App {
                 )
             }
             Route::Search => operation::focus(SEARCH_INPUT),
-            Route::Library => self.load_playlists(),
+            Route::Library => Task::batch([self.load_playlists(), self.want_list_covers()]),
             Route::Playlist(id) => self.open_playlist(id),
             Route::Home => self.refresh_home(),
             Route::NowPlaying => Task::none(),
@@ -592,8 +740,6 @@ impl App {
                         self.lib.liked = liked.tracks.iter().map(|t| t.video_id.clone()).collect();
                         self.lib.liked_count = Some(liked.tracks.len());
                     }
-                    self.ui_file = cache_dir.parent().map(|d| d.join("ui.json"));
-                    self.load_ui();
                     self.lib.cache_dir = Some(cache_dir);
                     self.phase = Phase::Ready(backend);
                     // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
@@ -687,12 +833,14 @@ impl App {
                         for track in album.tracks.iter().take(3).rev() {
                             tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
                         }
-                        self.album = Some((id, Load::Ready(album)));
+                        self.album = Some((id.clone(), Load::Ready(album)));
+                        tasks.push(self.arrived(&Route::Album(id)));
                         Task::batch(tasks)
                     }
                     Err(e) => {
+                        let failed = self.arrival_failed(&Route::Album(id.clone()), &e);
                         self.album = Some((id, Load::Failed(e)));
-                        Task::none()
+                        failed
                     }
                 }
             }
@@ -712,12 +860,14 @@ impl App {
                             let id = self.url_cover(album.thumbnail_url.as_deref());
                             tasks.push(self.want_cover(id, CARD));
                         }
-                        self.artist = Some((id, Load::Ready(artist)));
+                        self.artist = Some((id.clone(), Load::Ready(artist)));
+                        tasks.push(self.arrived(&Route::Artist(id)));
                         Task::batch(tasks)
                     }
                     Err(e) => {
+                        let failed = self.arrival_failed(&Route::Artist(id.clone()), &e);
                         self.artist = Some((id, Load::Failed(e)));
-                        Task::none()
+                        failed
                     }
                 }
             }
@@ -867,21 +1017,32 @@ impl App {
             }
             Message::DragStart(panel) => {
                 self.dragging = Some(panel);
+                self.drag_anchor = None;
                 Task::none()
             }
             Message::DragMove(x) => {
-                match self.dragging {
-                    Some(Panel::Left) => self.left_width = x.clamp(LEFT_RANGE.0, LEFT_RANGE.1),
-                    Some(Panel::Right) => {
-                        self.queue_width =
-                            (self.window_width - x).clamp(RIGHT_RANGE.0, RIGHT_RANGE.1);
+                // Relatif au point de départ : ne dépend pas de la largeur de la fenêtre.
+                let Some(panel) = self.dragging else {
+                    return Task::none();
+                };
+                let current = match panel {
+                    Panel::Left => self.left_width,
+                    Panel::Right => self.queue_width,
+                };
+                let (x0, w0) = *self.drag_anchor.get_or_insert((x, current));
+                match panel {
+                    Panel::Left => {
+                        self.left_width = (w0 + x - x0).clamp(LEFT_RANGE.0, LEFT_RANGE.1)
                     }
-                    None => {}
+                    Panel::Right => {
+                        self.queue_width = (w0 + x0 - x).clamp(RIGHT_RANGE.0, RIGHT_RANGE.1);
+                    }
                 }
                 Task::none()
             }
             Message::DragEnd => {
                 self.dragging = None;
+                self.drag_anchor = None;
                 self.save_ui();
                 Task::none()
             }
@@ -889,7 +1050,27 @@ impl App {
                 self.window_width = width;
                 Task::none()
             }
-            Message::Frame(now) => self.scrolling.frame(now),
+            Message::Frame(now) => {
+                if let Some(since) = self.loading_since {
+                    self.loading_phase = now.saturating_duration_since(since).as_secs_f32();
+                }
+                self.scrolling.frame(now)
+            }
+            Message::WheelH(id, lines) => {
+                self.scrolling.wheel_horizontal(id, lines);
+                Task::none()
+            }
+            Message::ShelfScrolled(id, viewport) => {
+                self.scrolling.scrolled_horizontal(id, &viewport);
+                Task::none()
+            }
+            Message::BacklogCover(id, size, result) => {
+                self.backlog_inflight = self.backlog_inflight.saturating_sub(1);
+                if let Ok(handle) = result {
+                    self.covers.insert((id, size), Some(handle));
+                }
+                self.pump_backlog()
+            }
             Message::Lib(message) => self.update_library(message),
             Message::Noop => Task::none(),
             Message::ShutdownDone => iced::exit(),

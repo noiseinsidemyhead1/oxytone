@@ -24,6 +24,8 @@ const RESPONSIVENESS: f32 = 16.0;
 pub struct WheelCatcher<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     on_wheel: Box<dyn Fn(f32) -> Message + 'a>,
+    /// Rangée horizontale : n'intercepte que la molette avec Shift.
+    shift_only: bool,
 }
 
 /// Enveloppe `content` (une liste défilante) : `on_wheel` reçoit les crans.
@@ -34,6 +36,20 @@ pub fn wheel<'a, Message, Theme, Renderer>(
     WheelCatcher {
         content: content.into(),
         on_wheel: Box::new(on_wheel),
+        shift_only: false,
+    }
+}
+
+/// Enveloppe une rangée défilant horizontalement : Shift + molette la fait
+/// glisser (animé), la molette seule continue de faire défiler la page.
+pub fn wheel_horizontal<'a, Message, Theme, Renderer>(
+    content: impl Into<Element<'a, Message, Theme, Renderer>>,
+    on_wheel: impl Fn(f32) -> Message + 'a,
+) -> WheelCatcher<'a, Message, Theme, Renderer> {
+    WheelCatcher {
+        content: content.into(),
+        on_wheel: Box::new(on_wheel),
+        shift_only: true,
     }
 }
 
@@ -107,12 +123,14 @@ where
         }
         let shift = tree.state.downcast_ref::<Keys>().shift;
         if let Event::Mouse(mouse::Event::WheelScrolled {
-            delta: mouse::ScrollDelta::Lines { y, .. },
+            delta: mouse::ScrollDelta::Lines { x, y },
         }) = event
-            && !shift
+            && shift == self.shift_only
             && cursor.is_over(layout.bounds())
         {
-            shell.publish((self.on_wheel)(*y));
+            // Avec Shift, certaines souris envoient le cran sur l'axe horizontal.
+            let lines = if *y == 0.0 { *x } else { *y };
+            shell.publish((self.on_wheel)(lines));
             shell.capture_event();
             return;
         }
@@ -199,6 +217,7 @@ struct Motion {
     target: f32,
     max: f32,
     animating: bool,
+    horizontal: bool,
 }
 
 /// Animations de défilement, par identifiant de liste.
@@ -222,6 +241,22 @@ impl Scrolling {
         }
         motion.target = (motion.target - lines * WHEEL_STEP).clamp(0.0, motion.max);
         motion.animating = (motion.target - motion.offset).abs() > 0.5;
+    }
+
+    /// Cran de Shift + molette sur une rangée horizontale.
+    pub fn wheel_horizontal(&mut self, id: &'static str, lines: f32) {
+        self.lists.entry(id).or_default().horizontal = true;
+        self.wheel(id, lines);
+    }
+
+    pub fn scrolled_horizontal(&mut self, id: &'static str, viewport: &Viewport) {
+        let motion = self.lists.entry(id).or_default();
+        motion.horizontal = true;
+        motion.max = (viewport.content_bounds().width - viewport.bounds().width).max(0.0);
+        if !motion.animating {
+            motion.offset = viewport.absolute_offset().x;
+            motion.target = motion.offset;
+        }
     }
 
     /// La liste a bougé (barre de défilement, pavé tactile, taille) : on se recale.
@@ -264,13 +299,18 @@ impl Scrolling {
                 motion.offset = motion.target;
                 motion.animating = false;
             }
-            tasks.push(iced::widget::operation::scroll_to(
-                *id,
+            let offset = if motion.horizontal {
+                AbsoluteOffset {
+                    x: Some(motion.offset),
+                    y: None,
+                }
+            } else {
                 AbsoluteOffset {
                     x: None,
                     y: Some(motion.offset),
-                },
-            ));
+                }
+            };
+            tasks.push(iced::widget::operation::scroll_to(*id, offset));
         }
         if !self.is_animating() {
             self.last_frame = None;

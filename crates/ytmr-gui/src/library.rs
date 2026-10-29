@@ -87,6 +87,11 @@ pub struct LibraryState {
     pub history: Option<Load<Vec<Track>>>,
     history_stale: bool,
     history_at: Option<Instant>,
+    /// Recherche dans la playlist ouverte.
+    pub filter: String,
+    /// Playlists créées pendant cette session : YouTube met quelques secondes
+    /// à les rendre lisibles, on les affiche vides en attendant.
+    created: HashSet<String>,
     /// Dernier morceau signalé à l'historique YouTube.
     reported: Option<ytmr_core::QueueId>,
 }
@@ -141,7 +146,10 @@ pub enum Lib {
     Added(String, Result<(), String>),
     NewNameInput(String),
     Create,
-    Created(Result<String, String>),
+    Created(Result<(String, String), String>),
+    /// Vérification différée de la liste après une création.
+    ReloadPlaylists,
+    FilterInput(String),
     RenameStart,
     RenameInput(String),
     RenameCommit,
@@ -257,10 +265,11 @@ impl App {
             .cache_dir
             .as_deref()
             .is_some_and(|dir| is_fresh(&dir.join("playlists.json"), LIST_TTL));
+        let covers = self.want_list_covers();
         if fresh && matches!(self.lib.playlists, Some(Load::Ready(_))) {
-            return Task::none();
+            return covers;
         }
-        self.reload_playlists()
+        Task::batch([covers, self.reload_playlists()])
     }
 
     /// Liste des playlists redemandée sans condition (après une création…).
@@ -273,6 +282,9 @@ impl App {
     /// de suite ; YouTube n'est interrogé que si elle a plus de 30 minutes.
     pub fn open_playlist(&mut self, id: String) -> Task<Message> {
         self.lib.renaming = None;
+        if !matches!(&self.lib.playlist, Some((cur, _)) if *cur == id) {
+            self.lib.filter.clear();
+        }
         let shown = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if *cur == id);
         let mut tasks = Vec::new();
         if !shown {
@@ -342,7 +354,18 @@ impl App {
         for track in playlist.tracks.iter().take(3).rev() {
             tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
         }
+        tasks.push(self.backlog_playlist(playlist));
         Task::batch(tasks)
+    }
+
+    /// Toutes les vignettes de la playlist, préchargées en tâche de fond.
+    fn backlog_playlist(&mut self, playlist: &Playlist) -> Task<Message> {
+        let ids: Vec<String> = playlist
+            .tracks
+            .iter()
+            .filter_map(|t| self.track_cover(t))
+            .collect();
+        self.backlog_covers(ids, THUMB)
     }
 
     fn on_playlist_update(&mut self, generation: u64, update: PlaylistUpdate) -> Task<Message> {
@@ -390,8 +413,19 @@ impl App {
                     return Task::none();
                 };
                 let first_page = playlist.tracks.is_empty();
-                playlist.tracks.extend(tracks);
-                let mut tasks = vec![self.request_visible_covers()];
+                let id = playlist.id.clone();
+                let ids: Vec<String> = tracks.iter().filter_map(|t| self.track_cover(t)).collect();
+                if let Some((_, Load::Ready(playlist))) = &mut self.lib.playlist {
+                    playlist.tracks.extend(tracks);
+                }
+                let mut tasks = vec![
+                    self.request_visible_covers(),
+                    self.backlog_covers(ids, THUMB),
+                ];
+                if first_page {
+                    // Première page reçue : on peut afficher la page.
+                    tasks.push(self.arrived(&Route::Playlist(id)));
+                }
                 if first_page && let Some((_, Load::Ready(p))) = &self.lib.playlist {
                     let p = p.clone();
                     tasks.push(self.show_playlist_extras(&p));
@@ -405,7 +439,8 @@ impl App {
                 };
                 playlist.complete = complete;
                 let fresh = playlist.clone();
-                self.finish_playlist(fresh)
+                let route = Route::Playlist(fresh.id.clone());
+                Task::batch([self.finish_playlist(fresh), self.arrived(&route)])
             }
         }
     }
@@ -498,6 +533,13 @@ impl App {
                     self.lib.history_stale = false;
                     self.lib.history_at = Some(Instant::now());
                     let task = self.want_track_covers(tracks.iter().take(16), CARD);
+                    let rest: Vec<String> = tracks
+                        .iter()
+                        .skip(16)
+                        .take(40)
+                        .filter_map(|t| self.track_cover(t))
+                        .collect();
+                    let task = Task::batch([task, self.backlog_covers(rest, CARD)]);
                     self.lib.history = Some(Load::Ready(tracks));
                     task
                 }
@@ -556,7 +598,19 @@ impl App {
             }
             Lib::PlaylistsLoaded(result) => {
                 match result {
-                    Ok(list) => {
+                    Ok(mut list) => {
+                        // Une playlist créée à l'instant que YouTube ne liste pas encore.
+                        if let Some(Load::Ready(previous)) = &self.lib.playlists {
+                            let missing: Vec<PlaylistSummary> = previous
+                                .iter()
+                                .filter(|p| self.lib.created.contains(&p.id))
+                                .filter(|p| !list.iter().any(|q| q.id == p.id))
+                                .cloned()
+                                .collect();
+                            for p in missing.into_iter().rev() {
+                                list.insert(0, p);
+                            }
+                        }
                         if let Some(dir) = &self.lib.cache_dir {
                             write_list(dir, &list);
                         }
@@ -603,13 +657,35 @@ impl App {
                     return Task::none();
                 }
                 self.lib.streaming = None;
+                let Some((id, _)) = &self.lib.playlist else {
+                    return Task::none();
+                };
+                let id = id.clone();
+                let route = Route::Playlist(id.clone());
+                if self.lib.created.contains(&id) {
+                    // Créée à l'instant : YouTube ne la rend pas encore, elle est vide.
+                    let title = self.lib.playlist_title(&id);
+                    self.lib.playlist = Some((
+                        id.clone(),
+                        Load::Ready(Playlist {
+                            id,
+                            title,
+                            ..empty_playlist()
+                        }),
+                    ));
+                    return self.arrived(&route);
+                }
+                let failed = self.arrival_failed(&route, &e);
                 match &mut self.lib.playlist {
                     // Rien à l'écran : l'erreur prend la page.
                     Some((_, load @ Load::Loading)) => {
                         *load = Load::Failed(e);
-                        Task::none()
+                        failed
                     }
-                    _ => self.show_toast(format!("Mise à jour de la playlist impossible : {e}")),
+                    _ => Task::batch([
+                        failed,
+                        self.show_toast(format!("Mise à jour de la playlist impossible : {e}")),
+                    ]),
                 }
             }
             Lib::ToggleLike(track) => {
@@ -679,14 +755,46 @@ impl App {
                 self.lib.new_name.clear();
                 let toast = self.show_toast(format!("Playlist « {name} » créée"));
                 let op = self.lib.ready().map(|a| async move {
-                    a.create_playlist(&name, Privacy::Private, &with).await
+                    let id = a.create_playlist(&name, Privacy::Private, &with).await?;
+                    Ok((id, name))
                 });
                 Task::batch([toast, call(op, Lib::Created)])
             }
             Lib::Created(result) => match result {
-                Ok(_) => self.reload_playlists(),
+                Ok((id, title)) => {
+                    // Affichée tout de suite ; YouTube ne la liste qu'après quelques secondes.
+                    self.lib.created.insert(id.clone());
+                    let summary = PlaylistSummary {
+                        id,
+                        title,
+                        tracks_text: String::new(),
+                        author: self
+                            .lib
+                            .profile
+                            .as_ref()
+                            .map(|p| p.name.clone())
+                            .unwrap_or_default(),
+                        thumbnail_url: None,
+                    };
+                    if let Some(Load::Ready(list)) = &mut self.lib.playlists {
+                        list.insert(0, summary);
+                        if let Some(dir) = &self.lib.cache_dir {
+                            write_list(dir, list);
+                        }
+                    } else {
+                        self.lib.playlists = Some(Load::Ready(vec![summary]));
+                    }
+                    Task::perform(tokio::time::sleep(Duration::from_secs(5)), |()| {
+                        Message::Lib(Lib::ReloadPlaylists)
+                    })
+                }
                 Err(e) => self.show_toast(format!("Création refusée : {e}")),
             },
+            Lib::ReloadPlaylists => self.reload_playlists(),
+            Lib::FilterInput(text) => {
+                self.lib.filter = text;
+                self.scroll_page_top()
+            }
             Lib::RenameStart => {
                 if let Some((_, Load::Ready(p))) = &self.lib.playlist {
                     self.lib.renaming = Some(p.title.clone());
@@ -859,7 +967,7 @@ fn empty_playlist() -> Playlist {
         duration_text: String::new(),
         thumbnail_url: None,
         tracks: Vec::new(),
-        complete: false,
+        complete: true,
     }
 }
 
@@ -873,6 +981,31 @@ fn playlist_file(dir: &Path, id: &str) -> PathBuf {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     dir.join(format!("playlist-{safe}.json"))
+}
+
+/// La playlist est en cache disque (son ouverture sera instantanée).
+pub fn has_cache(lib: &LibraryState, id: &str) -> bool {
+    lib.cache_dir
+        .as_deref()
+        .is_some_and(|dir| playlist_file(dir, id).exists())
+}
+
+/// Recherche tolérante : minuscules, sans accents.
+pub fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ý' | 'ÿ' => 'y',
+            other => other,
+        })
+        .collect()
 }
 
 /// Le fichier existe et a été écrit il y a moins de `ttl`.
@@ -1169,16 +1302,38 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     // Seules les lignes visibles sont construites, et le clic ne transporte
     // qu'un numéro : copier la playlist dans chaque ligne coûtait ~1,4 million
     // de copies de morceaux par image pour 1 189 titres.
+    // Recherche : indices des morceaux correspondants (titre, artiste, album).
+    let needle = fold(app.lib.filter.trim());
+    let shown: Vec<usize> = if needle.is_empty() {
+        (0..playlist.tracks.len()).collect()
+    } else {
+        playlist
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                fold(&t.title).contains(&needle)
+                    || fold(&t.artist).contains(&needle)
+                    || t.album
+                        .as_deref()
+                        .is_some_and(|a| fold(a).contains(&needle))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    };
     let range = crate::views::visible_range(
         app.page_view,
         crate::views::PLAYLIST_LIST_TOP,
         crate::views::ROW_H,
-        playlist.tracks.len(),
+        shown.len(),
     );
     let list: El<'a> = if playlist.tracks.is_empty() {
         muted("Cette playlist est vide.")
+    } else if shown.is_empty() {
+        muted("Aucun titre ne correspond.")
     } else {
-        crate::views::virtual_list(playlist.tracks.len(), crate::views::ROW_H, range, |i| {
+        crate::views::virtual_list(shown.len(), crate::views::ROW_H, range, |row| {
+            let i = shown[row];
             let track = &playlist.tracks[i];
             let remove = if liked {
                 Message::Lib(Lib::ToggleLike(track.clone()))
@@ -1193,8 +1348,27 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         container(header)
             .height(Length::Fixed(crate::views::PLAYLIST_HEADER_H))
             .clip(true),
+        container(
+            text_input(
+                "Rechercher dans la playlist (titre, artiste, album)",
+                &app.lib.filter
+            )
+            .on_input(|t| Message::Lib(Lib::FilterInput(t)))
+            .size(14)
+            .padding(Padding::from([9, 14]))
+            .style(style::search_input),
+        )
+        .height(Length::Fixed(crate::views::PLAYLIST_FILTER_H))
+        .padding(Padding {
+            top: 4.0,
+            right: 28.0,
+            bottom: 8.0,
+            left: 28.0,
+        }),
         container(list).padding(Padding {
-            top: crate::views::PLAYLIST_LIST_TOP - crate::views::PLAYLIST_HEADER_H,
+            top: crate::views::PLAYLIST_LIST_TOP
+                - crate::views::PLAYLIST_HEADER_H
+                - crate::views::PLAYLIST_FILTER_H,
             right: 28.0,
             bottom: 32.0,
             left: 28.0,
@@ -1348,15 +1522,24 @@ fn track_card<'a>(app: &App, track: &'a Track) -> El<'a> {
     .into()
 }
 
-fn shelf<'a>(items: Vec<El<'a>>) -> El<'a> {
-    scrollable(row(items).spacing(4).padding(Padding {
-        bottom: 12.0,
-        ..Padding::ZERO
-    }))
-    .direction(scrollable::Direction::Horizontal(
-        scrollable::Scrollbar::new().width(4).scroller_width(4),
-    ))
-    .style(style::scroll)
+pub const HISTORY_SHELF: &str = "rangee-historique";
+pub const PLAYLISTS_SHELF: &str = "rangee-playlists";
+
+/// Rangée horizontale ; Shift + molette la fait glisser en douceur.
+fn shelf<'a>(items: Vec<El<'a>>, id: &'static str) -> El<'a> {
+    crate::smooth::wheel_horizontal(
+        scrollable(row(items).spacing(4).padding(Padding {
+            bottom: 12.0,
+            ..Padding::ZERO
+        }))
+        .id(id)
+        .on_scroll(move |viewport| Message::ShelfScrolled(id, viewport))
+        .direction(scrollable::Direction::Horizontal(
+            scrollable::Scrollbar::new().width(4).scroller_width(4),
+        ))
+        .style(style::scroll),
+        move |lines| Message::WheelH(id, lines),
+    )
     .into()
 }
 
@@ -1369,7 +1552,10 @@ pub fn home_sections(app: &App) -> Option<El<'_>> {
             page = page.push(
                 column![
                     section_title("Écoutés récemment"),
-                    shelf(tracks.iter().take(16).map(|t| track_card(app, t)).collect()),
+                    shelf(
+                        tracks.iter().take(40).map(|t| track_card(app, t)).collect(),
+                        HISTORY_SHELF
+                    ),
                 ]
                 .spacing(10),
             );
@@ -1384,7 +1570,7 @@ pub fn home_sections(app: &App) -> Option<El<'_>> {
     }
     if let Some(Load::Ready(list)) = &app.lib.playlists {
         let mut tiles = vec![liked_tile(app)];
-        tiles.extend(list.iter().take(9).map(|p| playlist_card(app, p)));
+        tiles.extend(list.iter().map(|p| playlist_card(app, p)));
         page = page.push(
             column![
                 row![
@@ -1396,7 +1582,7 @@ pub fn home_sections(app: &App) -> Option<El<'_>> {
                         .on_press(Message::Navigate(Route::Library)),
                 ]
                 .align_y(Alignment::Center),
-                shelf(tiles),
+                shelf(tiles, PLAYLISTS_SHELF),
             ]
             .spacing(10),
         );

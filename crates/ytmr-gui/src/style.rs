@@ -8,11 +8,13 @@ use iced::border::Radius;
 use iced::widget::{button, container, scrollable, slider, svg, text_input};
 use iced::{Background, Border, Color, Gradient, Shadow, Theme, Vector, color, gradient};
 
-pub const BG: Color = color!(0x0b0b0e);
-pub const SURFACE: Color = color!(0x131317);
-pub const SURFACE_HI: Color = color!(0x1c1c22);
-pub const SURFACE_HOVER: Color = color!(0x24242b);
-pub const LINE: Color = color!(0x26262e);
+// Noir pur pour le fond : les pixels d'un écran OLED s'éteignent vraiment.
+// Les panneaux restent à peine plus clairs pour garder la structure.
+pub const BG: Color = color!(0x000000);
+pub const SURFACE: Color = color!(0x0a0a0c);
+pub const SURFACE_HI: Color = color!(0x16161a);
+pub const SURFACE_HOVER: Color = color!(0x1f1f25);
+pub const LINE: Color = color!(0x1c1c22);
 pub const TEXT: Color = color!(0xf2f2f5);
 pub const TEXT_DIM: Color = color!(0xa3a3ad);
 pub const TEXT_FAINT: Color = color!(0x6c6c77);
@@ -150,6 +152,15 @@ pub fn hero(accent: Color) -> impl Fn(&Theme) -> container::Style {
                 .add_stop(1.0, BG),
         ))),
         ..container::Style::default()
+    }
+}
+
+/// Cadre arrondi comme l'image qu'il entoure (rond pour un artiste).
+pub fn cover_frame_round(radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let mut style = cover_frame(theme);
+        style.border.radius = radius.into();
+        style
     }
 }
 

@@ -32,8 +32,10 @@ pub(crate) const ROW_H: f32 = 58.0;
 pub(crate) const QROW_H: f32 = 50.0;
 /// En-tête d'une page de playlist (hauteur fixe, contenu rogné au besoin).
 pub(crate) const PLAYLIST_HEADER_H: f32 = 316.0;
+/// Champ de recherche sous l'en-tête d'une playlist.
+pub(crate) const PLAYLIST_FILTER_H: f32 = 56.0;
 /// Haut de la liste des morceaux dans la page de playlist.
-pub(crate) const PLAYLIST_LIST_TOP: f32 = PLAYLIST_HEADER_H + 8.0;
+pub(crate) const PLAYLIST_LIST_TOP: f32 = PLAYLIST_HEADER_H + PLAYLIST_FILTER_H + 4.0;
 /// Lignes construites en plus, au-dessus et en dessous de la zone visible.
 const OVERSCAN: usize = 6;
 
@@ -166,7 +168,9 @@ fn main_layout(app: &App) -> El<'_> {
     let mut middle = row![
         sidebar(app),
         resize_handle(Panel::Left),
-        container(page).width(Length::Fill).height(Length::Fill)
+        container(column![loading_bar(app), page])
+            .width(Length::Fill)
+            .height(Length::Fill)
     ];
     if app.show_queue {
         middle = middle
@@ -174,6 +178,37 @@ fn main_layout(app: &App) -> El<'_> {
             .push(queue_panel(app));
     }
     column![middle.height(Length::Fill), player_bar(app)].into()
+}
+
+/// Fine barre animée en haut de la page pendant un chargement.
+fn loading_bar(app: &App) -> El<'_> {
+    const HEIGHT: f32 = 3.0;
+    if !app.is_loading() {
+        return Space::new().height(Length::Fixed(HEIGHT)).into();
+    }
+    // Un segment qui va et vient (de 0 à 1 puis retour, ~1,2 s par aller).
+    let t = (app.loading_phase / 1.2) % 2.0;
+    let position = if t < 1.0 { t } else { 2.0 - t };
+    let accent = app.accent;
+    let before = (position * 1000.0) as u16 + 1;
+    let after = ((1.0 - position) * 1000.0) as u16 + 1;
+    row![
+        Space::new().width(Length::FillPortion(before)),
+        container(Space::new())
+            .width(Length::FillPortion(400))
+            .height(Length::Fixed(HEIGHT))
+            .style(move |_| iced::widget::container::Style {
+                background: Some(accent.into()),
+                border: iced::Border {
+                    radius: 2.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+        Space::new().width(Length::FillPortion(after)),
+    ]
+    .height(Length::Fixed(HEIGHT))
+    .into()
 }
 
 /// Poignée de redimensionnement entre deux colonnes (glisser à la souris).
@@ -783,7 +818,7 @@ pub(crate) fn page_header<'a>(
 ) -> El<'a> {
     let accent = app.accent_for(cover_id.as_deref());
     let art = container(cover(app.cover(cover_id.as_deref(), HERO), 220.0, radius))
-        .style(style::cover_frame);
+        .style(style::cover_frame_round(radius));
     let actions = row![
         button(
             row![

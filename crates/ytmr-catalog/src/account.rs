@@ -270,7 +270,7 @@ impl Account {
         let raw = self.yt.raw_json_query(GetHistoryQuery).await?;
         let json: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
         let mut tracks = Vec::new();
-        collect_tracks(&json, &mut tracks);
+        collect_items(&json, &mut tracks, false);
         let mut seen = std::collections::HashSet::new();
         tracks.retain(|t| seen.insert(t.video_id.clone()));
         Ok(tracks)
@@ -453,9 +453,14 @@ fn parse_profile(json: &Value) -> Option<Profile> {
 
 /// Jeton de la page suivante (décodé), s'il y en a une.
 fn continuation_token(page: &Value) -> Option<String> {
+    // Les suggestions ont leur propre suite : on ne doit pas la suivre.
     fn find<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
         match v {
-            Value::Object(m) => m.get(key).or_else(|| m.values().find_map(|x| find(x, key))),
+            Value::Object(m) => m.get(key).or_else(|| {
+                m.iter()
+                    .filter(|(k, _)| !is_suggestion_shelf(k))
+                    .find_map(|(_, x)| find(x, key))
+            }),
             Value::Array(a) => a.iter().find_map(|x| find(x, key)),
             _ => None,
         }
@@ -487,6 +492,14 @@ fn percent_decode(text: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
 }
 
+/// Étagères de suggestions (« Suggestions », carrousels) affichées sous une
+/// playlist par YouTube, surtout quand elle est vide ou courte. Les morceaux de
+/// la playlist sont, eux, dans `musicPlaylistShelfRenderer` ou dans les pages
+/// suivantes. Sans ce filtre, une playlist neuve « contenait » 7 suggestions.
+fn is_suggestion_shelf(key: &str) -> bool {
+    matches!(key, "musicShelfRenderer" | "musicCarouselShelfRenderer")
+}
+
 /// Parcourt le JSON à la recherche de `playlistItemData`.
 fn collect_set_video_ids(value: &Value, out: &mut Vec<(String, String)>) {
     match value {
@@ -499,7 +512,9 @@ fn collect_set_video_ids(value: &Value, out: &mut Vec<(String, String)>) {
             {
                 out.push((v.to_owned(), s.to_owned()));
             }
-            map.values().for_each(|v| collect_set_video_ids(v, out));
+            map.iter()
+                .filter(|(k, _)| !is_suggestion_shelf(k))
+                .for_each(|(_, v)| collect_set_video_ids(v, out));
         }
         Value::Array(items) => items.iter().for_each(|v| collect_set_video_ids(v, out)),
         _ => {}
@@ -516,9 +531,15 @@ fn summary(p: LibraryPlaylist) -> PlaylistSummary {
     }
 }
 
+/// Morceaux d'une page de playlist, suggestions exclues.
+fn collect_tracks(value: &Value, out: &mut Vec<Track>) {
+    collect_items(value, out, true);
+}
+
 /// Morceaux (`musicResponsiveListItemRenderer`) trouvés dans une page brute.
 /// Un élément incomplet (vidéo supprimée, sans titre) est simplement ignoré.
-fn collect_tracks(value: &Value, out: &mut Vec<Track>) {
+/// `skip_suggestions` : faux pour l'historique, rangé lui aussi en étagères.
+fn collect_items(value: &Value, out: &mut Vec<Track>, skip_suggestions: bool) {
     match value {
         Value::Object(map) => {
             if let Some(item) = map.get("musicResponsiveListItemRenderer") {
@@ -527,9 +548,13 @@ fn collect_tracks(value: &Value, out: &mut Vec<Track>) {
                 }
                 return;
             }
-            map.values().for_each(|v| collect_tracks(v, out));
+            map.iter()
+                .filter(|(k, _)| !(skip_suggestions && is_suggestion_shelf(k)))
+                .for_each(|(_, v)| collect_items(v, out, skip_suggestions));
         }
-        Value::Array(items) => items.iter().for_each(|v| collect_tracks(v, out)),
+        Value::Array(items) => items
+            .iter()
+            .for_each(|v| collect_items(v, out, skip_suggestions)),
         _ => {}
     }
 }
@@ -596,6 +621,33 @@ pub fn video_ids(tracks: &[Track]) -> std::collections::HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Crée une playlist vide, regarde son contenu, puis la supprime.
+    #[tokio::test]
+    #[ignore = "modifie le compte (playlist créée puis supprimée)"]
+    async fn created_playlist_is_empty() {
+        let cookie = std::env::var("YTMR_TEST_COOKIE").unwrap();
+        let account = Account::connect(&cookie).await.unwrap();
+        let id = account
+            .create_playlist("ytmr test (supprimée aussitôt)", Privacy::Private, &[])
+            .await
+            .unwrap();
+        println!("créée : {id}");
+        let immediate = account.playlist(&id).await;
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let later = account.playlist(&id).await;
+        account.delete_playlist(&id).await.unwrap();
+        println!("supprimée");
+        println!(
+            "lecture immédiate : {:?}",
+            immediate.as_ref().map(|p| p.tracks.len())
+        );
+        let content = later.unwrap();
+        for t in &content.tracks {
+            println!("  - {} / {}", t.title, t.artist);
+        }
+        println!("titres dans la playlist neuve : {}", content.tracks.len());
+    }
 
     /// Lecture seule sur un vrai compte : `YTMR_TEST_COOKIE` = en-tête Cookie YouTube.
     #[tokio::test]
@@ -688,6 +740,34 @@ mod tests {
             Some("https://yt3.ggpht.com/a=s88")
         );
         assert!(parse_profile(&json!({})).is_none());
+    }
+
+    #[test]
+    fn ignores_suggestion_shelves_under_a_playlist() {
+        let item = |id: &str| {
+            json!({"musicResponsiveListItemRenderer": {
+                "playlistItemData": {"videoId": id, "playlistSetVideoId": "S"},
+                "flexColumns": [{"musicResponsiveListItemFlexColumnRenderer":
+                    {"text": {"runs": [{"text": "t"}]}}}]
+            }})
+        };
+        let page = json!({"contents": {"sectionListRenderer": {"contents": [
+            {"musicPlaylistShelfRenderer": {"contents": [item("AAAAAAAAAAA")]}},
+            {"musicShelfRenderer": {"title": "Suggestions", "contents": [item("BBBBBBBBBBB")],
+                "continuations": [{"nextContinuationData": {"continuation": "SUGG"}}]}}
+        ]}}});
+        let mut tracks = Vec::new();
+        collect_tracks(&page, &mut tracks);
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].video_id, "AAAAAAAAAAA");
+        assert_eq!(
+            continuation_token(&page),
+            None,
+            "pas de suite des suggestions"
+        );
+        let mut history = Vec::new();
+        collect_items(&page, &mut history, false);
+        assert_eq!(history.len(), 2, "l'historique garde ses étagères");
     }
 
     #[test]
