@@ -17,7 +17,7 @@ use iced::widget::{
 use iced::{Alignment, Color, Length, Padding, Task};
 use ytmr_catalog::CatalogError;
 use ytmr_catalog::account::{
-    Account, LIKED_ID, Playlist, PlaylistSummary, PlaylistUpdate, Privacy,
+    Account, LIKED_ID, Playlist, PlaylistSummary, PlaylistUpdate, Privacy, Profile,
 };
 use ytmr_core::{Command, Track};
 
@@ -46,6 +46,8 @@ pub enum AccountView {
     Connecting,
     Ready(Arc<Account>),
     Unavailable(String),
+    /// Déconnecté à la demande de l'utilisateur (mémorisé entre deux lancements).
+    Disconnected,
 }
 
 /// Fenêtres par-dessus la page.
@@ -75,6 +77,12 @@ pub struct LibraryState {
     pub streaming: Option<Streaming>,
     /// Lignes de la playlist affichées pour l'instant.
     pub visible_rows: usize,
+    pub profile: Option<Profile>,
+    /// Écoutés récemment (historique du compte).
+    pub history: Option<Load<Vec<Track>>>,
+    history_stale: bool,
+    /// Dernier morceau signalé à l'historique YouTube.
+    reported: Option<ytmr_core::QueueId>,
 }
 
 pub struct Streaming {
@@ -137,6 +145,11 @@ pub enum Lib {
     Deleted(Result<(), String>),
     RemoveTrack(String, String),
     Removed(String, Result<(), String>),
+    ProfileLoaded(Result<Profile, String>),
+    HistoryLoaded(Result<Vec<Track>, String>),
+    Disconnect,
+    Reconnect,
+    Reported(Result<(), String>),
 }
 
 /// Attend la fin de la connexion au compte (lancée par le backend).
@@ -174,6 +187,47 @@ fn call<T: Send + 'static>(
 }
 
 impl App {
+    /// Écoutés récemment : rechargés à l'accueil quand une écoute a été signalée.
+    pub fn load_history(&mut self) -> Task<Message> {
+        let op = self.lib.ready().map(|a| async move { a.history().await });
+        if op.is_none() {
+            return Task::none();
+        }
+        if self.lib.history.is_none() {
+            self.lib.history = Some(Load::Loading);
+        }
+        call(op, Lib::HistoryLoaded)
+    }
+
+    pub fn refresh_home(&mut self) -> Task<Message> {
+        if self.lib.history_stale || self.lib.history.is_none() {
+            self.load_history()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Signale à YouTube le morceau qui commence (une fois par entrée de file).
+    pub fn report_play(&mut self, id: ytmr_core::QueueId, video_id: String) -> Task<Message> {
+        if self.lib.reported == Some(id) {
+            return Task::none();
+        }
+        self.lib.reported = Some(id);
+        let op = self
+            .lib
+            .ready()
+            .map(|a| async move { a.report_play(&video_id).await });
+        if op.is_none() {
+            return Task::none();
+        }
+        self.lib.history_stale = true;
+        call(op, Lib::Reported)
+    }
+
+    fn disconnect_marker(&self) -> Option<PathBuf> {
+        self.lib.cache_dir.as_ref().map(|d| d.join("disconnected"))
+    }
+
     pub fn load_playlists(&mut self) -> Task<Message> {
         if !matches!(self.lib.playlists, Some(Load::Ready(_))) {
             self.lib.playlists = match self.lib.cache_dir.as_deref().and_then(read_list) {
@@ -369,17 +423,94 @@ impl App {
 
     pub fn update_library(&mut self, message: Lib) -> Task<Message> {
         match message {
+            Lib::AccountReady(Ok(_)) if self.disconnect_marker().is_some_and(|m| m.exists()) => {
+                self.lib.account = AccountView::Disconnected;
+                Task::none()
+            }
             Lib::AccountReady(Ok(AccountHandle(account))) => {
                 self.lib.account = AccountView::Ready(Arc::clone(&account));
+                let profile = {
+                    let account = Arc::clone(&account);
+                    call(
+                        Some(async move { account.profile().await }),
+                        Lib::ProfileLoaded,
+                    )
+                };
                 let liked = call(
                     Some(async move { account.playlist(LIKED_ID).await }),
                     Lib::LikedLoaded,
                 );
-                let mut tasks = vec![self.load_playlists(), liked];
+                let mut tasks = vec![self.load_playlists(), liked, profile, self.load_history()];
                 if let Route::Playlist(id) = self.route.clone() {
                     tasks.push(self.open_playlist(id));
                 }
                 Task::batch(tasks)
+            }
+            Lib::ProfileLoaded(result) => match result {
+                Ok(profile) => {
+                    let photo = self.url_cover(profile.photo_url.as_deref());
+                    self.lib.profile = Some(profile);
+                    self.want_cover(photo, THUMB)
+                }
+                Err(e) => {
+                    tracing::warn!("profil : {e}");
+                    Task::none()
+                }
+            },
+            Lib::HistoryLoaded(result) => match result {
+                Ok(tracks) => {
+                    self.lib.history_stale = false;
+                    let task = self.want_track_covers(tracks.iter().take(16), CARD);
+                    self.lib.history = Some(Load::Ready(tracks));
+                    task
+                }
+                Err(e) => {
+                    if !matches!(self.lib.history, Some(Load::Ready(_))) {
+                        self.lib.history = Some(Load::Failed(e));
+                    }
+                    Task::none()
+                }
+            },
+            Lib::Reported(result) => {
+                if let Err(e) = result {
+                    tracing::debug!("écoute non signalée à YouTube : {e}");
+                }
+                Task::none()
+            }
+            Lib::Disconnect => {
+                self.lib.account = AccountView::Disconnected;
+                self.lib.profile = None;
+                self.lib.playlists = None;
+                self.lib.playlist = None;
+                self.lib.history = None;
+                self.lib.liked.clear();
+                self.lib.liked_count = None;
+                self.lib.streaming = None;
+                if let Some(dir) = self.lib.cache_dir.clone() {
+                    clear_cache(&dir);
+                    if let Some(marker) = self.disconnect_marker() {
+                        let _ = std::fs::write(marker, b"");
+                    }
+                }
+                let nav = if matches!(self.route, Route::Library | Route::Playlist(_)) {
+                    self.go_to(Route::Home)
+                } else {
+                    Task::none()
+                };
+                Task::batch([
+                    nav,
+                    self.show_toast("Compte YouTube déconnecté de ytmr".into()),
+                ])
+            }
+            Lib::Reconnect => {
+                if let Some(marker) = self.disconnect_marker() {
+                    let _ = std::fs::remove_file(marker);
+                }
+                self.lib.account = AccountView::Connecting;
+                match self.reconnect_task() {
+                    Some(task) => task,
+                    None => Task::none(),
+                }
             }
             Lib::AccountReady(Err(e)) => {
                 self.lib.account = AccountView::Unavailable(e);
@@ -731,6 +862,20 @@ fn write_json(path: &Path, value: &impl serde::Serialize) {
     }
 }
 
+/// Oublie la bibliothèque en cache (déconnexion, changement de compte).
+fn clear_cache(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("playlist") && name.ends_with(".json") {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Titres likés en cache : les cœurs s'affichent avant même la connexion.
 pub fn cached_liked(dir: &Path) -> Option<Playlist> {
     read_playlist(dir, LIKED_ID)
@@ -812,6 +957,9 @@ fn not_connected<'a>(app: &App) -> Option<El<'a>> {
         AccountView::Unavailable(e) => format!(
             "Compte YouTube indisponible : {e}\n\nIl faut `cookies_from_browser = \"firefox\"` dans la section [player] de config.toml, et être connecté à YouTube dans Firefox."
         ),
+        AccountView::Disconnected => {
+            "Compte YouTube déconnecté. Reconnecte-le en bas à gauche.".to_owned()
+        }
     };
     Some(
         container(muted(message))
@@ -852,7 +1000,9 @@ pub fn library_page(app: &App) -> El<'_> {
     };
     page_scroll(column![header, body].spacing(20).padding(Padding {
         top: 28.0,
-        ..Padding::ZERO
+        right: 28.0,
+        bottom: 32.0,
+        left: 28.0,
     }))
 }
 
@@ -1101,4 +1251,160 @@ fn confirm_panel(title: &str) -> El<'_> {
     ]
     .spacing(14)
     .into()
+}
+
+// ----- accueil -----
+
+/// Carte d'un morceau (rangée « Écoutés récemment »).
+fn track_card<'a>(app: &App, track: &'a Track) -> El<'a> {
+    let id = app.track_cover(track);
+    mouse_area(
+        button(
+            column![
+                cover(app.cover(id.as_deref(), CARD), 150.0, 8.0),
+                text(&track.title)
+                    .size(14)
+                    .font(SEMIBOLD)
+                    .width(Length::Fixed(150.0)),
+                text(&track.artist)
+                    .size(12)
+                    .color(style::TEXT_DIM)
+                    .width(Length::Fixed(150.0)),
+            ]
+            .spacing(6),
+        )
+        .padding(8)
+        .style(style::card)
+        .on_press(Message::Play(vec![track.clone()], 0)),
+    )
+    .on_enter(Message::Hover(track.video_id.clone()))
+    .on_exit(Message::Unhover)
+    .into()
+}
+
+fn shelf<'a>(items: Vec<El<'a>>) -> El<'a> {
+    scrollable(row(items).spacing(4).padding(Padding {
+        bottom: 12.0,
+        ..Padding::ZERO
+    }))
+    .direction(scrollable::Direction::Horizontal(
+        scrollable::Scrollbar::new().width(4).scroller_width(4),
+    ))
+    .style(style::scroll)
+    .into()
+}
+
+/// Sections de l'accueil liées au compte (écoutés récemment, playlists).
+pub fn home_sections(app: &App) -> Option<El<'_>> {
+    app.lib.ready()?;
+    let mut page = column![].spacing(28);
+    match &app.lib.history {
+        Some(Load::Ready(tracks)) if !tracks.is_empty() => {
+            page = page.push(
+                column![
+                    section_title("Écoutés récemment"),
+                    shelf(tracks.iter().take(16).map(|t| track_card(app, t)).collect()),
+                ]
+                .spacing(10),
+            );
+        }
+        Some(Load::Loading) | None => {
+            page = page.push(column![
+                section_title("Écoutés récemment"),
+                loading("Chargement…")
+            ]);
+        }
+        _ => {}
+    }
+    if let Some(Load::Ready(list)) = &app.lib.playlists {
+        let mut tiles = vec![liked_tile(app)];
+        tiles.extend(list.iter().take(9).map(|p| playlist_card(app, p)));
+        page = page.push(
+            column![
+                row![
+                    section_title("Tes playlists"),
+                    Space::new().width(Length::Fill),
+                    button(text("Tout voir").size(13))
+                        .padding(Padding::from([4, 12]))
+                        .style(style::pill_ghost)
+                        .on_press(Message::Navigate(Route::Library)),
+                ]
+                .align_y(Alignment::Center),
+                shelf(tiles),
+            ]
+            .spacing(10),
+        );
+    }
+    Some(page.into())
+}
+
+/// Bas de la barre latérale : photo, nom, déconnexion / reconnexion.
+pub fn account_widget(app: &App) -> El<'_> {
+    match &app.lib.account {
+        AccountView::Ready(_) => {
+            let (name, handle, photo) = match &app.lib.profile {
+                Some(p) => (
+                    p.name.clone(),
+                    p.handle.clone().unwrap_or_default(),
+                    app.url_cover(p.photo_url.as_deref()),
+                ),
+                None => ("Compte YouTube".to_owned(), "connecté".to_owned(), None),
+            };
+            row![
+                cover(app.cover(photo.as_deref(), THUMB), 34.0, 17.0),
+                column![
+                    text(name).size(13).font(SEMIBOLD),
+                    text(handle).size(11).color(style::TEXT_DIM),
+                ]
+                .spacing(1)
+                .width(Length::Fill),
+                icon_tip(
+                    Icon::Logout,
+                    15.0,
+                    style::TEXT_DIM,
+                    Message::Lib(Lib::Disconnect),
+                    "Se déconnecter de ytmr".into(),
+                ),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into()
+        }
+        AccountView::Connecting => muted("Connexion au compte YouTube…"),
+        AccountView::Disconnected => button(
+            row![
+                icon(Icon::Logout, 15.0, style::TEXT),
+                text("Se connecter (session Firefox)")
+                    .size(13)
+                    .font(SEMIBOLD),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([8, 12]))
+        .style(style::pill_ghost)
+        .on_press(Message::Lib(Lib::Reconnect))
+        .into(),
+        AccountView::Unavailable(e) => row![
+            column![
+                text("Compte indisponible").size(13).font(SEMIBOLD),
+                text(e.chars().take(80).collect::<String>())
+                    .size(11)
+                    .color(style::TEXT_FAINT),
+            ]
+            .spacing(1)
+            .width(Length::Fill),
+            icon_tip(
+                Icon::Refresh,
+                15.0,
+                style::TEXT_DIM,
+                Message::Lib(Lib::Reconnect),
+                "Réessayer".into(),
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into(),
+    }
 }

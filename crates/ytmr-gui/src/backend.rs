@@ -35,6 +35,7 @@ pub struct Backend {
     pub account: watch::Receiver<AccountState>,
     /// Cache disque de la bibliothèque (listes de playlists, contenus).
     pub library_cache: std::path::PathBuf,
+    resolver: Arc<YtDlpResolver>,
     core_task: JoinHandle<()>,
     server: Option<(JoinHandle<std::io::Result<()>>, oneshot::Sender<()>)>,
 }
@@ -127,9 +128,17 @@ impl Backend {
             covers,
             account,
             library_cache: paths.cache_dir.join("library"),
+            resolver: Arc::clone(&resolver),
             core_task,
             server,
         })
+    }
+
+    /// Nouvelle connexion au compte (session du navigateur relue) : sert à
+    /// « se reconnecter », par exemple après avoir changé de compte dans Firefox.
+    pub fn reconnect(&self) -> impl Future<Output = AccountState> + Send + 'static {
+        let resolver = Arc::clone(&self.resolver);
+        async move { connect_account(&resolver).await }
     }
 
     /// Coupe le son, arrête mpv puis le serveur.
@@ -184,19 +193,34 @@ fn start_worker(
                 return;
             }
         }
-        let state = match resolver.browser_cookie().await {
-            Ok(cookie) => match Account::connect(&cookie).await {
-                Ok(a) => {
-                    tracing::info!("compte YouTube connecté");
-                    AccountState::Ready(Arc::new(a))
-                }
-                Err(e) => AccountState::Unavailable(format!("connexion au compte : {e}")),
-            },
-            Err(e) => AccountState::Unavailable(e),
-        };
-        if let AccountState::Unavailable(e) = &state {
-            tracing::warn!("compte indisponible : {e}");
-        }
-        account.send_replace(state);
+        account.send_replace(connect_account(&resolver).await);
     });
+}
+
+/// Lit la session YouTube du navigateur et s'y connecte (3 essais : un
+/// réseau qui se réveille ne doit pas laisser le compte « indisponible »).
+async fn connect_account(resolver: &YtDlpResolver) -> AccountState {
+    let mut last = String::new();
+    for delay_ms in [0, 1000, 3000] {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        let cookie = match resolver.browser_cookie().await {
+            Ok(cookie) => cookie,
+            Err(e) => {
+                // Pas de session dans le navigateur : inutile de réessayer.
+                tracing::warn!("compte indisponible : {e}");
+                return AccountState::Unavailable(e);
+            }
+        };
+        match Account::connect(&cookie).await {
+            Ok(a) => {
+                tracing::info!("compte YouTube connecté");
+                return AccountState::Ready(Arc::new(a));
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "connexion au compte, nouvel essai");
+                last = format!("connexion au compte : {e}");
+            }
+        }
+    }
+    AccountState::Unavailable(last)
 }

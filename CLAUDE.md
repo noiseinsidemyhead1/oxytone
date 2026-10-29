@@ -86,6 +86,9 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 - GUI : modifications optimistes (affichage immédiat, correction + toast si YouTube refuse). Boutons des lignes visibles au survol.
 - **Affichage des playlists** : les pages YouTube (100 titres) ne peuvent venir que l'une après l'autre ; `Account::playlist_progressive` envoie chaque page dès réception, la GUI l'affiche au fil de l'eau. Cache disque `cache_dir/library/` (`playlists.json`, `playlist-<id>.json`) : version en cache affichée tout de suite, version fraîche construite à côté puis substituée. Rendu limité à `ROWS_STEP` (120) lignes, +120 en approchant du bas (pochettes demandées seulement pour les lignes affichées).
 - **Démarrage sans réseau** : `Catalog::new()` ne se connecte qu'à la première utilisation (`OnceCell`, 3 essais) ; avant, une requête ratée vers music.youtube.com au lancement empêchait l'appli de s'ouvrir.
+- **Profil** : pas d'API dans ytmapi-rs → requête maison `AccountMenu` (`account/account_menu`), `activeAccountHeaderRenderer` (nom, @pseudo, photo). **Historique** : `GetHistoryQuery` en JSON brut + `collect_tracks`. Chaque morceau lancé est signalé à YouTube (`report_play` : `get_song_tracking_url` + `add_history_item`), une fois par entrée de file.
+- **Déconnexion** : propre à ytmr (la session Firefox n'est pas touchée), mémorisée par le fichier `cache_dir/library/disconnected`, efface la bibliothèque en cache. La lecture garde les cookies (qualité Premium). « Se connecter » relit la session du navigateur (`Backend::reconnect`). Connexion au compte : 3 essais.
+- **Accueil** : salutation, « Écoutés récemment » (historique, rangée défilante horizontale), « Tes playlists » ; avec un morceau en cours, ces sections passent sous « À suivre ».
 - Pas encore : `/api/v1/like` (501) pour le CYD.
 
 ## Emplacements à l'exécution

@@ -24,7 +24,8 @@ use ytmapi_rs::parse::LibraryPlaylist;
 use ytmapi_rs::parse::{ParseFrom, ProcessedResult};
 use ytmapi_rs::query::playlist::PrivacyStatus;
 use ytmapi_rs::query::{
-    CreatePlaylistQuery, EditPlaylistQuery, GetPlaylistDetailsQuery, GetPlaylistTracksQuery,
+    CreatePlaylistQuery, EditPlaylistQuery, GetHistoryQuery, GetPlaylistDetailsQuery,
+    GetPlaylistTracksQuery,
 };
 use ytmapi_rs::query::{PostMethod, PostQuery, Query};
 use ytmapi_rs::{YtMusic, YtMusicBuilder};
@@ -86,6 +87,14 @@ pub enum PlaylistUpdate {
     Tracks(Vec<Track>),
     /// Fin ; `complete` vaut `false` si YouTube n'a pas rendu toutes les pages.
     Done { complete: bool },
+}
+
+/// Identité affichée (nom, @pseudo, photo), comme dans le menu de YouTube Music.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Profile {
+    pub name: String,
+    pub handle: Option<String>,
+    pub photo_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +258,35 @@ impl Account {
         Ok(())
     }
 
+    /// Nom, @pseudo et photo du compte (menu « compte » de YouTube Music).
+    pub async fn profile(&self) -> Result<Profile, CatalogError> {
+        let raw = self.yt.raw_json_query(AccountMenu).await?;
+        let json: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        parse_profile(&json).ok_or(CatalogError::Refused("profil introuvable dans la réponse"))
+    }
+
+    /// Morceaux écoutés récemment (sans doublons, du plus récent au plus ancien).
+    pub async fn history(&self) -> Result<Vec<Track>, CatalogError> {
+        let raw = self.yt.raw_json_query(GetHistoryQuery).await?;
+        let json: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        let mut tracks = Vec::new();
+        collect_tracks(&json, &mut tracks);
+        let mut seen = std::collections::HashSet::new();
+        tracks.retain(|t| seen.insert(t.video_id.clone()));
+        Ok(tracks)
+    }
+
+    /// Signale une écoute à YouTube (historique et recommandations), comme
+    /// l'appli officielle au début de chaque morceau.
+    pub async fn report_play(&self, video_id: &str) -> Result<(), CatalogError> {
+        let url = self
+            .yt
+            .get_song_tracking_url(VideoID::from_raw(video_id.to_owned()))
+            .await?;
+        self.yt.add_history_item(url).await?;
+        Ok(())
+    }
+
     /// Like (`true`) ou retrait du like (`false`) d'un morceau.
     pub async fn set_liked(&self, video_id: &str, liked: bool) -> Result<(), CatalogError> {
         let status = if liked {
@@ -353,6 +391,64 @@ impl PostQuery for NextPage {
     fn path(&self) -> &str {
         "browse"
     }
+}
+
+/// Menu « compte » : seule la réponse brute nous intéresse.
+struct AccountMenu;
+
+impl<A: AuthToken> Query<A> for AccountMenu {
+    type Output = RawOnly;
+    type Method = PostMethod;
+}
+
+impl ParseFrom<AccountMenu> for RawOnly {
+    fn parse_from(_: ProcessedResult<AccountMenu>) -> ytmapi_rs::Result<Self> {
+        Ok(RawOnly)
+    }
+}
+
+impl PostQuery for AccountMenu {
+    fn header(&self) -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
+    fn params(&self) -> Vec<(&str, Cow<'_, str>)> {
+        Vec::new()
+    }
+    fn path(&self) -> &str {
+        "account/account_menu"
+    }
+}
+
+fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    match v {
+        Value::Object(m) => m
+            .get(key)
+            .or_else(|| m.values().find_map(|x| find_key(x, key))),
+        Value::Array(a) => a.iter().find_map(|x| find_key(x, key)),
+        _ => None,
+    }
+}
+
+fn text_of(v: &Value) -> Option<String> {
+    v.get("simpleText")
+        .or_else(|| v.pointer("/runs/0/text"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+fn parse_profile(json: &Value) -> Option<Profile> {
+    let header = find_key(json, "activeAccountHeaderRenderer")?;
+    Some(Profile {
+        name: header.get("accountName").and_then(text_of)?,
+        handle: header.get("channelHandle").and_then(text_of),
+        photo_url: header
+            .pointer("/accountPhoto/thumbnails")
+            .and_then(Value::as_array)
+            .and_then(|t| t.last())
+            .and_then(|t| t.get("url"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+    })
 }
 
 /// Jeton de la page suivante (décodé), s'il y en a une.
@@ -512,6 +608,15 @@ mod tests {
         for p in playlists.iter().take(5) {
             println!("  {} — {} ({})", p.title, p.tracks_text, p.id);
         }
+        let profile = account.profile().await.unwrap();
+        println!(
+            "profil : {} {:?} photo={}",
+            profile.name,
+            profile.handle,
+            profile.photo_url.is_some()
+        );
+        let history = account.history().await.unwrap();
+        println!("historique : {} titres", history.len());
         let liked = account.playlist(LIKED_ID).await.unwrap();
         println!("titres likés : {}", liked.tracks.len());
         let (pairs, _) = account.set_video_ids(LIKED_ID).await.unwrap();
@@ -564,6 +669,25 @@ mod tests {
         assert_eq!(t.album_id.as_deref(), Some("MPREb_abc"));
         assert_eq!(t.duration, Some(std::time::Duration::from_secs(97)));
         assert_eq!(t.thumbnail_url.as_deref(), Some("https://a/120"));
+    }
+
+    #[test]
+    fn parses_account_menu_profile() {
+        let json = json!({"actions": [{"openPopupAction": {"popup": {"multiPageMenuRenderer": {
+        "header": {"activeAccountHeaderRenderer": {
+            "accountName": {"runs": [{"text": "Noise"}]},
+            "channelHandle": {"runs": [{"text": "@noise"}]},
+            "accountPhoto": {"thumbnails": [{"url": "https://yt3.ggpht.com/a=s48"},
+                                            {"url": "https://yt3.ggpht.com/a=s88"}]}
+        }}}}}}]});
+        let profile = parse_profile(&json).unwrap();
+        assert_eq!(profile.name, "Noise");
+        assert_eq!(profile.handle.as_deref(), Some("@noise"));
+        assert_eq!(
+            profile.photo_url.as_deref(),
+            Some("https://yt3.ggpht.com/a=s88")
+        );
+        assert!(parse_profile(&json!({})).is_none());
     }
 
     #[test]

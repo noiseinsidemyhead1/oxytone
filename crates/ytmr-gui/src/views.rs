@@ -18,7 +18,7 @@ use crate::app::{
     App, CARD, HERO, Load, Message, PAGE_SCROLL, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT, THUMB,
 };
 use crate::icons::{Icon, icon};
-use crate::library::{self, AccountView, Lib};
+use crate::library::{self, Lib};
 use crate::smooth::wheel;
 use crate::style;
 
@@ -173,7 +173,7 @@ fn sidebar(app: &App) -> El<'_> {
             ]
             .spacing(4),
             Space::new().height(Length::Fill),
-            account_status(app),
+            library::account_widget(app),
             text("Espace : lecture/pause · ← → : ±10 s · Ctrl+F : rechercher")
                 .size(11)
                 .color(style::TEXT_FAINT),
@@ -184,39 +184,6 @@ fn sidebar(app: &App) -> El<'_> {
     .width(Length::Fixed(232.0))
     .height(Length::Fill)
     .style(style::sidebar)
-    .into()
-}
-
-fn account_status(app: &App) -> El<'_> {
-    let (label, color) = match &app.lib.account {
-        AccountView::Connecting => ("Compte YouTube : connexion…", style::TEXT_FAINT),
-        AccountView::Ready(_) => ("Compte YouTube connecté", style::TEXT_DIM),
-        AccountView::Unavailable(_) => ("Compte YouTube indisponible", style::TEXT_FAINT),
-    };
-    row![
-        container(
-            Space::new()
-                .width(Length::Fixed(7.0))
-                .height(Length::Fixed(7.0))
-        )
-        .style(move |_| iced::widget::container::Style {
-            background: Some(
-                match &app.lib.account {
-                    AccountView::Ready(_) => Color::from_rgb8(0x4a, 0xde, 0x80),
-                    _ => style::TEXT_FAINT,
-                }
-                .into()
-            ),
-            border: iced::Border {
-                radius: 4.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        }),
-        text(label).size(12).color(color),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center)
     .into()
 }
 
@@ -539,28 +506,45 @@ pub(crate) fn error_box(message: &str) -> El<'_> {
 // ----- pages -----
 
 fn home(app: &App) -> El<'_> {
+    let sections = library::home_sections(app);
     let Some(entry) = &app.state.current else {
-        return container(
-            column![
-                text("Que veux-tu écouter ?").size(34).font(BOLD),
-                muted("Tape un titre, un artiste ou un album dans la recherche à gauche."),
-                button(
-                    row![
-                        icon(Icon::Search, 16.0, style::BG),
-                        text("Rechercher").size(14).font(SEMIBOLD)
-                    ]
-                    .spacing(8)
-                    .align_y(Alignment::Center),
-                )
-                .padding(Padding::from([10, 20]))
-                .style(style::pill(app.accent))
-                .on_press(Message::Navigate(Route::Search)),
-            ]
-            .spacing(16)
-            .align_x(Alignment::Center),
-        )
-        .center(Length::Fill)
-        .into();
+        // Rien en lecture : salutation, puis ce que le compte propose.
+        let greeting = column![
+            text(greeting(app)).size(34).font(BOLD),
+            muted("Reprends là où tu t'étais arrêté, ou cherche quelque chose."),
+        ]
+        .spacing(8);
+        return match sections {
+            Some(sections) => {
+                page_scroll(column![greeting, sections].spacing(28).padding(Padding {
+                    top: 40.0,
+                    right: 28.0,
+                    bottom: 32.0,
+                    left: 28.0,
+                }))
+            }
+            None => container(
+                column![
+                    text("Que veux-tu écouter ?").size(34).font(BOLD),
+                    muted("Tape un titre, un artiste ou un album dans la recherche à gauche."),
+                    button(
+                        row![
+                            icon(Icon::Search, 16.0, style::BG),
+                            text("Rechercher").size(14).font(SEMIBOLD)
+                        ]
+                        .spacing(8)
+                        .align_y(Alignment::Center),
+                    )
+                    .padding(Padding::from([10, 20]))
+                    .style(style::pill(app.accent))
+                    .on_press(Message::Navigate(Route::Search)),
+                ]
+                .spacing(16)
+                .align_x(Alignment::Center),
+            )
+            .center(Length::Fill)
+            .into(),
+        };
     };
     let track = &entry.track;
     let id = app.track_cover(track);
@@ -614,15 +598,49 @@ fn home(app: &App) -> El<'_> {
         list = list.push(track_row(app, &e.track, None, Message::JumpTo(e.id), None));
     }
 
+    let mut below = column![list].spacing(28);
+    if let Some(sections) = sections {
+        below = below.push(sections);
+    }
     page_scroll(column![
         hero,
-        container(list).padding(Padding {
+        container(below).padding(Padding {
             top: 8.0,
             right: 28.0,
             bottom: 32.0,
             left: 28.0,
         })
     ])
+}
+
+/// « Bonjour, <prénom> » selon l'heure locale.
+fn greeting(app: &App) -> String {
+    let hour = local_hour();
+    let hello = if (5..18).contains(&hour) {
+        "Bonjour"
+    } else {
+        "Bonsoir"
+    };
+    match app.lib.profile.as_ref() {
+        Some(p) => format!("{hello}, {}", p.name),
+        None => hello.to_owned(),
+    }
+}
+
+/// Heure locale approximative, sans dépendance : fuseau de Paris (UTC+1, +2 l'été).
+fn local_hour() -> u64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let day_of_year = (secs / 86_400) % 365;
+    // Heure d'été européenne : fin mars → fin octobre (approximation au jour près).
+    let offset = if (85..300).contains(&day_of_year) {
+        2
+    } else {
+        1
+    };
+    (secs / 3600 + offset) % 24
 }
 
 fn quality_badge(app: &App) -> El<'_> {

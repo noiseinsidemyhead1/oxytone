@@ -349,6 +349,19 @@ impl App {
         })
     }
 
+    /// « Se reconnecter » : nouvelle lecture de la session du navigateur.
+    pub(crate) fn reconnect_task(&self) -> Option<Task<Message>> {
+        let backend = self.backend()?;
+        let reconnect = backend.reconnect();
+        Some(Task::perform(reconnect, |state| {
+            Message::Lib(crate::library::Lib::AccountReady(match state {
+                crate::backend::AccountState::Ready(a) => Ok(crate::library::AccountHandle(a)),
+                crate::backend::AccountState::Unavailable(e) => Err(e),
+                crate::backend::AccountState::Connecting => Err("connexion interrompue".into()),
+            }))
+        }))
+    }
+
     /// Navigation déclenchée par le code (après une suppression, par exemple).
     pub(crate) fn go_to(&mut self, route: Route) -> Task<Message> {
         self.navigate(route)
@@ -400,7 +413,7 @@ impl App {
             Route::Search => operation::focus(SEARCH_INPUT),
             Route::Library => self.load_playlists(),
             Route::Playlist(id) => self.open_playlist(id),
-            Route::Home => Task::none(),
+            Route::Home => self.refresh_home(),
         }
     }
 
@@ -709,14 +722,21 @@ impl App {
                 if self.muted_volume.is_some() && self.state.volume > 0 {
                     self.muted_volume = None;
                 }
+                let report = match &self.state.current {
+                    Some(entry) if self.state.status == Status::Playing => {
+                        self.report_play(entry.id, entry.track.video_id.clone())
+                    }
+                    _ => Task::none(),
+                };
                 if !track_changed {
-                    return Task::none();
+                    return report;
                 }
                 let cover = self.current_cover();
                 if let Some(color) = cover.as_ref().and_then(|id| self.accents.get(id)) {
                     self.accent = *color;
                 }
                 Task::batch([
+                    report,
                     self.want_cover(cover.clone(), HERO),
                     self.want_cover(cover.clone(), THUMB),
                     self.want_accent(cover),
