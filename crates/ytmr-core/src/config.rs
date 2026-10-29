@@ -113,9 +113,15 @@ pub struct PlayerConfig {
     /// C'est ici qu'on s'adapte quand YouTube change ses règles, sans recompiler.
     pub ytdl_raw_options: Vec<String>,
     /// Client YouTube de yt-dlp pour un démarrage à froid : son immédiat mais
-    /// qualité moindre (AAC ~96 kb/s). Vide = toujours la qualité (Opus), avec
-    /// quelques secondes d'attente. Les morceaux préchargés sont toujours en qualité.
+    /// qualité moindre (AAC ~96 kb/s). Vide (défaut) = toujours la meilleure
+    /// qualité, quelques secondes d'attente au premier morceau seulement.
+    /// Ignoré quand `cookies_from_browser` est renseigné.
     pub fast_start_client: String,
+    /// Navigateur où YouTube est connecté (`firefox`, ou `firefox:<dossier du profil>`
+    /// pour un dérivé comme Zen). Avec un compte Premium, yt-dlp obtient l'audio
+    /// ~256 kb/s (Opus 774 / AAC 141). Les cookies sont lus à chaque résolution,
+    /// jamais copiés. Chrome et Edge ne marchent pas sous Windows (cookies chiffrés).
+    pub cookies_from_browser: String,
 }
 
 impl Default for PlayerConfig {
@@ -125,14 +131,33 @@ impl Default for PlayerConfig {
             ytdlp_path: None,
             volume: 70,
             ytdl_raw_options: Vec::new(),
-            fast_start_client: "android".to_owned(),
+            fast_start_client: String::new(),
+            cookies_from_browser: String::new(),
         }
     }
 }
 
 impl PlayerConfig {
+    pub fn cookies_from_browser(&self) -> Option<&str> {
+        Some(self.cookies_from_browser.trim()).filter(|c| !c.is_empty())
+    }
+
+    /// Le mode rapide n'a pas de sens avec un compte : les clients rapides
+    /// n'acceptent pas les cookies et perdraient la qualité Premium.
     pub fn fast_start_client(&self) -> Option<&str> {
+        if self.cookies_from_browser().is_some() {
+            return None;
+        }
         Some(self.fast_start_client.trim()).filter(|c| !c.is_empty())
+    }
+
+    /// Options yt-dlp communes à la résolution et au repli de mpv.
+    pub fn ytdl_options(&self) -> Vec<String> {
+        let mut options = self.ytdl_raw_options.clone();
+        if let Some(browser) = self.cookies_from_browser() {
+            options.push(format!("cookies-from-browser={browser}"));
+        }
+        options
     }
 }
 
@@ -254,6 +279,18 @@ mod tests {
             Config::load_or_create(&path),
             Err(ConfigError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn cookies_disable_fast_start() {
+        let mut player = PlayerConfig {
+            fast_start_client: "android".into(),
+            ..PlayerConfig::default()
+        };
+        assert_eq!(player.fast_start_client(), Some("android"));
+        player.cookies_from_browser = "firefox".into();
+        assert_eq!(player.fast_start_client(), None);
+        assert_eq!(player.ytdl_options(), ["cookies-from-browser=firefox"]);
     }
 
     #[test]

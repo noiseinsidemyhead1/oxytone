@@ -5,12 +5,13 @@
 //! on pose la question en avance (pendant le morceau précédent) et on garde la
 //! réponse en mémoire tant que l'adresse est valable (plusieurs heures).
 //!
-//! Deux modes, car YouTube impose un compromis (constaté le 2026-10-29, sans PO token) :
-//! - [`StartMode::Quality`] : client par défaut de yt-dlp, audio seul Opus ~160 kb/s,
-//!   mais l'adresse n'est utilisable qu'après quelques secondes (`available_at`).
-//!   Idéal pour le préchargement, où ce délai est invisible.
+//! Deux modes (constaté le 2026-10-29, sans PO token) :
+//! - [`StartMode::Quality`] : client par défaut de yt-dlp, meilleur audio seul.
+//!   Compte gratuit : Opus 251 ~160 kb/s, utilisable seulement après quelques
+//!   secondes (`available_at`). Avec les cookies d'un compte Premium : Opus 774
+//!   ~264 kb/s, sans délai, mais ~7 s de résolution. Idéal pour le préchargement.
 //! - [`StartMode::Fast`] : client « rapide » (config `player.fast_start_client`),
-//!   format 18 (AAC ~96 kb/s), utilisable tout de suite. Pour un démarrage à froid.
+//!   format 18 (AAC ~96 kb/s), utilisable tout de suite. Désactivé par défaut.
 //!
 //! On ne touche pas à l'extraction : yt-dlp fait tout, on l'appelle juste plus tôt.
 

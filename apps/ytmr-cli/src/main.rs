@@ -121,23 +121,18 @@ async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result
     // Vérifier les outils d'abord : inutile de chercher si on ne peut pas jouer.
     let deps = detect(config).await?;
     let fast_client = config.player.fast_start_client();
+    let ytdl_options = config.player.ytdl_options();
     let (catalog, player) = tokio::try_join!(
         async { Ok::<_, anyhow::Error>(Catalog::new_unauthenticated().await?) },
         async {
-            Ok(MpvPlayer::spawn(
-                &deps,
-                config.player.volume,
-                fast_client,
-                &config.player.ytdl_raw_options,
-            )
-            .await?)
+            Ok(MpvPlayer::spawn(&deps, config.player.volume, fast_client, &ytdl_options).await?)
         },
     )?;
     let catalog = Arc::new(catalog);
     let resolver = Arc::new(YtDlpResolver::new(
         &deps,
         fast_client.map(str::to_owned),
-        &config.player.ytdl_raw_options,
+        &ytdl_options,
     ));
 
     let mut tracks = catalog.search_songs(query).await?;
@@ -314,7 +309,7 @@ fn status_line(s: &ytmr_core::PlaybackState) -> String {
 
 fn quality_label(q: StreamQuality) -> &'static str {
     match q {
-        StreamQuality::High => "haute (Opus, audio seul)",
+        StreamQuality::High => "haute (audio seul, meilleur format du compte)",
         StreamQuality::Low => "rapide (AAC ~96 kb/s, démarrage à froid)",
         StreamQuality::Unknown => "inconnue (résolue par mpv)",
     }
