@@ -12,7 +12,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::deps::{Dependencies, JsRuntime};
@@ -51,7 +51,7 @@ impl MpvPlayer {
         let volume = check_volume(volume)?;
         let ipc_path = ipc::ipc_path();
 
-        let mut cmd = Command::new(&deps.mpv.path);
+        let mut cmd = crate::process::command(&deps.mpv.path);
         cmd.args([
             "--idle=yes",
             "--no-video",

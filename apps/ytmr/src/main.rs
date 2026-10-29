@@ -22,24 +22,23 @@ fn main() -> Result<()> {
 
 /// Choix du rendu, qu'iced et wgpu ne lisent que dans l'environnement.
 ///
-/// - Rendu logiciel (`tiny-skia`) par défaut : mesuré le 2026-10-29, l'appli
-///   occupe ~21 Mo de mémoire privée contre 109 à 207 Mo avec le GPU (le pilote
-///   graphique coûte à lui seul ~90 Mo), pour 0,1 % de CPU en lecture. Une
-///   interface de lecteur de musique se redessine peu : le GPU n'apporte rien.
-/// - Si l'utilisateur choisit le GPU (`ICED_BACKEND=wgpu`) : sous Windows, sans
-///   OpenGL, dont l'initialisation plante avec certains pilotes (accès mémoire
-///   invalide au démarrage), et la carte basse consommation.
+/// - Rendu GPU (wgpu) avec synchronisation verticale : l'affichage suit la
+///   fréquence de l'écran (60, 120, 144 Hz…). Le rendu logiciel (`tiny-skia`)
+///   prenait ~90 Mo de moins mais saccadait au survol et au défilement : il
+///   reste disponible avec `ICED_BACKEND=tiny-skia`.
+/// - Carte basse consommation (GPU intégré) : largement suffisante pour cette
+///   interface, et elle ne réveille pas la carte dédiée d'un portable.
+/// - Sous Windows, DirectX 12 seul : par défaut wgpu essaie aussi OpenGL, dont
+///   l'initialisation plante avec certains pilotes (0xC0000005 au démarrage,
+///   constaté le 2026-10-29). DX12 coûte aussi moins de mémoire que Vulkan
+///   (109 Mo contre 160 Mo mesurés sur un Radeon 780M).
 ///
 /// Une valeur déjà définie par l'utilisateur est respectée.
 fn configure_renderer() {
     let defaults: &[(&str, &str)] = if cfg!(windows) {
-        &[
-            ("ICED_BACKEND", "tiny-skia"),
-            ("WGPU_BACKEND", "dx12"),
-            ("WGPU_POWER_PREF", "low"),
-        ]
+        &[("WGPU_BACKEND", "dx12"), ("WGPU_POWER_PREF", "low")]
     } else {
-        &[("ICED_BACKEND", "tiny-skia"), ("WGPU_POWER_PREF", "low")]
+        &[("WGPU_POWER_PREF", "low")]
     };
     for (key, value) in defaults {
         if std::env::var_os(key).is_none() {

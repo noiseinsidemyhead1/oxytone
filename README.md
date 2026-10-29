@@ -28,14 +28,13 @@ Windows 11, build release, 2026-10-29 :
 
 | Mesure | Résultat |
 |---|---|
-| Mémoire privée de l'appli au repos | ~21 Mo (+ mpv ~38 Mo) |
-| Après recherche et navigation (jaquettes en mémoire) | ~37 Mo |
-| CPU pendant la lecture | 0,1 % |
+| Mémoire privée de l'appli (rendu GPU, carte intégrée) | ~110 Mo (+ mpv ~38 Mo) |
+| Même chose en rendu logiciel (`ICED_BACKEND=tiny-skia`) | ~21 Mo, mais moins fluide |
 | Clic « Lecture » sur un album ouvert → son | 0,4 s (morceau préparé à l'ouverture) |
 | Enchaînement entre deux morceaux | ~7 ms de silence |
 | `/api/v1/state` | 342 octets, < 1 ms |
 
-Le rendu est logiciel (tiny-skia) : le rendu GPU coûtait 90 à 190 Mo de plus, rien que pour le pilote graphique. Pour l'activer quand même : variable d'environnement `ICED_BACKEND=wgpu`.
+Le rendu passe par la carte graphique intégrée (DirectX 12 sous Windows), synchronisé sur la fréquence de l'écran. Le rendu logiciel économise ~90 Mo (le pilote graphique) mais saccade au défilement : `ICED_BACKEND=tiny-skia` pour l'essayer.
 
 ## Utilisation (CLI)
 

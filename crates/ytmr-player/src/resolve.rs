@@ -22,7 +22,6 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tokio::process::Command;
 use tokio::sync::Semaphore;
 
 use crate::PlayerError;
@@ -134,7 +133,7 @@ impl YtDlpResolver {
             .map_err(|_| PlayerError::Closed)?;
         let url = format!("https://music.youtube.com/watch?v={video_id}");
 
-        let mut cmd = Command::new(&self.ytdlp);
+        let mut cmd = crate::process::command(&self.ytdlp);
         cmd.args([
             "-J",
             "--no-warnings",

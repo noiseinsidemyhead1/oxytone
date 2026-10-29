@@ -6,6 +6,7 @@
 
 pub mod deps;
 mod mpv;
+mod process;
 pub mod resolve;
 
 use std::time::Duration;

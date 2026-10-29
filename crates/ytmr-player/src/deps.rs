@@ -7,8 +7,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use tokio::process::Command;
-
 use crate::PlayerError;
 
 const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
@@ -75,7 +73,7 @@ impl Dependencies {
 
 /// Lance `<program> --version` ; `None` si absent ou en échec.
 async fn probe(program: &Path) -> Option<Tool> {
-    let output = Command::new(program)
+    let output = crate::process::command(program)
         .arg("--version")
         .stdin(Stdio::null())
         .stderr(Stdio::null())

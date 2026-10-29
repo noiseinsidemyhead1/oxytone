@@ -235,14 +235,11 @@ pub fn primary_round(accent: Color) -> impl Fn(&Theme, button::Status) -> button
         button::Style {
             background: Some(bg.into()),
             text_color: BG,
+            // Liseré d'accent plutôt qu'une ombre floue (le halo débordait en carré).
             border: Border {
+                color: alpha(accent, 0.6),
+                width: 2.0,
                 radius: 999.0.into(),
-                ..Border::default()
-            },
-            shadow: Shadow {
-                color: alpha(accent, 0.35),
-                offset: Vector::new(0.0, 4.0),
-                blur_radius: 16.0,
             },
             ..button::Style::default()
         }
