@@ -16,7 +16,7 @@ use tokio::sync::broadcast;
 
 pub use deps::Dependencies;
 pub use mpv::MpvPlayer;
-pub use resolve::{MediaSource, Resolver, StartMode, StreamQuality, YtDlpResolver};
+pub use resolve::{MediaSource, Priority, Resolver, StartMode, StreamQuality, YtDlpResolver};
 
 #[derive(Debug, Error)]
 pub enum PlayerError {

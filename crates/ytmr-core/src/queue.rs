@@ -109,6 +109,14 @@ impl Queue {
         self.entries.iter().any(|e| e.track.video_id == video_id)
     }
 
+    /// Morceaux après le courant, dans l'ordre de lecture (tous si rien n'est en cours).
+    pub fn upcoming(&self) -> &[QueuedTrack] {
+        match self.current {
+            Some(i) => &self.entries[i + 1..],
+            None => &self.entries,
+        }
+    }
+
     /// Morceaux restant après le courant (tous si rien n'est en cours).
     pub fn upcoming_len(&self) -> usize {
         match self.current {

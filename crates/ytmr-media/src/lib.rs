@@ -29,6 +29,10 @@ pub const MAX_RGB565_SIZE: u32 = 320;
 pub const MIN_SIZE: u32 = 16;
 const JPEG_QUALITY: u8 = 88;
 const MAX_CONCURRENT_DOWNLOADS: usize = 4;
+/// Au-delà, le cache disque est purgé au démarrage (les plus anciens d'abord)…
+const CACHE_LIMIT: u64 = 250 * 1024 * 1024;
+/// … jusqu'à redescendre sous ce seuil.
+const CACHE_TARGET: u64 = 200 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum MediaError {
@@ -131,6 +135,7 @@ impl Covers {
     /// `dir` : dossier de cache (créé au besoin).
     pub fn new(dir: PathBuf) -> Result<Self, MediaError> {
         std::fs::create_dir_all(dir.join("src"))?;
+        prune(&dir, CACHE_LIMIT, CACHE_TARGET);
         Ok(Self {
             dir,
             http: reqwest::Client::new(),
@@ -220,6 +225,47 @@ impl Covers {
         tracing::debug!(id, bytes = data.len(), "jaquette téléchargée");
         Ok(data)
     }
+}
+
+/// Supprime les fichiers les moins récemment écrits tant que le cache dépasse `target`.
+fn prune(dir: &Path, limit: u64, target: u64) {
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> =
+        [dir.to_path_buf(), dir.join("src")]
+            .iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let meta = entry.metadata().ok()?;
+                meta.is_file().then(|| {
+                    (
+                        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+                        meta.len(),
+                        entry.path(),
+                    )
+                })
+            })
+            .collect();
+    let mut total: u64 = files.iter().map(|(_, len, _)| len).sum();
+    if total <= limit {
+        return;
+    }
+    files.sort_by_key(|(modified, _, _)| *modified);
+    let mut removed = 0usize;
+    for (_, len, path) in files {
+        if total <= target {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            total -= len;
+            removed += 1;
+        }
+    }
+    tracing::info!(
+        removed,
+        remaining_mb = total / (1024 * 1024),
+        "cache de jaquettes purgé"
+    );
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -377,6 +423,29 @@ mod tests {
         image.write_to(&mut png, image::ImageFormat::Png).unwrap();
         let [r, g, b] = dominant_color(&png.into_inner()).unwrap();
         assert!(b > 180 && r < 60, "bleu attendu, obtenu {r},{g},{b}");
+    }
+
+    #[test]
+    fn prune_removes_oldest_files_first() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        for (i, name) in ["a", "b", "c", "d"].iter().enumerate() {
+            let path = dir.path().join(name);
+            std::fs::write(&path, vec![0u8; 100]).unwrap();
+            let time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000 + i as u64);
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(time)
+                .unwrap();
+        }
+        prune(dir.path(), 350, 200);
+        let left: Vec<_> = ["a", "b", "c", "d"]
+            .iter()
+            .filter(|n| dir.path().join(n).exists())
+            .collect();
+        assert_eq!(left, [&"c", &"d"]);
     }
 
     #[tokio::test]

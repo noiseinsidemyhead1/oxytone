@@ -5,7 +5,9 @@
 
 use std::time::Duration;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Track {
     /// Identifiant vidéo YouTube (11 caractères).
     pub video_id: String,

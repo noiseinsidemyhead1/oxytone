@@ -31,7 +31,7 @@ pub const HERO: u32 = 640;
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
 /// Survol prolongé avant de préparer un morceau (évite de lancer yt-dlp en
 /// passant simplement la souris sur une liste).
-const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(450);
+const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(250);
 const TOAST_DURATION: Duration = Duration::from_secs(4);
 
 pub const SEARCH_INPUT: &str = "recherche";
@@ -402,9 +402,10 @@ impl App {
             Message::BackendReady(result) => match result.map(|slot| slot.take()) {
                 Ok(Some(backend)) => {
                     let core = backend.core.clone();
-                    self.state = core.state();
                     self.phase = Phase::Ready(backend);
-                    Task::stream(core_updates(core))
+                    // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
+                    let initial = self.on_core(CoreUpdate::State(core.state()));
+                    Task::batch([initial, Task::stream(core_updates(core))])
                 }
                 Ok(None) => Task::none(),
                 Err(e) => {
@@ -463,9 +464,10 @@ impl App {
                             let id = self.url_cover(artist.thumbnail_url.as_deref());
                             tasks.push(self.want_cover(id, CARD));
                         }
-                        // Le premier résultat est le plus probable : on le prépare.
-                        if let Some(first) = results.songs.first() {
-                            tasks.push(self.send(Command::Prefetch(first.video_id.clone())));
+                        // Les premiers résultats sont les plus probables : on les prépare
+                        // (dans l'ordre inverse, chaque indice passant devant le précédent).
+                        for track in results.songs.iter().take(3).rev() {
+                            tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
                         }
                         self.search = Some(Load::Ready(results));
                         Task::batch(tasks)
@@ -487,8 +489,8 @@ impl App {
                             self.want_cover(cover.clone(), HERO),
                             self.want_accent(cover),
                         ];
-                        if let Some(first) = album.tracks.first() {
-                            tasks.push(self.send(Command::Prefetch(first.video_id.clone())));
+                        for track in album.tracks.iter().take(3).rev() {
+                            tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
                         }
                         self.album = Some((id, Load::Ready(album)));
                         Task::batch(tasks)

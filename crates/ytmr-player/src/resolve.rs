@@ -14,6 +14,11 @@
 //!   format 18 (AAC ~96 kb/s), utilisable tout de suite. Désactivé par défaut.
 //!
 //! On ne touche pas à l'extraction : yt-dlp fait tout, on l'appelle juste plus tôt.
+//!
+//! Deux files : [`Priority::Urgent`] (morceau demandé, morceau suivant) et
+//! [`Priority::Background`] (les ~10 suivants, le morceau survolé). Le travail
+//! de fond ne retarde donc jamais un clic. Une même vidéo demandée deux fois
+//! n'est résolue qu'une fois : la seconde demande attend la première.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -22,7 +27,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, watch};
 
 use crate::PlayerError;
 use crate::deps::{Dependencies, JsRuntime};
@@ -33,8 +38,19 @@ const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 const EXPIRY_MARGIN: Duration = Duration::from_secs(10 * 60);
 /// Durée de vie supposée si l'URL ne donne pas `expire=`.
 const DEFAULT_LIFETIME: Duration = Duration::from_secs(4 * 3600);
-/// Nombre de yt-dlp lancés en même temps.
-const MAX_CONCURRENT: usize = 2;
+/// yt-dlp lancés en même temps, par file.
+const MAX_URGENT: usize = 2;
+const MAX_BACKGROUND: usize = 2;
+/// Au-delà, les adresses qui expirent le plus tôt sont oubliées (~1 Ko chacune).
+const MAX_CACHED: usize = 300;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Priority {
+    /// L'utilisateur attend (clic, morceau suivant).
+    Urgent,
+    /// Anticipation : peut attendre son tour.
+    Background,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartMode {
@@ -90,8 +106,11 @@ pub trait Resolver: Send + Sync + 'static {
         &self,
         video_id: &str,
         mode: StartMode,
+        priority: Priority,
     ) -> impl Future<Output = Result<MediaSource, PlayerError>> + Send;
 }
+
+type Shared = watch::Receiver<Option<Result<MediaSource, String>>>;
 
 pub struct YtDlpResolver {
     ytdlp: PathBuf,
@@ -99,7 +118,10 @@ pub struct YtDlpResolver {
     common_args: Vec<String>,
     fast_client: Option<String>,
     cache: Mutex<HashMap<String, MediaSource>>,
-    slots: Semaphore,
+    /// Résolutions en cours, partagées entre demandeurs.
+    inflight: Mutex<HashMap<String, Shared>>,
+    urgent: Semaphore,
+    background: Semaphore,
 }
 
 impl YtDlpResolver {
@@ -116,8 +138,51 @@ impl YtDlpResolver {
             common_args,
             fast_client,
             cache: Mutex::default(),
-            slots: Semaphore::new(MAX_CONCURRENT),
+            inflight: Mutex::default(),
+            urgent: Semaphore::new(MAX_URGENT),
+            background: Semaphore::new(MAX_BACKGROUND),
         }
+    }
+
+    fn remember(&self, video_id: &str, source: &MediaSource) {
+        let mut cache = lock(&self.cache);
+        cache.retain(|_, s| s.is_fresh());
+        if cache.len() >= MAX_CACHED
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, s)| s.expires_at)
+                .map(|(k, _)| k.clone())
+        {
+            cache.remove(&oldest);
+        }
+        cache.insert(video_id.to_owned(), source.clone());
+    }
+
+    /// Résolution effective : file d'attente, yt-dlp, attente de disponibilité.
+    async fn resolve_now(
+        &self,
+        video_id: &str,
+        mode: StartMode,
+        priority: Priority,
+    ) -> Result<MediaSource, PlayerError> {
+        let semaphore = match priority {
+            Priority::Urgent => &self.urgent,
+            Priority::Background => &self.background,
+        };
+        let (source, available_at) = {
+            let _slot = semaphore.acquire().await.map_err(|_| PlayerError::Closed)?;
+            self.run(video_id, mode).await?
+        };
+        if let Some(wait) = available_at.and_then(|t| t.duration_since(SystemTime::now()).ok()) {
+            tracing::debug!(
+                video_id,
+                wait_ms = wait.as_millis(),
+                "attente de disponibilité du flux"
+            );
+            tokio::time::sleep(wait).await;
+        }
+        self.remember(video_id, &source);
+        Ok(source)
     }
 
     /// Lance yt-dlp ; rend la source et l'instant à partir duquel elle est utilisable.
@@ -126,11 +191,6 @@ impl YtDlpResolver {
         video_id: &str,
         mode: StartMode,
     ) -> Result<(MediaSource, Option<SystemTime>), PlayerError> {
-        let _slot = self
-            .slots
-            .acquire()
-            .await
-            .map_err(|_| PlayerError::Closed)?;
         let url = format!("https://music.youtube.com/watch?v={video_id}");
 
         let mut cmd = crate::process::command(&self.ytdlp);
@@ -197,24 +257,71 @@ impl Resolver for YtDlpResolver {
         }
     }
 
-    async fn resolve(&self, video_id: &str, mode: StartMode) -> Result<MediaSource, PlayerError> {
+    async fn resolve(
+        &self,
+        video_id: &str,
+        mode: StartMode,
+        priority: Priority,
+    ) -> Result<MediaSource, PlayerError> {
         if let Some(source) = self.cached(video_id) {
             // Une source rapide en cache ne suffit pas quand on veut la qualité.
             if mode == StartMode::Fast || source.quality == StreamQuality::High {
                 return Ok(source);
             }
         }
-        let (source, available_at) = self.run(video_id, mode).await?;
-        if let Some(wait) = available_at.and_then(|t| t.duration_since(SystemTime::now()).ok()) {
-            tracing::debug!(
-                video_id,
-                wait_ms = wait.as_millis(),
-                "attente de disponibilité du flux"
-            );
-            tokio::time::sleep(wait).await;
+
+        // Déjà en cours ailleurs : on attend ce résultat plutôt que de relancer yt-dlp.
+        let joined = {
+            let mut inflight = lock(&self.inflight);
+            match inflight.get(video_id) {
+                Some(rx) => Err(rx.clone()),
+                None => {
+                    let (tx, rx) = watch::channel(None);
+                    inflight.insert(video_id.to_owned(), rx);
+                    Ok(tx)
+                }
+            }
+        };
+        let tx = match joined {
+            Ok(tx) => tx,
+            Err(mut rx) => {
+                tracing::debug!(
+                    video_id,
+                    ?priority,
+                    "résolution déjà en cours, on la partage"
+                );
+                let shared = rx
+                    .wait_for(Option::is_some)
+                    .await
+                    .map_err(|_| PlayerError::Resolve(format!("{video_id} : résolution annulée")))?
+                    .clone();
+                return match shared {
+                    Some(Ok(source)) => Ok(source),
+                    Some(Err(e)) => Err(PlayerError::Resolve(e)),
+                    None => Err(PlayerError::Resolve(format!(
+                        "{video_id} : résolution annulée"
+                    ))),
+                };
+            }
+        };
+
+        // Retire l'entrée « en cours » quoi qu'il arrive (erreur, annulation).
+        struct Done<'a>(&'a Mutex<HashMap<String, Shared>>, &'a str);
+        impl Drop for Done<'_> {
+            fn drop(&mut self) {
+                lock(self.0).remove(self.1);
+            }
         }
-        lock(&self.cache).insert(video_id.to_owned(), source.clone());
-        Ok(source)
+        let _done = Done(&self.inflight, video_id);
+
+        let result = self.resolve_now(video_id, mode, priority).await;
+        let _ = tx.send(Some(
+            result
+                .as_ref()
+                .map(Clone::clone)
+                .map_err(ToString::to_string),
+        ));
+        result
     }
 }
 

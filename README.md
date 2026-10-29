@@ -32,6 +32,8 @@ Windows 11, build release, 2026-10-29 :
 | Même chose en rendu logiciel (`ICED_BACKEND=tiny-skia`) | ~21 Mo, mais moins fluide |
 | Clic « Lecture » sur un album ouvert → son | 0,4 s (morceau préparé à l'ouverture) |
 | Enchaînement entre deux morceaux | ~7 ms de silence |
+| Skip vers l'un des 10 morceaux suivants (déjà préparés) | ~0,06 s |
+| Premier morceau sans préparation (Premium) | ~8 s |
 | `/api/v1/state` | 342 octets, < 1 ms |
 
 Le rendu passe par la carte graphique intégrée (DirectX 12 sous Windows), synchronisé sur la fréquence de l'écran. Le rendu logiciel économise ~90 Mo (le pilote graphique) mais saccade au défilement : `ICED_BACKEND=tiny-skia` pour l'essayer.

@@ -13,7 +13,8 @@
 //! Radio : quand il reste moins de deux morceaux, des titres similaires au
 //! morceau courant sont ajoutés à la fin (si l'autoplay est actif).
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,10 +22,11 @@ use thiserror::Error;
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::{JoinHandle, JoinSet};
 // Horloge de tokio : figeable dans les tests.
+use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use ytmr_player::{
-    EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent, Resolver, StartMode,
-    StreamQuality,
+    EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent, Priority, Resolver,
+    StartMode, StreamQuality,
 };
 
 use crate::Track;
@@ -48,8 +50,10 @@ const RADIO_MAX_ADD: usize = 25;
 /// YouTube), un démarrage rapide ~3 s. Au-delà de ce temps écoulé, attendre le
 /// préchargement en cours est plus rapide (et en meilleure qualité).
 const PRELOAD_WAIT_THRESHOLD: Duration = Duration::from_secs(5);
-/// Résolutions « au cas où » (survol dans l'interface) menées en même temps.
+/// Résolutions d'anticipation menées en même temps (file « de fond » du résolveur).
 const MAX_WARMING: usize = 2;
+/// Morceaux à venir résolus d'avance : on peut les enchaîner ou les sauter sans attendre.
+const LOOKAHEAD: usize = 10;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Status {
@@ -144,6 +148,39 @@ pub enum CoreError {
 pub struct CoreOptions {
     pub volume: u8,
     pub autoplay: bool,
+    /// Fichier où garder la file et la position entre deux lancements.
+    pub session_file: Option<PathBuf>,
+}
+
+/// File et position sauvegardées à la fermeture, reprises au lancement suivant.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Session {
+    tracks: Vec<Track>,
+    current: Option<usize>,
+    position_ms: u64,
+}
+
+impl Session {
+    fn load(path: &std::path::Path) -> Option<Self> {
+        let text = std::fs::read_to_string(path).ok()?;
+        serde_json::from_str(&text)
+            .inspect_err(|e| tracing::warn!(error = %e, "session illisible, ignorée"))
+            .ok()
+    }
+
+    fn save(&self, path: &std::path::Path) {
+        let result = serde_json::to_string(self)
+            .map_err(std::io::Error::other)
+            .and_then(|json| {
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                std::fs::write(path, json)
+            });
+        if let Err(e) = result {
+            tracing::warn!(error = %e, "sauvegarde de la session");
+        }
+    }
 }
 
 type Request = (Command, oneshot::Sender<Result<(), CoreError>>);
@@ -203,13 +240,24 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
     resolver: Arc<R>,
     radio: Arc<C>,
     options: CoreOptions,
-    queue: Queue,
+    mut queue: Queue,
 ) -> (CoreHandle, JoinHandle<()>) {
-    let state = PlaybackState {
+    let mut state = PlaybackState {
         volume: options.volume,
         autoplay: options.autoplay,
         ..PlaybackState::default()
     };
+    // Reprise : la file revient telle qu'à la fermeture, en pause sur le même morceau.
+    let mut resume_at = None;
+    if let Some(session) = options.session_file.as_deref().and_then(Session::load)
+        && let Some(id) = queue.replace(session.tracks, session.current.unwrap_or(0))
+    {
+        let position = Duration::from_millis(session.position_ms);
+        state.position = position;
+        state.duration = queue.current().and_then(|e| e.track.duration);
+        resume_at = Some((id, position));
+        tracing::info!(tracks = queue.entries().len(), "session reprise");
+    }
     let (commands_tx, commands_rx) = mpsc::channel(64);
     let (state_tx, state_rx) = watch::channel(state.clone());
     let (queue_tx, queue_rx) = watch::channel(Arc::new(QueueSnapshot::default()));
@@ -237,6 +285,9 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         radio_inflight: false,
         radio_seed: None,
         warming: HashSet::new(),
+        warm_wanted: VecDeque::new(),
+        resume_at,
+        session_file: options.session_file,
         consecutive_errors: 0,
         player_alive: true,
     };
@@ -301,23 +352,34 @@ struct Engine<P, R, C> {
     radio_inflight: bool,
     /// Dernier morceau ayant servi de graine à la radio (évite de redemander en boucle).
     radio_seed: Option<QueueId>,
-    /// Morceaux en cours de résolution suite à un [`Command::Prefetch`].
+    /// Morceaux en cours de résolution d'anticipation.
     warming: HashSet<String>,
+    /// Morceaux à résoudre d'avance, par ordre de priorité.
+    warm_wanted: VecDeque<String>,
+    /// Position à rejoindre au premier démarrage du morceau repris.
+    resume_at: Option<(QueueId, Duration)>,
+    session_file: Option<PathBuf>,
     consecutive_errors: u32,
     player_alive: bool,
 }
 
 impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     async fn run(mut self, mut commands: mpsc::Receiver<Request>) {
+        // Session reprise : publier la file et préparer les premiers morceaux.
+        self.queue_dirty = self.queue.current().is_some();
+        self.refresh_lookahead();
+        self.publish();
         loop {
             tokio::select! {
                 request = commands.recv() => {
                     let Some((command, reply)) = request else {
                         // Plus aucune télécommande : on s'arrête.
+                        self.save_session();
                         self.player.shutdown().await;
                         return;
                     };
                     if matches!(command, Command::Shutdown) {
+                        self.save_session();
                         self.player.shutdown().await;
                         let _ = reply.send(Ok(()));
                         return;
@@ -386,7 +448,8 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 Ok(())
             }
             Command::TogglePause => {
-                let pause = !matches!(self.state.status, Status::Paused);
+                // Rien ne joue (arrêt, session reprise) : le bouton lance la lecture.
+                let pause = matches!(self.state.status, Status::Playing | Status::Loading);
                 self.set_paused(pause).await
             }
             Command::Play => self.set_paused(false).await,
@@ -437,22 +500,97 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         }
     }
 
+    /// Indice explicite (survol, page ouverte) : passe devant l'anticipation.
     fn warm(&mut self, video_id: String) {
-        let already = self
-            .resolver
-            .cached(&video_id)
-            .is_some_and(|s| s.quality == StreamQuality::High);
-        if already || self.warming.contains(&video_id) || self.warming.len() >= MAX_WARMING {
-            return;
-        }
-        self.warming.insert(video_id.clone());
-        let resolver = Arc::clone(&self.resolver);
-        self.tasks.spawn(async move {
-            if let Err(e) = resolver.resolve(&video_id, StartMode::Quality).await {
-                tracing::debug!(error = %e, video_id, "préchauffage échoué");
+        self.warm_wanted.retain(|v| *v != video_id);
+        self.warm_wanted.push_front(video_id);
+        self.pump_warm();
+    }
+
+    fn is_ready(&self, video_id: &str) -> bool {
+        self.resolver
+            .cached(video_id)
+            .is_some_and(|s| s.quality == StreamQuality::High)
+    }
+
+    /// Recalcule les morceaux à préparer : le courant s'il ne joue pas encore,
+    /// puis les [`LOOKAHEAD`] suivants (le tout prochain est géré par le préchargement).
+    fn refresh_lookahead(&mut self) {
+        let next = self.queue.peek_auto_next().map(|e| e.id);
+        // Le courant seulement s'il est à l'arrêt (session reprise) : pendant un
+        // démarrage, sa résolution urgente est déjà lancée et ne doit pas se
+        // retrouver à attendre dans la file de fond.
+        let current = self
+            .queue
+            .current()
+            .filter(|_| self.current_entry.is_none() && self.state.status == Status::Idle)
+            .map(|e| e.track.video_id.clone());
+        let upcoming = self
+            .queue
+            .upcoming()
+            .iter()
+            .filter(|e| Some(e.id) != next)
+            .take(LOOKAHEAD)
+            .map(|e| e.track.video_id.clone());
+        let wanted: Vec<String> = current
+            .into_iter()
+            .chain(upcoming)
+            .filter(|v| !self.warming.contains(v) && !self.is_ready(v))
+            .collect();
+        // Les indices explicites encore utiles restent en tête.
+        let hints: Vec<String> = self
+            .warm_wanted
+            .iter()
+            .filter(|v| !wanted.contains(v))
+            .take(2)
+            .cloned()
+            .collect();
+        self.warm_wanted = hints.into_iter().chain(wanted).collect();
+        self.pump_warm();
+    }
+
+    fn pump_warm(&mut self) {
+        while self.warming.len() < MAX_WARMING {
+            let Some(video_id) = self.warm_wanted.pop_front() else {
+                return;
+            };
+            if self.warming.contains(&video_id) || self.is_ready(&video_id) {
+                continue;
             }
-            TaskDone::Warmed { video_id }
-        });
+            self.warming.insert(video_id.clone());
+            let resolver = Arc::clone(&self.resolver);
+            self.tasks.spawn(async move {
+                let result = resolver
+                    .resolve(&video_id, StartMode::Quality, Priority::Background)
+                    .await;
+                if let Err(e) = result {
+                    tracing::debug!(error = %e, video_id, "anticipation échouée");
+                }
+                TaskDone::Warmed { video_id }
+            });
+        }
+    }
+
+    fn save_session(&self) {
+        let Some(path) = &self.session_file else {
+            return;
+        };
+        // Pas la peine de garder des milliers de morceaux de radio.
+        let start = self.queue.current_index().unwrap_or(0).saturating_sub(50);
+        let tracks: Vec<Track> = self
+            .queue
+            .entries()
+            .iter()
+            .skip(start)
+            .take(500)
+            .map(|e| e.track.clone())
+            .collect();
+        Session {
+            current: self.queue.current_index().map(|c| c - start),
+            position_ms: u64::try_from(self.state.position.as_millis()).unwrap_or(0),
+            tracks,
+        }
+        .save(path);
     }
 
     async fn after_insert(&mut self, ids: Vec<QueueId>) -> Result<(), CoreError> {
@@ -536,8 +674,12 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         self.queue.set_current(id);
         self.queue_dirty = true;
         self.reset_track_state(&track);
+        if self.resume_at.is_some_and(|(r, _)| r != id) {
+            self.resume_at = None;
+        }
         // File presque vide : la radio peut se préparer pendant le chargement.
         self.maybe_fetch_radio();
+        self.refresh_lookahead();
 
         if let Some(pending) = self.pending.take_if(|p| p.id == id) {
             // Déjà chargé dans le lecteur : passage instantané.
@@ -576,7 +718,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         let resolver = Arc::clone(&self.resolver);
         let generation = self.load_generation;
         self.tasks.spawn(async move {
-            let result = resolver.resolve(&video_id, StartMode::Fast).await;
+            let result = resolver
+                .resolve(&video_id, StartMode::Fast, Priority::Urgent)
+                .await;
             TaskDone::Start {
                 generation,
                 id,
@@ -617,6 +761,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     /// Met le lecteur en accord avec « ce qui vient après » dans la file.
     async fn refresh_preload(&mut self) {
         self.maybe_fetch_radio();
+        self.refresh_lookahead();
         if self.current_entry.is_none() {
             // On préchargera quand le morceau courant aura démarré.
             return;
@@ -655,7 +800,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         self.preloading = Some((id, Instant::now()));
         let resolver = Arc::clone(&self.resolver);
         self.tasks.spawn(async move {
-            let result = resolver.resolve(&video_id, StartMode::Quality).await;
+            let result = resolver
+                .resolve(&video_id, StartMode::Quality, Priority::Urgent)
+                .await;
             TaskDone::Preload { id, result }
         });
     }
@@ -767,6 +914,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             }
             TaskDone::Warmed { video_id } => {
                 self.warming.remove(&video_id);
+                self.pump_warm();
             }
             TaskDone::Radio { result } => {
                 self.radio_inflight = false;
@@ -869,6 +1017,16 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         // Retire les entrées terminées de la playlist du lecteur.
         if let Err(e) = self.player.clear_pending().await {
             tracing::warn!(error = %e, "nettoyage de la playlist du lecteur");
+        }
+        // Session reprise : on repart là où on s'était arrêté.
+        let current = self.queue.current().map(|e| e.id);
+        if let Some((id, position)) = self.resume_at.take_if(|(r, _)| Some(*r) == current)
+            && position > Duration::from_secs(2)
+        {
+            if let Err(e) = self.player.seek(position).await {
+                tracing::warn!(error = %e, "reprise de la position");
+            }
+            tracing::debug!(?id, secs = position.as_secs(), "position reprise");
         }
         self.refresh_preload().await;
     }
@@ -1051,6 +1209,19 @@ mod tests {
     #[derive(Default)]
     struct FakeResolver {
         quality_delay: Duration,
+        log: Mutex<Vec<(String, StartMode, Priority)>>,
+    }
+
+    impl FakeResolver {
+        fn background(&self) -> Vec<String> {
+            self.log
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(_, _, p)| *p == Priority::Background)
+                .map(|(v, _, _)| v.clone())
+                .collect()
+        }
     }
 
     impl Resolver for FakeResolver {
@@ -1061,7 +1232,12 @@ mod tests {
             &self,
             video_id: &str,
             mode: StartMode,
+            priority: Priority,
         ) -> Result<MediaSource, PlayerError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push((video_id.to_owned(), mode, priority));
             if mode == StartMode::Quality {
                 tokio::time::sleep(self.quality_delay).await;
             }
@@ -1111,13 +1287,24 @@ mod tests {
         radio: Vec<Track>,
         resolver: FakeResolver,
     ) -> CoreHandle {
+        start_full(player, autoplay, radio, Arc::new(resolver), None)
+    }
+
+    fn start_full(
+        player: &FakePlayer,
+        autoplay: bool,
+        radio: Vec<Track>,
+        resolver: Arc<FakeResolver>,
+        session_file: Option<PathBuf>,
+    ) -> CoreHandle {
         let (handle, _task) = spawn_with_queue(
             player.clone(),
-            Arc::new(resolver),
+            resolver,
             Arc::new(FakeRadio(radio)),
             CoreOptions {
                 volume: 50,
                 autoplay,
+                session_file,
             },
             Queue::with_rng(fastrand::Rng::with_seed(7)),
         );
@@ -1302,6 +1489,7 @@ mod tests {
         let player = FakePlayer::new();
         let resolver = FakeResolver {
             quality_delay: Duration::from_secs(8),
+            ..FakeResolver::default()
         };
         let core = start_with(&player, false, vec![], resolver);
         core.send(Command::PlayTracks {
@@ -1330,6 +1518,7 @@ mod tests {
         let player = FakePlayer::new();
         let resolver = FakeResolver {
             quality_delay: Duration::from_secs(8),
+            ..FakeResolver::default()
         };
         let core = start_with(&player, false, vec![], resolver);
         core.send(Command::PlayTracks {
@@ -1345,6 +1534,89 @@ mod tests {
         core.send(Command::Next).await.unwrap();
         until("démarrage rapide", || {
             player.calls().contains(&Call::Load("src:v1:Fast".into()))
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn resolves_the_next_ten_tracks_in_background() {
+        let player = FakePlayer::new();
+        let resolver = Arc::new(FakeResolver::default());
+        let core = start_full(&player, false, vec![], Arc::clone(&resolver), None);
+        core.send(Command::PlayTracks {
+            tracks: tracks(0..15),
+            start: 0,
+        })
+        .await
+        .unwrap();
+        until("chargement", || !player.calls().is_empty()).await;
+        player.emit(PlayerEvent::Started(EntryId(1)));
+
+        until("anticipation", || resolver.background().len() >= 10).await;
+        let mut warmed = resolver.background();
+        warmed.sort();
+        let mut expected: Vec<String> = (2..12).map(|n| format!("v{n}")).collect();
+        expected.sort();
+        assert_eq!(
+            warmed, expected,
+            "v1 est préchargé en urgent, v12+ hors fenêtre"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_is_saved_and_resumed_at_the_same_position() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("session.json");
+
+        let player = FakePlayer::new();
+        let core = start_full(
+            &player,
+            false,
+            vec![],
+            Arc::new(FakeResolver::default()),
+            Some(file.clone()),
+        );
+        core.send(Command::PlayTracks {
+            tracks: tracks(0..3),
+            start: 1,
+        })
+        .await
+        .unwrap();
+        until("chargement", || !player.calls().is_empty()).await;
+        player.emit(PlayerEvent::Started(EntryId(1)));
+        player.emit(PlayerEvent::Position(Duration::from_secs(42)));
+        until("position", || {
+            core.state().position == Duration::from_secs(42)
+        })
+        .await;
+        core.send(Command::Shutdown).await.unwrap();
+        assert!(file.exists());
+
+        // Nouveau lancement : même file, en pause sur t1, à 42 s.
+        let player = FakePlayer::new();
+        let core = start_full(
+            &player,
+            false,
+            vec![],
+            Arc::new(FakeResolver::default()),
+            Some(file),
+        );
+        until("file reprise", || core.queue().entries.len() == 3).await;
+        assert_eq!(current_title(&core).as_deref(), Some("t1"));
+        assert_eq!(core.state().status, Status::Idle);
+        assert_eq!(core.state().position, Duration::from_secs(42));
+
+        // « Lecture » relance le morceau et rejoint la position.
+        core.send(Command::TogglePause).await.unwrap();
+        until("chargement repris", || {
+            player.calls().iter().any(|c| matches!(c, Call::Load(_)))
+        })
+        .await;
+        player.emit(PlayerEvent::Started(EntryId(1)));
+        until("position rejointe", || {
+            player
+                .calls()
+                .contains(&Call::Seek(Duration::from_secs(42)))
         })
         .await;
     }

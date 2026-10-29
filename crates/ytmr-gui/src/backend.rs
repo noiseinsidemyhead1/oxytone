@@ -82,6 +82,7 @@ impl Backend {
             CoreOptions {
                 volume: config.player.volume,
                 autoplay: config.playback.autoplay,
+                session_file: Some(paths.data_dir.join("session.json")),
             },
         );
 

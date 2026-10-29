@@ -148,6 +148,8 @@ async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result
         CoreOptions {
             volume: config.player.volume,
             autoplay,
+            // La CLI est un outil de test : elle ne touche pas à la session de l'appli.
+            session_file: None,
         },
     );
     println!("{HELP}");
