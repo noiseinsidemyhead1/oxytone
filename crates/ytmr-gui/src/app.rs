@@ -50,6 +50,16 @@ pub const SEARCH_INPUT: &str = "recherche";
 /// Défilement de la page centrale, remis en haut à chaque navigation.
 pub const PAGE_SCROLL: &str = "page";
 pub const QUEUE_SCROLL: &str = "file";
+pub const LYRICS_SCROLL: &str = "paroles";
+/// Hauteur d'une ligne de paroles (fixe : on sait où défiler).
+pub const LYRIC_LINE_H: f32 = 56.0;
+
+/// Ce qu'affiche le panneau de droite : la file ou les paroles, jamais les deux.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RightPanel {
+    Queue,
+    Lyrics,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
@@ -130,11 +140,18 @@ pub enum Message {
     CycleRepeat,
     ToggleAutoplay,
     ToggleQueue,
+    /// Bouton micro : panneau des paroles à la place de la file.
+    ToggleLyrics,
+    /// Double-clic sur une ligne de la file.
+    JumpTo(QueueId),
+    /// La souris quitte une ligne de la file.
+    QueueUnhover(usize),
     Remove(QueueId),
     ClearQueue,
     Hover(String),
     HoverSettled(String),
-    Unhover,
+    /// La souris quitte la ligne de ce morceau.
+    Unhover(String),
     CommandDone(Result<(), String>),
     Key(keyboard::Event),
     DismissToast(u64),
@@ -317,6 +334,12 @@ pub struct App {
     /// Pochettes impossibles à charger : ne plus les attendre.
     cover_failed: std::collections::HashSet<(String, u32)>,
     pub show_queue: bool,
+    pub right_panel: RightPanel,
+    /// Mesure des images par seconde (`YTMR_FPS`) : début de la seconde, images.
+    fps_meter: Option<(std::time::Instant, u32)>,
+    /// Ligne de paroles suivie (pour ne glisser qu'au changement de ligne).
+    lyrics_line: Option<usize>,
+    pub lyrics_view: View,
     pub seek_preview: Option<f32>,
     muted_volume: Option<u8>,
     pub hovered: Option<String>,
@@ -429,6 +452,10 @@ impl App {
             notify: ytmr_os::NotifySettings::new(true),
             dragging: None,
             queue_drag: None,
+            right_panel: RightPanel::Queue,
+            fps_meter: std::env::var_os("YTMR_FPS").map(|_| (std::time::Instant::now(), 0)),
+            lyrics_line: None,
+            lyrics_view: View::default(),
             drag_anchor: None,
             ui_file: Some(config.1.cache_dir.join("ui.json")),
             pending_route: None,
@@ -502,7 +529,9 @@ impl App {
             }));
         }
         // Une image par rafraîchissement de l'écran, seulement pendant une animation.
+        // `YTMR_FPS=1` : redessin continu et images/s dans le journal (mesure).
         if self.scrolling.is_animating()
+            || self.fps_meter.is_some()
             || self.is_loading()
             || self.accent_fade.is_running()
             || self.page_fade.is_running()
@@ -547,8 +576,9 @@ impl App {
                     return Task::none();
                 };
                 let id = entry.id;
+                // Un clic simple ne lance rien (double-clic pour cela).
                 if !d.moved {
-                    return self.send(Command::JumpTo(id));
+                    return Task::none();
                 }
                 // Le morceau en cours reste en tête : rien ne passe devant lui.
                 let first = usize::from(self.queue.current.is_some());
@@ -566,6 +596,32 @@ impl App {
         }
     }
 
+    pub(crate) fn lyrics_shown(&self) -> bool {
+        self.show_queue && self.right_panel == RightPanel::Lyrics
+    }
+
+    /// Fait glisser les paroles jusqu'à la ligne chantée (quand elle change).
+    fn follow_lyrics(&mut self) {
+        if !self.lyrics_shown() {
+            return;
+        }
+        let Some(entry) = &self.state.current else {
+            return;
+        };
+        let Some(Load::Ready(Some(lyrics))) = self.lyrics.get(&entry.track.video_id) else {
+            return;
+        };
+        let line = lyrics.line_at(self.state.position + Duration::from_millis(200));
+        if line == self.lyrics_line {
+            return;
+        }
+        self.lyrics_line = line;
+        // La ligne chantée se place au tiers de la hauteur du panneau.
+        let index = line.unwrap_or(0) as f32;
+        let target = index * LYRIC_LINE_H - self.lyrics_view.height * 0.3;
+        self.scrolling.glide_to(LYRICS_SCROLL, target);
+    }
+
     pub(crate) fn notifications_on(&self) -> bool {
         self.notify
             .enabled
@@ -578,7 +634,7 @@ impl App {
 
     /// Paroles du morceau en cours, quand la grande vue est ouverte.
     fn want_lyrics(&mut self) -> Task<Message> {
-        if self.route != Route::NowPlaying {
+        if !self.lyrics_shown() {
             return Task::none();
         }
         let Some(track) = self.state.current.as_ref().map(|e| e.track.clone()) else {
@@ -1420,12 +1476,35 @@ impl App {
             Message::CycleRepeat => self.send(Command::SetRepeat(self.state.repeat.cycle())),
             Message::ToggleAutoplay => self.send(Command::SetAutoplay(!self.state.autoplay)),
             Message::ToggleQueue => {
-                self.show_queue = !self.show_queue;
+                self.show_queue = !(self.show_queue && self.right_panel == RightPanel::Queue);
+                self.right_panel = RightPanel::Queue;
                 self.save_ui();
+                self.request_visible_covers()
+            }
+            Message::ToggleLyrics => {
+                self.show_queue = !(self.show_queue && self.right_panel == RightPanel::Lyrics);
+                self.right_panel = RightPanel::Lyrics;
+                self.lyrics_line = None;
+                self.save_ui();
+                self.want_lyrics()
+            }
+            Message::JumpTo(id) => self.send(Command::JumpTo(id)),
+            Message::QueueUnhover(row) => {
+                // Seulement si c'est bien la ligne survolée : en remontant, la
+                // nouvelle ligne est survolée avant que l'ancienne soit quittée.
+                if self.queue_hover == Some(row) {
+                    self.queue_hover = None;
+                    self.queue_hover_video = None;
+                }
                 Task::none()
             }
             Message::Remove(id) => self.send(Command::Remove(id)),
             Message::ClearQueue => self.send(Command::ClearUpcoming),
+            // Une fenêtre (ajout à une playlist, menu) couvre la page : ce qui
+            // est dessous ne réagit pas au survol (ni préchargement inutile).
+            Message::Hover(_) if self.lib.overlay.is_some() || self.context_menu.is_some() => {
+                Task::none()
+            }
             Message::Hover(video_id) => {
                 self.hovered = Some(video_id.clone());
                 Task::perform(tokio::time::sleep(HOVER_PREFETCH_DELAY), move |()| {
@@ -1439,8 +1518,12 @@ impl App {
                     Task::none()
                 }
             }
-            Message::Unhover => {
-                self.hovered = None;
+            Message::Unhover(video_id) => {
+                // Même raison que pour la file : la ligne quittée ne doit pas
+                // effacer celle qu'on vient de survoler.
+                if self.hovered.as_deref() == Some(video_id.as_str()) {
+                    self.hovered = None;
+                }
                 Task::none()
             }
             Message::CommandDone(result) => match result {
@@ -1480,6 +1563,8 @@ impl App {
                     self.page_view = view;
                 } else if id == QUEUE_SCROLL {
                     self.queue_view = view;
+                } else if id == LYRICS_SCROLL {
+                    self.lyrics_view = view;
                 }
                 self.covers_seq += 1;
                 let seq = self.covers_seq;
@@ -1547,6 +1632,8 @@ impl App {
                     }
                 };
                 self.lyrics.insert(video_id, load);
+                self.lyrics_line = None;
+                self.follow_lyrics();
                 Task::none()
             }
             Message::SeekTo(at) => self.send(Command::Seek(at)),
@@ -1582,6 +1669,20 @@ impl App {
                 self.run_search()
             }
             Message::Frame(now) => {
+                if let Some((since, frames)) = &mut self.fps_meter {
+                    *frames += 1;
+                    let elapsed = now.saturating_duration_since(*since);
+                    if elapsed >= Duration::from_secs(1) {
+                        tracing::info!(
+                            fps = *frames as f32 / elapsed.as_secs_f32(),
+                            fullscreen = self.fullscreen,
+                            route = ?self.route,
+                            "images par seconde"
+                        );
+                        *since = now;
+                        *frames = 0;
+                    }
+                }
                 if self.is_loading() {
                     let since = *self.loading_since.get_or_insert(now);
                     self.loading_phase = now.saturating_duration_since(since).as_secs_f32();
@@ -1740,8 +1841,19 @@ impl App {
                     _ => Task::none(),
                 };
                 if !track_changed {
+                    self.follow_lyrics();
                     return report;
                 }
+                // Nouveau morceau : les paroles repartent du haut.
+                self.lyrics_line = None;
+                self.scrolling.reset(LYRICS_SCROLL);
+                let lyrics_top = operation::scroll_to(
+                    LYRICS_SCROLL,
+                    iced::widget::scrollable::AbsoluteOffset {
+                        x: None,
+                        y: Some(0.0),
+                    },
+                );
                 let cover = self.current_cover();
                 if let Some(color) = cover.as_ref().and_then(|id| self.accents.get(id)).copied() {
                     self.accent_fade.set(self.accent, color);
@@ -1749,6 +1861,7 @@ impl App {
                 self.update_page_accent();
                 Task::batch([
                     report,
+                    lyrics_top,
                     self.want_lyrics(),
                     self.want_cover(cover.clone(), HERO),
                     self.want_cover(cover.clone(), THUMB),

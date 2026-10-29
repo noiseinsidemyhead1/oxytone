@@ -14,8 +14,8 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, Load, Message, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, Route,
-    SEARCH_INPUT, THUMB, View,
+    App, CARD, HERO, LYRIC_LINE_H, LYRICS_SCROLL, Load, Message, PAGE_SCROLL, Panel, Phase,
+    QUEUE_SCROLL, QueueDrag, RightPanel, Route, SEARCH_INPUT, THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -203,9 +203,11 @@ fn main_layout(app: &App) -> El<'_> {
     }
     let mut middle = row![sidebar(app), resize_handle(Panel::Left), page];
     if app.show_queue {
-        middle = middle
-            .push(resize_handle(Panel::Right))
-            .push(queue_panel(app));
+        let side = match app.right_panel {
+            RightPanel::Queue => queue_panel(app),
+            RightPanel::Lyrics => lyrics_side(app),
+        };
+        middle = middle.push(resize_handle(Panel::Right)).push(side);
     }
     column![middle.height(Length::Fill), player_bar(app)].into()
 }
@@ -580,16 +582,19 @@ pub(crate) fn track_row<'a>(
     .spacing(14)
     .align_y(Alignment::Center);
 
+    // Pas de bouton : un clic simple ne lance rien, le double-clic lance.
+    let hovered = app.hovered.as_deref() == Some(track.video_id.as_str());
     container(
         mouse_area(
-            button(row_content)
+            container(row_content)
                 .width(Length::Fill)
                 .padding(Padding::from([6, 10]))
-                .style(style::row(playing, app.accent))
-                .on_press(on_play),
+                .style(style::row_box(playing, hovered, app.accent)),
         )
+        .on_double_click(on_play)
+        .interaction(iced::mouse::Interaction::Pointer)
         .on_enter(Message::Hover(track.video_id.clone()))
-        .on_exit(Message::Unhover)
+        .on_exit(Message::Unhover(track.video_id.clone()))
         .on_right_press(crate::context::open(crate::context::Target::Track(
             track.clone(),
         ))),
@@ -744,9 +749,7 @@ fn now_playing(app: &App) -> El<'_> {
     }
     // Mode focus : rien n'apparaît tout seul ; un clic n'importe où affiche
     // ou masque les contrôles (Échap pour revenir).
-    let side = column![info, lyrics_panel(app, track)]
-        .spacing(28)
-        .width(Length::Fill);
+    let side = info.width(Length::Fill);
     mouse_area(
         container(
             row![big, side]
@@ -763,66 +766,91 @@ fn now_playing(app: &App) -> El<'_> {
     .into()
 }
 
-/// Lignes de paroles autour de celle qui est chantée.
-const LYRICS_BEFORE: usize = 2;
-const LYRICS_SHOWN: usize = 9;
-
-/// Paroles du morceau : synchronisées (ligne chantée en évidence, clic =
-/// aller à ce moment) ou texte simple défilant.
-fn lyrics_panel<'a>(app: &'a App, track: &'a Track) -> El<'a> {
+/// Panneau des paroles, à la place de la file d'attente. Synchronisées : la
+/// ligne chantée glisse doucement au tiers du panneau (clic = aller à ce moment).
+fn lyrics_side(app: &App) -> El<'_> {
     use ytmr_catalog::lyrics::LyricsBody;
-    let lyrics = match app.lyrics.get(&track.video_id) {
-        None | Some(Load::Loading) => return muted("Recherche des paroles…"),
-        Some(Load::Failed(_)) | Some(Load::Ready(None)) => {
-            return muted("Paroles indisponibles pour ce titre.");
-        }
-        Some(Load::Ready(Some(lyrics))) => lyrics,
-    };
-    let source = text(format!("Paroles : {}", lyrics.source))
-        .size(11)
-        .color(style::TEXT_FAINT);
-    match &lyrics.body {
-        LyricsBody::Synced(lines) => {
-            // Un léger temps d'avance : la ligne s'allume quand elle commence.
-            let now = app.state.position + Duration::from_millis(200);
-            let current = lyrics.line_at(now);
-            let first = current.unwrap_or(0).saturating_sub(LYRICS_BEFORE);
-            let mut list = column![].spacing(10);
-            for (i, line) in lines.iter().enumerate().skip(first).take(LYRICS_SHOWN) {
-                let sung = Some(i) == current;
-                let color = match current {
-                    _ if sung => style::TEXT,
-                    Some(c) if i < c => style::TEXT_FAINT,
-                    _ => style::TEXT_DIM,
-                };
-                let words = if line.text.is_empty() {
-                    "♪"
-                } else {
-                    line.text.as_str()
-                };
-                list = list.push(
-                    button(
-                        text(words)
-                            .size(if sung { 26 } else { 21 })
-                            .font(BOLD)
-                            .color(color),
-                    )
-                    .padding(0)
-                    .style(style::link)
-                    .on_press(Message::SeekTo(line.at)),
-                );
-            }
-            column![list, source].spacing(16).into()
-        }
-        LyricsBody::Plain(body) => column![
-            scrollable(text(body).size(17).color(style::TEXT_DIM))
-                .height(Length::Fixed(360.0))
-                .style(style::scroll),
-            source
+    let current = app.state.current.as_ref();
+    let source = current
+        .and_then(|e| match app.lyrics.get(&e.track.video_id) {
+            Some(Load::Ready(Some(l))) => Some(format!("Source : {}", l.source)),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let header = row![
+        column![
+            text("Paroles").size(16).font(BOLD),
+            text(source).size(11).color(style::TEXT_FAINT),
         ]
-        .spacing(12)
-        .into(),
-    }
+        .spacing(2)
+        .width(Length::Fill),
+        icon_tip(
+            Icon::Close,
+            16.0,
+            style::TEXT_DIM,
+            Message::ToggleLyrics,
+            "Fermer".into()
+        ),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let body: El<'_> = match current.map(|e| app.lyrics.get(&e.track.video_id)) {
+        None => muted("Rien en lecture."),
+        Some(None | Some(Load::Loading)) => muted("Recherche des paroles…"),
+        Some(Some(Load::Failed(_)) | Some(Load::Ready(None))) => {
+            muted("Paroles indisponibles pour ce titre.")
+        }
+        Some(Some(Load::Ready(Some(lyrics)))) => match &lyrics.body {
+            LyricsBody::Synced(lines) => {
+                let sung = lyrics.line_at(app.state.position + Duration::from_millis(200));
+                let accent = app.accent;
+                let mut list = column![];
+                for (i, line) in lines.iter().enumerate() {
+                    let color = match sung {
+                        Some(c) if c == i => style::TEXT,
+                        Some(c) if i < c => style::TEXT_FAINT,
+                        _ => style::alpha(style::TEXT_DIM, 0.8),
+                    };
+                    let words = if line.text.is_empty() {
+                        "♪"
+                    } else {
+                        line.text.as_str()
+                    };
+                    list = list.push(
+                        button(
+                            container(text(words).size(17).font(BOLD).color(color))
+                                .height(Length::Fixed(LYRIC_LINE_H))
+                                .align_y(Alignment::Center)
+                                .clip(true),
+                        )
+                        .width(Length::Fill)
+                        .padding(0)
+                        .style(move |theme, status| {
+                            let mut s = style::link(theme, status);
+                            if matches!(status, button::Status::Hovered) {
+                                s.background = Some(style::alpha(accent, 0.08).into());
+                            }
+                            s
+                        })
+                        .on_press(Message::SeekTo(line.at)),
+                    );
+                }
+                // Marge du bas : la dernière ligne peut monter jusqu'au tiers.
+                list = list.push(Space::new().height(Length::Fixed(app.lyrics_view.height)));
+                smooth_scroll(list, LYRICS_SCROLL)
+            }
+            LyricsBody::Plain(body) => {
+                smooth_scroll(text(body).size(16).color(style::TEXT_DIM), LYRICS_SCROLL)
+            }
+        },
+    };
+
+    container(column![header, body].spacing(12).padding(14))
+        .width(Length::Fixed(app.queue_width))
+        .height(Length::Fill)
+        .style(style::sidebar)
+        .into()
 }
 
 /// « Bonjour, <prénom> » selon l'heure locale.
@@ -1327,12 +1355,13 @@ fn queue_panel(app: &App) -> El<'_> {
             };
             let area = mouse_area(stack![body, marker])
                 .on_press(Message::QueueDrag(QueueDrag::Press(i)))
+                .on_double_click(Message::JumpTo(entry.id))
                 .on_enter(if drag.is_some() {
                     Message::QueueDrag(QueueDrag::Over(i))
                 } else {
                     Message::QueueHover(Some(i))
                 })
-                .on_exit(Message::QueueHover(None))
+                .on_exit(Message::QueueUnhover(i))
                 .on_right_press(crate::context::open(crate::context::Target::Track(
                     entry.track.clone(),
                 )))
@@ -1484,14 +1513,14 @@ fn player_bar(app: &App) -> El<'_> {
     } else {
         Icon::Volume
     };
-    let lyrics_open = app.route == Route::NowPlaying;
+    let lyrics_open = app.lyrics_shown();
     let right = row![
         icon_tip(
             Icon::Mic,
             17.0,
             lit(lyrics_open),
-            // Ouvre les paroles (grande vue) ; second clic : retour.
-            Message::Navigate(Route::NowPlaying),
+            // Paroles à la place de la file ; second clic : fermées.
+            Message::ToggleLyrics,
             "Paroles".into()
         ),
         icon_tip(
@@ -1504,7 +1533,7 @@ fn player_bar(app: &App) -> El<'_> {
         icon_tip(
             Icon::Queue,
             17.0,
-            lit(app.show_queue),
+            lit(app.show_queue && app.right_panel == RightPanel::Queue),
             Message::ToggleQueue,
             "File d'attente".into()
         ),

@@ -1,9 +1,11 @@
 //! Paroles : plusieurs sources interrogées en même temps, la meilleure gardée.
 //!
-//! En clair : on demande les paroles à LRCLIB (base libre de paroles
-//! synchronisées, par correspondance exacte puis par recherche) et à YouTube
-//! Music (texte simple). Des paroles synchronisées dont la durée colle au
-//! morceau passent avant tout le reste ; sinon, un texte simple ; sinon, rien.
+//! En clair : on demande les paroles en même temps à LRCLIB (base libre de
+//! paroles synchronisées : correspondance exacte, recherche par champs, recherche
+//! libre), à NetEase (paroles synchronisées) et à YouTube Music (texte simple,
+//! Musixmatch ; ses horodatages ne sont pas rendus aux clients web, même
+//! connectés : vérifié le 2026-10-29). Des paroles synchronisées dont la durée
+//! colle au morceau passent avant tout le reste ; sinon, un texte simple.
 
 use std::time::Duration;
 
@@ -14,6 +16,7 @@ use ytmr_core::Track;
 use crate::{Catalog, CatalogError};
 
 const LRCLIB: &str = "https://lrclib.net/api";
+const NETEASE: &str = "https://music.163.com/api";
 /// LRCLIB demande un User-Agent qui nomme l'application.
 const USER_AGENT: &str = concat!("ytmr/", env!("CARGO_PKG_VERSION"));
 /// Écart de durée toléré entre le morceau et les paroles synchronisées.
@@ -89,9 +92,17 @@ impl Catalog {
         let title = clean_title(&track.title);
         let artist = main_artist(&track.artist);
         let duration = track.duration.map(|d| d.as_secs_f64());
-        let (exact, searched, youtube) = tokio::join!(
+        let free_text = format!("{artist} {title}");
+        let by_fields = [
+            ("track_name", title.as_str()),
+            ("artist_name", artist.as_str()),
+        ];
+        let by_text = [("q", free_text.as_str())];
+        let (exact, searched, loose, netease, youtube) = tokio::join!(
             self.lrclib_get(&title, &artist, track.album.as_deref(), duration),
-            self.lrclib_search(&title, &artist),
+            self.lrclib_search(&by_fields),
+            self.lrclib_search(&by_text),
+            self.netease(&title, &artist, duration),
             self.youtube_lyrics(&track.video_id),
         );
         let mut candidates: Vec<Candidate> = Vec::new();
@@ -100,6 +111,7 @@ impl Catalog {
             .flatten()
             .into_iter()
             .chain(searched.unwrap_or_default())
+            .chain(loose.unwrap_or_default())
         {
             if entry.instrumental {
                 continue;
@@ -127,6 +139,9 @@ impl Catalog {
                     gap,
                 });
             }
+        }
+        if let Ok(Some(candidate)) = netease {
+            candidates.push(candidate);
         }
         if let Ok(Some(lyrics)) = youtube {
             candidates.push(Candidate { lyrics, gap: None });
@@ -167,16 +182,121 @@ impl Catalog {
         Ok(serde_json::from_str(&text).ok())
     }
 
-    async fn lrclib_search(
+    /// NetEase : recherche, puis paroles LRC du résultat qui correspond le mieux
+    /// (même titre, même artiste, durée la plus proche).
+    async fn netease(
         &self,
         title: &str,
         artist: &str,
+        duration: Option<f64>,
+    ) -> Result<Option<Candidate>, CatalogError> {
+        #[derive(Deserialize)]
+        struct Search {
+            result: Option<Found>,
+        }
+        #[derive(Deserialize)]
+        struct Found {
+            #[serde(default)]
+            songs: Vec<Song>,
+        }
+        #[derive(Deserialize)]
+        struct Song {
+            id: u64,
+            name: String,
+            #[serde(default)]
+            artists: Vec<Named>,
+            /// Millisecondes.
+            duration: Option<u64>,
+        }
+        #[derive(Deserialize)]
+        struct Named {
+            name: String,
+        }
+        #[derive(Deserialize)]
+        struct LyricReply {
+            lrc: Option<Lrc>,
+        }
+        #[derive(Deserialize)]
+        struct Lrc {
+            lyric: Option<String>,
+        }
+        let query = format!("{title} {artist}");
+        let text = self
+            .http
+            .get(format!("{NETEASE}/search/get"))
+            .header(reqwest::header::REFERER, "https://music.163.com")
+            .query(&[("s", query.as_str()), ("type", "1"), ("limit", "8")])
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let songs = serde_json::from_str::<Search>(&text)
+            .ok()
+            .and_then(|s| s.result)
+            .map(|r| r.songs)
+            .unwrap_or_default();
+        let (want_title, want_artist) = (fold(title), fold(artist));
+        let gap = |song: &Song| match (song.duration, duration) {
+            (Some(ms), Some(d)) => Some((ms as f64 / 1000.0 - d).abs()),
+            _ => None,
+        };
+        let best = songs
+            .iter()
+            .filter(|s| {
+                let name = fold(&s.name);
+                (name.contains(&want_title) || want_title.contains(&name))
+                    && s.artists.iter().any(|a| {
+                        let a = fold(&a.name);
+                        a.contains(&want_artist) || want_artist.contains(&a)
+                    })
+            })
+            .min_by_key(|s| (gap(s).unwrap_or(999.0) * 1000.0) as u64);
+        let Some(song) = best else {
+            return Ok(None);
+        };
+        let text = self
+            .http
+            .get(format!("{NETEASE}/song/lyric"))
+            .header(reqwest::header::REFERER, "https://music.163.com")
+            .query(&[("id", song.id.to_string().as_str()), ("lv", "1")])
+            .timeout(Duration::from_secs(8))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let lrc = serde_json::from_str::<LyricReply>(&text)
+            .ok()
+            .and_then(|r| r.lrc)
+            .and_then(|l| l.lyric)
+            .unwrap_or_default();
+        let lines: Vec<LyricLine> = parse_lrc(&lrc)
+            .into_iter()
+            .filter(|l| !is_credit(&l.text))
+            .collect();
+        if lines.iter().filter(|l| !l.text.is_empty()).count() < 3 {
+            return Ok(None);
+        }
+        Ok(Some(Candidate {
+            lyrics: Lyrics {
+                body: LyricsBody::Synced(lines),
+                source: "NetEase".into(),
+            },
+            gap: gap(song),
+        }))
+    }
+
+    async fn lrclib_search(
+        &self,
+        query: &[(&str, &str)],
     ) -> Result<Vec<LrclibEntry>, CatalogError> {
         let text = self
             .http
             .get(format!("{LRCLIB}/search"))
             .header(reqwest::header::USER_AGENT, USER_AGENT)
-            .query(&[("track_name", title), ("artist_name", artist)])
+            .query(query)
             .timeout(Duration::from_secs(8))
             .send()
             .await?
@@ -214,6 +334,29 @@ impl Catalog {
             },
         }))
     }
+}
+
+/// Comparaison souple : minuscules, sans accents ni ponctuation.
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'â' | 'ä' | 'á' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' | 'í' => 'i',
+            'ô' | 'ö' | 'ó' => 'o',
+            'ù' | 'û' | 'ü' | 'ú' => 'u',
+            'ç' => 'c',
+            c => c,
+        })
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// Lignes de crédits de NetEase (« 作词 : … », « 作曲 : … ») à ne pas afficher.
+fn is_credit(text: &str) -> bool {
+    let cjk = text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c));
+    cjk && (text.contains(':') || text.contains('：'))
 }
 
 /// « Titre (Official Video) [Remastered] » → « Titre ».
@@ -348,6 +491,13 @@ mod tests {
     }
 
     #[test]
+    fn drops_netease_credits() {
+        assert!(is_credit("作词 : Pharrell Williams"));
+        assert!(!is_credit("Like the legend of the phoenix"));
+        assert_eq!(fold("Beyoncé, Jay-Z"), "beyoncejayz");
+    }
+
+    #[test]
     fn cleans_titles_and_artists() {
         assert_eq!(
             clean_title("One More Time (Official Video) [HD]"),
@@ -375,5 +525,23 @@ mod tests {
         let lyrics = catalog.lyrics(&track).await.unwrap().unwrap();
         println!("source : {}", lyrics.source);
         assert!(matches!(lyrics.body, LyricsBody::Synced(_)));
+    }
+}
+
+#[cfg(test)]
+mod network {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "réseau"]
+    async fn netease_finds_synced_lyrics() {
+        let catalog = Catalog::new();
+        let found = catalog
+            .netease("Reality Surf", "Bladee", Some(123.0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(found.lyrics.body, LyricsBody::Synced(ref l) if l.len() > 10));
+        assert!(found.gap.is_some_and(|g| g < 3.0));
     }
 }

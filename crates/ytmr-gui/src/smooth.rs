@@ -20,6 +20,8 @@ use iced::{Element, Event, Length, Rectangle, Size, Task, Vector};
 const WHEEL_STEP: f32 = 110.0;
 /// Vitesse de rattrapage (plus grand = plus vif).
 const RESPONSIVENESS: f32 = 16.0;
+/// Glissement des paroles d'une ligne à la suivante : plus posé.
+const GLIDE: f32 = 7.0;
 
 pub struct WheelCatcher<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
@@ -218,6 +220,8 @@ struct Motion {
     max: f32,
     animating: bool,
     horizontal: bool,
+    /// Glissement programmé (paroles) plutôt que molette.
+    soft: bool,
 }
 
 /// Animations de défilement, par identifiant de liste.
@@ -235,6 +239,7 @@ impl Scrolling {
     /// Un cran de molette (`lines` > 0 vers le haut).
     pub fn wheel(&mut self, id: &'static str, lines: f32) {
         let motion = self.lists.entry(id).or_default();
+        motion.soft = false;
         if !motion.animating {
             motion.target = motion.offset;
             self.last_frame = None;
@@ -269,6 +274,22 @@ impl Scrolling {
         }
     }
 
+    /// Glisse doucement jusqu'à `target` (ligne de paroles suivante).
+    pub fn glide_to(&mut self, id: &'static str, target: f32) {
+        let motion = self.lists.entry(id).or_default();
+        let target = if motion.max > 0.0 {
+            target.clamp(0.0, motion.max)
+        } else {
+            target.max(0.0)
+        };
+        if !motion.animating {
+            self.last_frame = None;
+        }
+        motion.soft = true;
+        motion.target = target;
+        motion.animating = (motion.target - motion.offset).abs() > 0.5;
+    }
+
     /// Retour en haut immédiat (changement de page).
     pub fn reset(&mut self, id: &'static str) {
         let motion = self.lists.entry(id).or_default();
@@ -288,12 +309,13 @@ impl Scrolling {
             .min(Duration::from_millis(50))
             .as_secs_f32();
         self.last_frame = Some(now);
-        let blend = 1.0 - (-dt * RESPONSIVENESS).exp();
         let mut tasks = Vec::new();
         for (id, motion) in &mut self.lists {
             if !motion.animating {
                 continue;
             }
+            let speed = if motion.soft { GLIDE } else { RESPONSIVENESS };
+            let blend = 1.0 - (-dt * speed).exp();
             motion.offset += (motion.target - motion.offset) * blend;
             if (motion.target - motion.offset).abs() < 0.5 {
                 motion.offset = motion.target;

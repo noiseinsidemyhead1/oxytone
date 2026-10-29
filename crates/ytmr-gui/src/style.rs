@@ -222,6 +222,39 @@ pub fn row(active: bool, accent: Color) -> impl Fn(&Theme, button::Status) -> bu
     }
 }
 
+/// Ligne sans bouton (double-clic pour lancer) : même rendu que [`row`],
+/// le survol étant suivi par l'application.
+pub fn row_box(active: bool, hovered: bool, accent: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: if hovered {
+            Some(alpha(accent, 0.16).into())
+        } else if active {
+            Some(alpha(accent, 0.12).into())
+        } else {
+            None
+        },
+        text_color: Some(TEXT),
+        border: Border {
+            radius: 8.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// Carte sans bouton (morceau : double-clic pour lancer).
+pub fn card_box(hovered: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: hovered.then(|| SURFACE_HI.into()),
+        text_color: Some(TEXT),
+        border: Border {
+            radius: RADIUS.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
 /// Entrée de la barre latérale.
 pub fn nav(active: bool, accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| button::Style {

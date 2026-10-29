@@ -1570,7 +1570,8 @@ pub fn overlay(app: &App) -> Option<El<'_>> {
         .on_press(Message::Noop),
     )
     .center(Length::Fill);
-    Some(iced::widget::stack![dim, centered].into())
+    // Opaque : survoler la fenêtre n'allume plus les morceaux de la page dessous.
+    Some(iced::widget::opaque(iced::widget::stack![dim, centered]))
 }
 
 fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
@@ -1697,37 +1698,44 @@ fn home_open(item: &HomeItem, shelf: usize, index: usize) -> Message {
 fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> El<'a> {
     let id = app.url_cover(item.thumbnail_url.as_deref());
     let artist = item.kind == HomeKind::Artist;
-    let card = button(
-        column![
-            cover(
-                app.cover(id.as_deref(), CARD),
-                150.0,
-                if artist { 75.0 } else { 8.0 }
-            ),
-            text(crate::views::ellipsize(&item.title, 19))
-                .size(14)
-                .font(SEMIBOLD)
-                .wrapping(iced::widget::text::Wrapping::None),
-            text(crate::views::ellipsize(&item.subtitle, 24))
-                .size(12)
-                .color(style::TEXT_DIM)
-                .wrapping(iced::widget::text::Wrapping::None),
-        ]
-        .spacing(6)
-        .width(Length::Fixed(150.0))
-        .clip(true),
-    )
-    .padding(8)
-    .style(style::card)
-    .on_press(home_open(item, shelf, index));
-    let area = mouse_area(card).on_right_press(crate::context::open(home_target(item)));
+    let body = column![
+        cover(
+            app.cover(id.as_deref(), CARD),
+            150.0,
+            if artist { 75.0 } else { 8.0 }
+        ),
+        text(crate::views::ellipsize(&item.title, 19))
+            .size(14)
+            .font(SEMIBOLD)
+            .wrapping(iced::widget::text::Wrapping::None),
+        text(crate::views::ellipsize(&item.subtitle, 24))
+            .size(12)
+            .color(style::TEXT_DIM)
+            .wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .spacing(6)
+    .width(Length::Fixed(150.0))
+    .clip(true);
     match &item.track {
-        // Survol d'un morceau : préchargement, comme dans les listes.
-        Some(track) => area
-            .on_enter(Message::Hover(track.video_id.clone()))
-            .on_exit(Message::Unhover)
-            .into(),
-        None => area.into(),
+        // Morceau : double-clic pour le lancer (un clic simple ne lance rien).
+        Some(track) => {
+            let hovered = app.hovered.as_deref() == Some(track.video_id.as_str());
+            mouse_area(container(body).padding(8).style(style::card_box(hovered)))
+                .on_double_click(home_open(item, shelf, index))
+                .on_right_press(crate::context::open(home_target(item)))
+                .on_enter(Message::Hover(track.video_id.clone()))
+                .on_exit(Message::Unhover(track.video_id.clone()))
+                .interaction(iced::mouse::Interaction::Pointer)
+                .into()
+        }
+        None => mouse_area(
+            button(body)
+                .padding(8)
+                .style(style::card)
+                .on_press(home_open(item, shelf, index)),
+        )
+        .on_right_press(crate::context::open(home_target(item)))
+        .into(),
     }
 }
 
@@ -1805,7 +1813,9 @@ fn grid_tile<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
     };
     button(
         row![
-            cover(app.cover(id.as_deref(), THUMB), 56.0, radius),
+            // Taille « carte » : c'est celle que l'accueil demande pour toutes ses
+            // pochettes (en vignette, rien ne la demandait : cases vides).
+            cover(app.cover(id.as_deref(), CARD), 56.0, radius),
             container(
                 text(&item.title)
                     .size(14)

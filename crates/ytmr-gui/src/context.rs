@@ -16,6 +16,7 @@ use ytmr_catalog::{AlbumSummary, ArtistSummary};
 use ytmr_core::{Command, Track};
 
 use crate::app::{App, Message, Route};
+use crate::icons::{Icon, icon};
 use crate::style;
 use crate::views::El;
 
@@ -38,6 +39,8 @@ pub enum Ctx {
     Open(Target),
     Close,
     Radio(Track),
+    /// Titres de la radio arrivés (morceau de départ, titres).
+    RadioTracks(String, Result<Vec<Track>, String>),
     ArtistRadio(String),
     ArtistSongs(Result<Vec<Track>, String>),
     Copy(String),
@@ -67,15 +70,46 @@ impl App {
             }
             Ctx::Radio(track) => {
                 self.context_menu = None;
-                // La radio, c'est la lecture automatique à partir de ce titre.
+                // Le titre part tout de suite ; la radio YouTube (titres
+                // similaires) remplit la file dès qu'elle arrive.
+                let Some(catalog) = self.catalog() else {
+                    return Task::none();
+                };
+                let seed = track.video_id.clone();
                 Task::batch([
-                    self.send(Command::SetAutoplay(true)),
                     self.send(Command::PlayTracks {
                         tracks: vec![track],
                         start: 0,
                     }),
+                    Task::perform(
+                        async move {
+                            let result = catalog.radio(&seed).await.map_err(|e| e.to_string());
+                            (seed, result)
+                        },
+                        |(seed, r)| Message::Context(Ctx::RadioTracks(seed, r)),
+                    ),
                 ])
             }
+            Ctx::RadioTracks(seed, result) => match result {
+                Ok(tracks) => {
+                    // L'utilisateur a peut-être lancé autre chose entre-temps.
+                    let still = self
+                        .state
+                        .current
+                        .as_ref()
+                        .is_some_and(|e| e.track.video_id == seed);
+                    let tracks: Vec<Track> =
+                        tracks.into_iter().filter(|t| t.video_id != seed).collect();
+                    if !still || tracks.is_empty() {
+                        return Task::none();
+                    }
+                    Task::batch([
+                        self.send(Command::Enqueue(tracks)),
+                        self.show_toast("Radio lancée".into()),
+                    ])
+                }
+                Err(e) => self.show_toast(format!("Radio indisponible : {e}")),
+            },
             Ctx::ArtistRadio(id) => {
                 self.context_menu = None;
                 let Some(catalog) = self.catalog() else {
@@ -113,6 +147,23 @@ impl App {
 
 fn link_track(t: &Track) -> String {
     format!("https://music.youtube.com/watch?v={}", t.video_id)
+}
+
+/// Icône d'une action du menu, d'après son libellé.
+fn item_icon(label: &str) -> Icon {
+    match label {
+        "Lancer la radio" => Icon::Radio,
+        "Lire ensuite" => Icon::PlayNext,
+        "Ajouter à la file" => Icon::Queue,
+        "Ajouter à une playlist" => Icon::PlaylistAdd,
+        "Aller à l'album" | "Ouvrir l'album" => Icon::Disc,
+        "Aller à l'artiste" | "Ouvrir l'artiste" => Icon::Person,
+        "Copier le lien" => Icon::Link,
+        "Ouvrir la playlist" => Icon::Library,
+        "Retirer de la bibliothèque" | "Ne plus suivre" => Icon::HeartFilled,
+        "Ajouter à la bibliothèque" | "Suivre" => Icon::Heart,
+        _ => Icon::Music,
+    }
 }
 
 /// Les actions proposées pour une cible : (libellé, message).
@@ -229,12 +280,19 @@ pub fn menu(app: &App) -> Option<El<'_>> {
     let mut list = column![].spacing(0);
     for (label, message) in entries {
         list = list.push(
-            button(text(label).size(13))
-                .width(Length::Fill)
-                .height(Length::Fixed(ITEM_H))
-                .padding(Padding::from([8, 12]))
-                .style(style::row(false, accent))
-                .on_press(message),
+            button(
+                iced::widget::row![
+                    icon(item_icon(label), 15.0, style::TEXT_DIM),
+                    text(label).size(13)
+                ]
+                .spacing(12)
+                .align_y(iced::Alignment::Center),
+            )
+            .width(Length::Fill)
+            .height(Length::Fixed(ITEM_H))
+            .padding(Padding::from([8, 12]))
+            .style(style::row(false, accent))
+            .on_press(message),
         );
     }
     // Le menu reste dans la fenêtre (vers la gauche / le haut près des bords).
@@ -265,7 +323,8 @@ pub fn menu(app: &App) -> Option<El<'_>> {
         left: x,
         ..Padding::ZERO
     });
-    Some(iced::widget::stack![backdrop, placed].into())
+    // Opaque : la page dessous ne réagit plus à la souris tant que le menu est ouvert.
+    Some(iced::widget::opaque(iced::widget::stack![backdrop, placed]))
 }
 
 /// Enveloppe la fenêtre : note la position de chaque clic droit, puis laisse
