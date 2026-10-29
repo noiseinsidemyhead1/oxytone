@@ -81,6 +81,8 @@ pub struct LibraryState {
     /// à la fin seulement si une version en cache est déjà à l'écran.
     pub streaming: Option<Streaming>,
     pub profile: Option<Profile>,
+    /// Historique d'écoute (page « Historique »).
+    pub history: Option<Load<Vec<Track>>>,
     /// Rangées de l'accueil de YouTube Music.
     pub home: Option<Load<Vec<HomeShelf>>>,
     /// Accueil demandé pendant cette session (une seule fois).
@@ -164,6 +166,9 @@ pub enum Lib {
     Refresh,
     ProfileLoaded(Result<Profile, String>),
     HomeLoaded(Result<Vec<HomeShelf>, String>),
+    HistoryLoaded(Result<Vec<Track>, String>),
+    /// Lecture de l'historique à partir de la ligne donnée.
+    PlayHistory(usize),
     /// Morceau d'une rangée de l'accueil (rangée, carte).
     PlayHome(usize, usize),
     Disconnect,
@@ -245,6 +250,18 @@ impl App {
             .map(|i| self.url_cover(i.thumbnail_url.as_deref()))
             .collect();
         Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)))
+    }
+
+    /// Page « Historique » : toujours redemandée (elle change à chaque écoute).
+    pub fn load_history_page(&mut self) -> Task<Message> {
+        let op = self.lib.ready().map(|a| async move { a.history().await });
+        if op.is_none() {
+            return Task::none();
+        }
+        if !matches!(self.lib.history, Some(Load::Ready(_))) {
+            self.lib.history = Some(Load::Loading);
+        }
+        call(op, Lib::HistoryLoaded)
     }
 
     pub fn refresh_home(&mut self) -> Task<Message> {
@@ -602,6 +619,27 @@ impl App {
                     Task::none()
                 }
             },
+            Lib::HistoryLoaded(result) => match result {
+                Ok(tracks) => {
+                    let task = self.want_track_covers(&tracks, THUMB);
+                    self.lib.history = Some(Load::Ready(tracks));
+                    task
+                }
+                Err(e) => {
+                    self.lib.history = Some(Load::Failed(e));
+                    Task::none()
+                }
+            },
+            Lib::PlayHistory(index) => match &self.lib.history {
+                Some(Load::Ready(tracks)) if index < tracks.len() => {
+                    let tracks = tracks.clone();
+                    self.send(Command::PlayTracks {
+                        tracks,
+                        start: index,
+                    })
+                }
+                _ => Task::none(),
+            },
             Lib::PlayHome(shelf, index) => {
                 // Le morceau cliqué, puis ceux qui le suivent dans la rangée.
                 let Some(Load::Ready(shelves)) = &self.lib.home else {
@@ -633,6 +671,7 @@ impl App {
                 self.lib.playlist = None;
                 self.lib.home = None;
                 self.lib.home_at = None;
+                self.lib.history = None;
                 self.lib.liked.clear();
                 self.lib.liked_count = None;
                 self.lib.streaming = None;
@@ -1243,7 +1282,7 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
         .filter(|s| !s.trim().is_empty() && s.trim() != "•")
         .collect::<Vec<_>>()
         .join(" · ");
-    button(
+    let card = button(
         column![
             cover(app.cover(id.as_deref(), CARD), 164.0, 8.0),
             text(&p.title)
@@ -1259,8 +1298,12 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
     )
     .padding(10)
     .style(style::card)
-    .on_press(Message::Navigate(Route::Playlist(p.id.clone())))
-    .into()
+    .on_press(Message::Navigate(Route::Playlist(p.id.clone())));
+    mouse_area(card)
+        .on_right_press(crate::context::open(crate::context::Target::Playlist(
+            p.clone(),
+        )))
+        .into()
 }
 
 pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
@@ -1677,14 +1720,79 @@ fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
     .padding(8)
     .style(style::card)
     .on_press(home_open(item, shelf, index));
+    let area = mouse_area(card).on_right_press(crate::context::open(home_target(item)));
     match &item.track {
         // Survol d'un morceau : préchargement, comme dans les listes.
-        Some(track) => mouse_area(card)
+        Some(track) => area
             .on_enter(Message::Hover(track.video_id.clone()))
             .on_exit(Message::Unhover)
             .into(),
-        None => card.into(),
+        None => area.into(),
     }
+}
+
+/// Cible du menu contextuel pour une carte de l'accueil.
+fn home_target(item: &HomeItem) -> crate::context::Target {
+    use crate::context::Target;
+    match (&item.track, item.kind) {
+        (Some(track), _) => Target::Track(track.clone()),
+        (None, HomeKind::Album) => Target::Album(ytmr_catalog::AlbumSummary {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            artist: item.subtitle.clone(),
+            year: String::new(),
+            kind: String::new(),
+            thumbnail_url: item.thumbnail_url.clone(),
+        }),
+        (None, HomeKind::Artist) => Target::Artist(ytmr_catalog::ArtistSummary {
+            id: item.id.clone(),
+            name: item.title.clone(),
+            subscribers: None,
+            thumbnail_url: item.thumbnail_url.clone(),
+        }),
+        (None, _) => Target::Playlist(PlaylistSummary {
+            id: item.id.clone(),
+            title: item.title.clone(),
+            tracks_text: String::new(),
+            author: item.subtitle.clone(),
+            thumbnail_url: item.thumbnail_url.clone(),
+        }),
+    }
+}
+
+/// Page « Historique » : tout ce que YouTube garde des écoutes récentes.
+pub fn history_page(app: &App) -> El<'_> {
+    let header = row![
+        text("Historique").size(30).font(BOLD).width(Length::Fill),
+        icon_tip(
+            Icon::Refresh,
+            17.0,
+            style::TEXT_DIM,
+            Message::Navigate(Route::History),
+            "Actualiser".into(),
+        ),
+    ]
+    .align_y(Alignment::Center);
+    let body: El<'_> =
+        if let Some(info) = not_connected(app) {
+            info
+        } else {
+            match &app.lib.history {
+                None | Some(Load::Loading) => loading("Chargement de l'historique…"),
+                Some(Load::Failed(e)) => error_box(e),
+                Some(Load::Ready(tracks)) if tracks.is_empty() => muted("Rien écouté récemment."),
+                Some(Load::Ready(tracks)) => column(tracks.iter().enumerate().map(|(i, t)| {
+                    track_row(app, t, None, Message::Lib(Lib::PlayHistory(i)), None)
+                }))
+                .into(),
+            }
+        };
+    page_scroll(column![header, body].spacing(20).padding(Padding {
+        top: 28.0,
+        right: 28.0,
+        bottom: 32.0,
+        left: 28.0,
+    }))
 }
 
 /// Case de la mosaïque « Réécouter » : petite pochette et titre.
@@ -1846,13 +1954,22 @@ pub fn account_widget(app: &App) -> El<'_> {
                 None => ("Compte YouTube".to_owned(), "connecté".to_owned(), None),
             };
             row![
-                cover(app.cover(photo.as_deref(), THUMB), 34.0, 17.0),
-                column![
-                    text(name).size(13).font(SEMIBOLD),
-                    text(handle).size(11).color(style::TEXT_DIM),
-                ]
-                .spacing(1)
-                .width(Length::Fill),
+                button(
+                    row![
+                        cover(app.cover(photo.as_deref(), THUMB), 34.0, 17.0),
+                        column![
+                            text(name).size(13).font(SEMIBOLD),
+                            text(handle).size(11).color(style::TEXT_DIM),
+                        ]
+                        .spacing(1),
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding(Padding::from([4, 6]))
+                .style(style::nav(app.route == Route::History, app.accent))
+                .on_press(Message::Navigate(Route::History)),
                 icon_tip(
                     Icon::Logout,
                     15.0,

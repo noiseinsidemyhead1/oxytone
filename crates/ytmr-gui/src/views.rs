@@ -87,6 +87,10 @@ pub fn view(app: &App) -> El<'_> {
             None => main_layout(app),
         },
     };
+    let content: El<'_> = match crate::context::menu(app) {
+        Some(menu) => stack![content, menu].into(),
+        None => content,
+    };
     let with_toast: El<'_> = match &app.toast {
         Some((_, message)) => stack![content, toast(message)].into(),
         None => content,
@@ -104,11 +108,15 @@ pub fn view(app: &App) -> El<'_> {
     } else {
         stack![framed, crate::chrome::resize_edges()].into()
     };
-    container(framed)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .style(style::window_bg)
-        .into()
+    // Note la position des clics droits (menu contextuel).
+    crate::context::catch_points(
+        container(framed)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(style::window_bg),
+        |point| Message::Context(crate::context::Ctx::Point(point)),
+    )
+    .into()
 }
 
 fn splash(message: &str) -> El<'_> {
@@ -177,6 +185,7 @@ fn main_layout(app: &App) -> El<'_> {
         Route::Library => crate::collection::library_page(app),
         Route::Playlist(_) => library::playlist_page(app),
         Route::Settings => crate::settings::settings_page(app),
+        Route::History => library::history_page(app),
     };
     // La barre de chargement passe par-dessus la page : elle ne la décale pas
     // (sinon une bande noire de 3 px restait au-dessus du dégradé).
@@ -281,10 +290,32 @@ fn sidebar(app: &App) -> El<'_> {
         .size(14)
         .style(style::search_input);
 
+    let mut search_box = column![search].spacing(2);
+    if app.route == Route::Search && !app.suggestions.is_empty() {
+        for s in &app.suggestions {
+            search_box = search_box.push(
+                button(
+                    row![
+                        icon(Icon::Search, 13.0, style::TEXT_FAINT),
+                        text(s)
+                            .size(13)
+                            .wrapping(iced::widget::text::Wrapping::None)
+                    ]
+                    .spacing(10)
+                    .align_y(Alignment::Center),
+                )
+                .width(Length::Fill)
+                .padding(Padding::from([6, 14]))
+                .style(style::nav(false, app.accent))
+                .on_press(Message::PickSuggestion(s.clone())),
+            );
+        }
+    }
+
     container(
         column![
             container(logo).padding(Padding::from([6, 8])),
-            search,
+            search_box,
             column![
                 nav("Accueil", Icon::Home, Route::Home),
                 nav("Bibliothèque", Icon::Library, Route::Library),
@@ -558,7 +589,10 @@ pub(crate) fn track_row<'a>(
                 .on_press(on_play),
         )
         .on_enter(Message::Hover(track.video_id.clone()))
-        .on_exit(Message::Unhover),
+        .on_exit(Message::Unhover)
+        .on_right_press(crate::context::open(crate::context::Target::Track(
+            track.clone(),
+        ))),
     )
     .height(Length::Fixed(ROW_H))
     .align_y(Alignment::Center)
@@ -576,7 +610,7 @@ fn album_card<'a>(app: &App, album: &'a AlbumSummary) -> El<'a> {
     .filter(|s| !s.is_empty())
     .collect::<Vec<_>>()
     .join(" · ");
-    button(
+    let card = button(
         column![
             cover(app.cover(id.as_deref(), CARD), 164.0, 8.0),
             text(&album.title)
@@ -592,13 +626,17 @@ fn album_card<'a>(app: &App, album: &'a AlbumSummary) -> El<'a> {
     )
     .padding(10)
     .style(style::card)
-    .on_press(Message::Navigate(Route::Album(album.id.clone())))
-    .into()
+    .on_press(Message::Navigate(Route::Album(album.id.clone())));
+    mouse_area(card)
+        .on_right_press(crate::context::open(crate::context::Target::Album(
+            album.clone(),
+        )))
+        .into()
 }
 
 fn artist_card<'a>(app: &App, artist: &'a ArtistSummary) -> El<'a> {
     let id = app.url_cover(artist.thumbnail_url.as_deref());
-    button(
+    let card = button(
         column![
             cover(app.cover(id.as_deref(), CARD), 140.0, 70.0),
             text(&artist.name).size(14).font(SEMIBOLD),
@@ -612,8 +650,12 @@ fn artist_card<'a>(app: &App, artist: &'a ArtistSummary) -> El<'a> {
     )
     .padding(10)
     .style(style::card)
-    .on_press(Message::Navigate(Route::Artist(artist.id.clone())))
-    .into()
+    .on_press(Message::Navigate(Route::Artist(artist.id.clone())));
+    mouse_area(card)
+        .on_right_press(crate::context::open(crate::context::Target::Artist(
+            artist.clone(),
+        )))
+        .into()
 }
 
 pub(crate) fn cards<'a>(items: Vec<El<'a>>) -> El<'a> {
@@ -702,9 +744,12 @@ fn now_playing(app: &App) -> El<'_> {
     }
     // Mode focus : rien n'apparaît tout seul ; un clic n'importe où affiche
     // ou masque les contrôles (Échap pour revenir).
+    let side = column![info, lyrics_panel(app, track)]
+        .spacing(28)
+        .width(Length::Fill);
     mouse_area(
         container(
-            row![big, info.width(Length::Fill)]
+            row![big, side]
                 .spacing(40)
                 .align_y(Alignment::Center)
                 .padding(48),
@@ -716,6 +761,68 @@ fn now_playing(app: &App) -> El<'_> {
     )
     .on_press(Message::ToggleControls)
     .into()
+}
+
+/// Lignes de paroles autour de celle qui est chantée.
+const LYRICS_BEFORE: usize = 2;
+const LYRICS_SHOWN: usize = 9;
+
+/// Paroles du morceau : synchronisées (ligne chantée en évidence, clic =
+/// aller à ce moment) ou texte simple défilant.
+fn lyrics_panel<'a>(app: &'a App, track: &'a Track) -> El<'a> {
+    use ytmr_catalog::lyrics::LyricsBody;
+    let lyrics = match app.lyrics.get(&track.video_id) {
+        None | Some(Load::Loading) => return muted("Recherche des paroles…"),
+        Some(Load::Failed(_)) | Some(Load::Ready(None)) => {
+            return muted("Paroles indisponibles pour ce titre.");
+        }
+        Some(Load::Ready(Some(lyrics))) => lyrics,
+    };
+    let source = text(format!("Paroles : {}", lyrics.source))
+        .size(11)
+        .color(style::TEXT_FAINT);
+    match &lyrics.body {
+        LyricsBody::Synced(lines) => {
+            // Un léger temps d'avance : la ligne s'allume quand elle commence.
+            let now = app.state.position + Duration::from_millis(200);
+            let current = lyrics.line_at(now);
+            let first = current.unwrap_or(0).saturating_sub(LYRICS_BEFORE);
+            let mut list = column![].spacing(10);
+            for (i, line) in lines.iter().enumerate().skip(first).take(LYRICS_SHOWN) {
+                let sung = Some(i) == current;
+                let color = match current {
+                    _ if sung => style::TEXT,
+                    Some(c) if i < c => style::TEXT_FAINT,
+                    _ => style::TEXT_DIM,
+                };
+                let words = if line.text.is_empty() {
+                    "♪"
+                } else {
+                    line.text.as_str()
+                };
+                list = list.push(
+                    button(
+                        text(words)
+                            .size(if sung { 26 } else { 21 })
+                            .font(BOLD)
+                            .color(color),
+                    )
+                    .padding(0)
+                    .style(style::link)
+                    .on_press(Message::SeekTo(line.at)),
+                );
+            }
+            column![list, source].spacing(16).into()
+        }
+        LyricsBody::Plain(body) => column![
+            scrollable(text(body).size(17).color(style::TEXT_DIM))
+                .height(Length::Fixed(360.0))
+                .style(style::scroll),
+            source
+        ]
+        .spacing(12)
+        .into(),
+    }
 }
 
 /// « Bonjour, <prénom> » selon l'heure locale.
@@ -1226,6 +1333,9 @@ fn queue_panel(app: &App) -> El<'_> {
                     Message::QueueHover(Some(i))
                 })
                 .on_exit(Message::QueueHover(None))
+                .on_right_press(crate::context::open(crate::context::Target::Track(
+                    entry.track.clone(),
+                )))
                 .interaction(if drag.is_some_and(|d| d.moved) {
                     iced::mouse::Interaction::Grabbing
                 } else {
@@ -1374,7 +1484,16 @@ fn player_bar(app: &App) -> El<'_> {
     } else {
         Icon::Volume
     };
+    let lyrics_open = app.route == Route::NowPlaying;
     let right = row![
+        icon_tip(
+            Icon::Mic,
+            17.0,
+            lit(lyrics_open),
+            // Ouvre les paroles (grande vue) ; second clic : retour.
+            Message::Navigate(Route::NowPlaying),
+            "Paroles".into()
+        ),
         icon_tip(
             Icon::Radio,
             17.0,
@@ -1425,7 +1544,7 @@ fn player_bar(app: &App) -> El<'_> {
 // ----- formatage -----
 
 /// Premier nom d'une liste d'artistes (« A, B & C » → « A »).
-fn main_artist(artists: &str) -> &str {
+pub(crate) fn main_artist(artists: &str) -> &str {
     artists
         .split([',', '&'])
         .next()

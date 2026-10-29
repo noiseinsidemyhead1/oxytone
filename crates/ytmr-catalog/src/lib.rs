@@ -6,6 +6,7 @@
 
 pub mod account;
 pub mod home;
+pub mod lyrics;
 mod raw;
 
 pub use raw::normalize_query;
@@ -99,6 +100,8 @@ pub struct Artist {
 /// retente en cas d'échec) : l'application s'ouvre même sans réseau.
 pub struct Catalog {
     yt: tokio::sync::OnceCell<YtMusic<NoAuthToken>>,
+    /// Sources hors YouTube (paroles).
+    http: reqwest::Client,
 }
 
 /// Essais de connexion, espacés de plus en plus.
@@ -109,6 +112,7 @@ impl Catalog {
     pub fn new() -> Self {
         Self {
             yt: tokio::sync::OnceCell::new(),
+            http: reqwest::Client::new(),
         }
     }
 
@@ -121,6 +125,26 @@ impl Catalog {
 
     async fn client(&self) -> Result<&YtMusic<NoAuthToken>, CatalogError> {
         self.yt.get_or_try_init(connect).await
+    }
+
+    /// Suggestions pendant la frappe (complétions proposées par YouTube Music).
+    pub async fn suggestions(&self, query: &str) -> Result<Vec<String>, CatalogError> {
+        let query = normalize_query(query);
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let found = self.client().await?.get_search_suggestions(query).await?;
+        Ok(found
+            .into_iter()
+            .map(|s| {
+                s.runs
+                    .into_iter()
+                    .map(ytmapi_rs::common::TextRun::take_text)
+                    .collect::<String>()
+            })
+            .filter(|s| !s.trim().is_empty())
+            .take(7)
+            .collect())
     }
     /// Recherche limitée aux morceaux (pas de vidéos, albums ni playlists).
     ///

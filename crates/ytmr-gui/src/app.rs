@@ -15,6 +15,7 @@ use iced::keyboard::{self, Key, key};
 use iced::widget::{image, operation};
 use iced::{Color, Subscription, Task, Theme, window};
 use tokio::sync::broadcast::error::RecvError;
+use ytmr_catalog::lyrics::Lyrics;
 use ytmr_catalog::{Album, Artist, SearchAll};
 use ytmr_core::{
     AppPaths, Command, Config, CoreEvent, PlaybackState, QueueId, QueueSnapshot, Status, Track,
@@ -36,11 +37,14 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
 /// Attente maximale des pochettes avant d'afficher des résultats de recherche.
 /// (Garde-fou : une pochette qui ne répond pas ne bloque pas la recherche.)
 const SEARCH_COVERS_WAIT: Duration = Duration::from_secs(6);
-/// Contrôles de la vue « En cours » visibles après le dernier mouvement de souris.
 /// Survol prolongé avant de préparer un morceau (évite de lancer yt-dlp en
 /// passant simplement la souris sur une liste).
 const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(250);
 const TOAST_DURATION: Duration = Duration::from_secs(4);
+/// Suggestions demandées un peu avant la recherche complète.
+const SUGGEST_DEBOUNCE: Duration = Duration::from_millis(140);
+/// Paroles gardées en mémoire (les plus anciennes sont oubliées au-delà).
+const LYRICS_KEPT: usize = 40;
 
 pub const SEARCH_INPUT: &str = "recherche";
 /// Défilement de la page centrale, remis en haut à chaque navigation.
@@ -58,6 +62,8 @@ pub enum Route {
     Library,
     Playlist(String),
     Settings,
+    /// Historique d'écoute complet.
+    History,
 }
 
 #[derive(Debug, Clone)]
@@ -141,7 +147,16 @@ pub enum Message {
     DragEnd,
     /// Glisser-déposer dans la file d'attente.
     QueueDrag(QueueDrag),
-    WindowResized(f32),
+    WindowResized(iced::Size),
+    /// Plusieurs messages à la suite (menu contextuel : fermer puis agir).
+    Batch(Vec<Message>),
+    Context(crate::context::Ctx),
+    LyricsLoaded(String, Result<Option<Lyrics>, String>),
+    /// Clic sur une ligne de paroles synchronisées.
+    SeekTo(Duration),
+    SuggestDebounced(u64),
+    Suggestions(u64, Result<Vec<String>, String>),
+    PickSuggestion(String),
     /// Molette + Shift sur une rangée horizontale.
     WheelH(&'static str, f32),
     ShelfScrolled(&'static str, iced::widget::scrollable::Viewport),
@@ -308,6 +323,14 @@ pub struct App {
     pub left_width: f32,
     pub queue_width: f32,
     window_width: f32,
+    pub window_size: iced::Size,
+    /// Dernier clic droit (position dans la fenêtre).
+    pub context_point: iced::Point,
+    pub context_menu: Option<(iced::Point, crate::context::Target)>,
+    /// Paroles par morceau (`Ready(None)` : aucune source n'en a).
+    pub lyrics: HashMap<String, Load<Option<Lyrics>>>,
+    /// Suggestions de la recherche en cours de frappe.
+    pub suggestions: Vec<String>,
     dragging: Option<Panel>,
     pub queue_drag: Option<QueueDragState>,
     /// Point de départ du glissement : (x de la souris, largeur d'alors).
@@ -387,6 +410,11 @@ impl App {
             left_width: LEFT_DEFAULT,
             queue_width: RIGHT_DEFAULT,
             window_width: 1320.0,
+            window_size: iced::Size::new(1320.0, 860.0),
+            context_point: iced::Point::ORIGIN,
+            context_menu: None,
+            lyrics: HashMap::new(),
+            suggestions: Vec::new(),
             dragging: None,
             queue_drag: None,
             drag_anchor: None,
@@ -432,7 +460,7 @@ impl App {
         let mut subscriptions = vec![
             window::close_requests().map(|_| Message::CloseRequested),
             keyboard::listen().map(Message::Key),
-            window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
+            window::resize_events().map(|(_, size)| Message::WindowResized(size)),
         ];
         // Glissement d'une barre latérale : on suit la souris jusqu'au relâchement.
         if self.dragging.is_some() {
@@ -518,6 +546,37 @@ impl App {
                 self.send(Command::Move { id, to })
             }
         }
+    }
+
+    pub(crate) fn catalog(&self) -> Option<Arc<ytmr_catalog::Catalog>> {
+        self.backend().map(|b| Arc::clone(&b.catalog))
+    }
+
+    /// Paroles du morceau en cours, quand la grande vue est ouverte.
+    fn want_lyrics(&mut self) -> Task<Message> {
+        if self.route != Route::NowPlaying {
+            return Task::none();
+        }
+        let Some(track) = self.state.current.as_ref().map(|e| e.track.clone()) else {
+            return Task::none();
+        };
+        if self.lyrics.contains_key(&track.video_id) {
+            return Task::none();
+        }
+        let Some(catalog) = self.catalog() else {
+            return Task::none();
+        };
+        if self.lyrics.len() >= LYRICS_KEPT {
+            self.lyrics.clear();
+        }
+        self.lyrics.insert(track.video_id.clone(), Load::Loading);
+        Task::perform(
+            async move {
+                let result = catalog.lyrics(&track).await.map_err(|e| e.to_string());
+                (track.video_id, result)
+            },
+            |(id, r)| Message::LyricsLoaded(id, r),
+        )
     }
 
     fn backend(&self) -> Option<&Backend> {
@@ -936,8 +995,9 @@ impl App {
             ]),
             Route::Playlist(id) => self.open_playlist(id),
             Route::Home => self.refresh_home(),
-            Route::NowPlaying => Task::none(),
+            Route::NowPlaying => self.want_lyrics(),
             Route::Settings => self.open_settings(),
+            Route::History => self.load_history_page(),
         }
     }
 
@@ -1021,9 +1081,17 @@ impl App {
                     let previous = std::mem::replace(&mut self.route, Route::Search);
                     self.history.push(previous);
                 }
-                Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |()| {
-                    Message::SearchDebounced(seq)
-                })
+                if ytmr_catalog::normalize_query(&self.search_query).is_empty() {
+                    self.suggestions.clear();
+                }
+                Task::batch([
+                    Task::perform(tokio::time::sleep(SUGGEST_DEBOUNCE), move |()| {
+                        Message::SuggestDebounced(seq)
+                    }),
+                    Task::perform(tokio::time::sleep(SEARCH_DEBOUNCE), move |()| {
+                        Message::SearchDebounced(seq)
+                    }),
+                ])
             }
             Message::SearchDebounced(seq) => {
                 if seq == self.search_seq {
@@ -1033,6 +1101,7 @@ impl App {
                 }
             }
             Message::SearchSubmit => {
+                self.suggestions.clear();
                 if self.route != Route::Search {
                     let previous = std::mem::replace(&mut self.route, Route::Search);
                     self.history.push(previous);
@@ -1422,9 +1491,60 @@ impl App {
                 self.save_ui();
                 Task::none()
             }
-            Message::WindowResized(width) => {
-                self.window_width = width;
+            Message::WindowResized(size) => {
+                self.window_width = size.width;
+                self.window_size = size;
                 self.refresh_maximized()
+            }
+            Message::Batch(messages) => Task::batch(
+                messages
+                    .into_iter()
+                    .map(|m| self.update(m))
+                    .collect::<Vec<_>>(),
+            ),
+            Message::Context(message) => self.update_context(message),
+            Message::LyricsLoaded(video_id, result) => {
+                let load = match result {
+                    Ok(found) => Load::Ready(found),
+                    Err(e) => {
+                        tracing::debug!("paroles : {e}");
+                        Load::Failed(e)
+                    }
+                };
+                self.lyrics.insert(video_id, load);
+                Task::none()
+            }
+            Message::SeekTo(at) => self.send(Command::Seek(at)),
+            Message::SuggestDebounced(seq) => {
+                if seq != self.search_seq {
+                    return Task::none();
+                }
+                let query = ytmr_catalog::normalize_query(&self.search_query);
+                let Some(catalog) = self.catalog() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { catalog.suggestions(&query).await.map_err(|e| e.to_string()) },
+                    move |r| Message::Suggestions(seq, r),
+                )
+            }
+            Message::Suggestions(seq, result) => {
+                if seq == self.search_seq {
+                    let query = ytmr_catalog::normalize_query(&self.search_query).to_lowercase();
+                    // Inutile de proposer exactement ce qui est déjà tapé.
+                    self.suggestions = result
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|s| s.to_lowercase() != query)
+                        .collect();
+                }
+                Task::none()
+            }
+            Message::PickSuggestion(query) => {
+                self.search_query = query;
+                self.suggestions.clear();
+                self.search_seq += 1;
+                self.run_search()
             }
             Message::Frame(now) => {
                 if self.is_loading() {
@@ -1594,6 +1714,7 @@ impl App {
                 self.update_page_accent();
                 Task::batch([
                     report,
+                    self.want_lyrics(),
                     self.want_cover(cover.clone(), HERO),
                     self.want_cover(cover.clone(), THUMB),
                     self.want_accent(cover),
@@ -1626,6 +1747,10 @@ impl App {
             Key::Named(key::Named::ArrowLeft) => self.seek_by(-10.0),
             Key::Character("f" | "k") if modifiers.control() => operation::focus(SEARCH_INPUT),
             Key::Named(key::Named::F11) => self.update(Message::ToggleFullscreen),
+            Key::Named(key::Named::Escape) if self.context_menu.is_some() => {
+                self.context_menu = None;
+                Task::none()
+            }
             Key::Named(key::Named::Escape) | Key::Named(key::Named::BrowserBack) => {
                 self.update(Message::Back)
             }

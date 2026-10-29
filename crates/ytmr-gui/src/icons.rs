@@ -43,6 +43,7 @@ pub enum Icon {
     Minimize,
     Maximize,
     Restore,
+    Mic,
 }
 
 const STROKE: &str =
@@ -80,6 +81,7 @@ fn source(icon: Icon) -> String {
         Icon::Minimize => r#"<path fill="none" stroke="black" stroke-width="1.6" d="M5 12.5h14"/>"#.to_owned(),
         Icon::Maximize => r#"<rect fill="none" stroke="black" stroke-width="1.6" x="5.5" y="5.5" width="13" height="13" rx="1.5"/>"#.to_owned(),
         Icon::Restore => r#"<g fill="none" stroke="black" stroke-width="1.6"><rect x="4.5" y="8.5" width="11" height="11" rx="1.5"/><path d="M8.5 8.5V6a1.5 1.5 0 0 1 1.5-1.5h8A1.5 1.5 0 0 1 19.5 6v8a1.5 1.5 0 0 1-1.5 1.5h-2.5"/></g>"#.to_owned(),
+        Icon::Mic => format!(r#"<g {STROKE}><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></g>"#),
         Icon::Radio => format!(r#"<g {STROKE}><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><path d="M19.1 4.9a10 10 0 0 1 0 14.2"/><path d="M4.9 19.1a10 10 0 0 1 0-14.2"/></g>"#),
     };
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{body}</svg>"#)
@@ -119,6 +121,7 @@ static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
         Minimize,
         Maximize,
         Restore,
+        Mic,
     ]
     .into_iter()
     .map(|icon| svg::Handle::from_memory(source(icon).into_bytes()))

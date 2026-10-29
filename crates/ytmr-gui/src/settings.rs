@@ -248,6 +248,24 @@ pub fn settings_page(app: &App) -> El<'_> {
             card(normalize.into()),
             section_title("Stockage"),
             card(cache.into()),
+            section_title("Compte"),
+            card(
+                row![
+                    column![
+                        text("Historique d'écoute").size(15).font(SEMIBOLD),
+                        muted("Tous les titres écoutés récemment, à relancer d'un clic."),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill),
+                    button(text("Ouvrir").size(13).font(SEMIBOLD))
+                        .padding(Padding::from([7, 16]))
+                        .style(style::pill_ghost)
+                        .on_press(Message::Navigate(crate::app::Route::History)),
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .into()
+            ),
         ]
         .spacing(16)
         .padding(Padding {

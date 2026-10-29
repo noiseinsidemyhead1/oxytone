@@ -10,6 +10,7 @@ mod app;
 mod backend;
 mod chrome;
 mod collection;
+mod context;
 mod icons;
 mod library;
 mod settings;
