@@ -1,8 +1,9 @@
 //! Implémentation de [`Player`] avec mpv lancé en processus fils.
 //!
 //! En clair : on démarre mpv en arrière-plan, sans fenêtre, en lui demandant
-//! d'ouvrir un canal de télécommande. Quand on lui donne une URL YouTube, mpv
-//! appelle yt-dlp tout seul pour trouver le flux audio. Si mpv plante, seul ce
+//! d'ouvrir un canal de télécommande. On lui donne des adresses de flux déjà
+//! résolues (voir `resolve`) ; le morceau suivant est placé dans sa playlist
+//! pour qu'il le précharge et l'enchaîne sans blanc. Si mpv plante, seul ce
 //! lecteur s'arrête, pas l'application.
 
 mod ipc;
@@ -12,10 +13,10 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use tokio::process::{Child, Command};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::deps::{Dependencies, JsRuntime};
-use crate::{EndReason, Player, PlayerError, PlayerEvent};
+use crate::{EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent};
 use ipc::IpcClient;
 
 /// Écart minimal entre deux [`PlayerEvent::Position`] : mpv en envoie des dizaines par seconde.
@@ -32,16 +33,19 @@ const OBSERVED: [(u64, &str); 4] = [
 
 pub struct MpvPlayer {
     ipc: IpcClient,
-    child: Child,
+    child: Mutex<Child>,
     events: broadcast::Sender<PlayerEvent>,
 }
 
 impl MpvPlayer {
     /// Lance mpv et attend que son canal IPC réponde.
-    /// `ytdl_raw_options` : options `clé=valeur` transmises telles quelles à yt-dlp.
+    ///
+    /// `fallback_client` et `ytdl_raw_options` ne servent qu'au repli, quand mpv
+    /// doit résoudre lui-même une URL YouTube via son hook yt-dlp.
     pub async fn spawn(
         deps: &Dependencies,
         volume: u8,
+        fallback_client: Option<&str>,
         ytdl_raw_options: &[String],
     ) -> Result<Self, PlayerError> {
         let volume = check_volume(volume)?;
@@ -53,6 +57,9 @@ impl MpvPlayer {
             "--no-video",
             "--no-terminal",
             "--keep-open=no",
+            // Ouvre l'entrée suivante de la playlist avant la fin de la courante.
+            "--prefetch-playlist=yes",
+            "--gapless-audio=yes",
             "--ytdl-format=bestaudio/best",
         ])
         .arg(format!("--input-ipc-server={}", ipc_path.display()))
@@ -63,6 +70,11 @@ impl MpvPlayer {
         ));
         if deps.js_runtime == Some(JsRuntime::Node) {
             cmd.arg("--ytdl-raw-options-append=js-runtimes=node");
+        }
+        if let Some(client) = fallback_client {
+            cmd.arg(format!(
+                "--ytdl-raw-options-append=extractor-args=youtube:player_client={client}"
+            ));
         }
         for option in ytdl_raw_options {
             cmd.arg(format!("--ytdl-raw-options-append={option}"));
@@ -93,19 +105,11 @@ impl MpvPlayer {
         }
         tracing::info!(mpv = %deps.mpv.version, ytdlp = %deps.ytdlp.version, "mpv prêt");
 
-        Ok(Self { ipc, child, events })
-    }
-
-    /// Demande à mpv de quitter proprement, et le tue s'il traîne.
-    pub async fn shutdown(mut self) {
-        let _ = self.ipc.command(json!(["quit"])).await;
-        if tokio::time::timeout(QUIT_TIMEOUT, self.child.wait())
-            .await
-            .is_err()
-        {
-            tracing::warn!("mpv ne quitte pas, arrêt forcé");
-            let _ = self.child.kill().await;
-        }
+        Ok(Self {
+            ipc,
+            child: Mutex::new(child),
+            events,
+        })
     }
 
     async fn set(&self, name: &str, value: Value) -> Result<(), PlayerError> {
@@ -114,23 +118,53 @@ impl MpvPlayer {
             .await
             .map(drop)
     }
+
+    async fn loadfile(&self, source: &MediaSource, flag: &str) -> Result<EntryId, PlayerError> {
+        let options = source
+            .user_agent
+            .as_deref()
+            .map(|ua| format!("user-agent={}", escape_option(ua)))
+            .unwrap_or_default();
+        // Depuis mpv 0.38 : loadfile <url> <flags> <index> <options>.
+        let data = self
+            .ipc
+            .command(json!(["loadfile", source.url, flag, -1, options]))
+            .await?;
+        data.get("playlist_entry_id")
+            .and_then(Value::as_u64)
+            .map(EntryId)
+            .ok_or_else(|| PlayerError::Command {
+                command: "loadfile".into(),
+                message: format!("réponse sans playlist_entry_id : {data}"),
+            })
+    }
 }
 
 impl Player for MpvPlayer {
-    async fn load(&self, url: &str) -> Result<(), PlayerError> {
+    async fn load(&self, source: &MediaSource) -> Result<EntryId, PlayerError> {
+        let entry = self.loadfile(source, "replace").await?;
+        // Un morceau choisi doit démarrer, même si le précédent était en pause.
+        self.set("pause", json!(false)).await?;
+        Ok(entry)
+    }
+
+    async fn enqueue(&self, source: &MediaSource) -> Result<EntryId, PlayerError> {
+        self.loadfile(source, "append").await
+    }
+
+    async fn clear_pending(&self) -> Result<(), PlayerError> {
+        self.ipc.command(json!(["playlist-clear"])).await.map(drop)
+    }
+
+    async fn skip_to_pending(&self) -> Result<(), PlayerError> {
         self.ipc
-            .command(json!(["loadfile", url, "replace"]))
-            .await?;
-        // Une piste chargée doit démarrer, même si la précédente était en pause.
-        self.set("pause", json!(false)).await
+            .command(json!(["playlist-next", "force"]))
+            .await
+            .map(drop)
     }
 
     async fn set_paused(&self, paused: bool) -> Result<(), PlayerError> {
         self.set("pause", json!(paused)).await
-    }
-
-    async fn toggle_pause(&self) -> Result<(), PlayerError> {
-        self.ipc.command(json!(["cycle", "pause"])).await.map(drop)
     }
 
     async fn stop(&self) -> Result<(), PlayerError> {
@@ -151,6 +185,24 @@ impl Player for MpvPlayer {
     fn subscribe(&self) -> broadcast::Receiver<PlayerEvent> {
         self.events.subscribe()
     }
+
+    /// Demande à mpv de quitter proprement, et le tue s'il traîne.
+    async fn shutdown(&self) {
+        let _ = self.ipc.command(json!(["quit"])).await;
+        let mut child = self.child.lock().await;
+        if tokio::time::timeout(QUIT_TIMEOUT, child.wait())
+            .await
+            .is_err()
+        {
+            tracing::warn!("mpv ne quitte pas, arrêt forcé");
+            let _ = child.kill().await;
+        }
+    }
+}
+
+/// Valeur d'option mpv protégée : `%<octets>%<valeur>` (le User-Agent contient des virgules).
+fn escape_option(value: &str) -> String {
+    format!("%{}%{value}", value.len())
 }
 
 fn check_volume(volume: u8) -> Result<u8, PlayerError> {
@@ -169,12 +221,20 @@ async fn translate_events(
 ) {
     let mut last_position: Option<Duration> = None;
     while let Some(msg) = raw.recv().await {
+        let entry = msg
+            .get("playlist_entry_id")
+            .and_then(Value::as_u64)
+            .map(EntryId);
         let event = match msg.get("event").and_then(Value::as_str) {
-            Some("file-loaded") => {
+            Some("start-file") => {
                 last_position = None;
-                Some(PlayerEvent::Loaded)
+                entry.map(PlayerEvent::Started)
             }
-            Some("end-file") => Some(PlayerEvent::Ended(end_reason(&msg))),
+            Some("file-loaded") => Some(PlayerEvent::Loaded),
+            Some("end-file") => Some(PlayerEvent::Ended {
+                entry,
+                reason: end_reason(&msg),
+            }),
             Some("idle") => Some(PlayerEvent::Idle),
             Some("property-change") => property_event(&msg, &mut last_position),
             _ => None,
@@ -262,5 +322,11 @@ mod tests {
         let mut last = None;
         let msg = json!({"event": "property-change", "name": "duration", "data": null});
         assert_eq!(property_event(&msg, &mut last), None);
+    }
+
+    #[test]
+    fn escapes_option_values_with_commas() {
+        assert_eq!(escape_option("a, b"), "%4%a, b");
+        assert_eq!(escape_option("é"), "%2%é");
     }
 }

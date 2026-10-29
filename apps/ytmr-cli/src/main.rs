@@ -1,14 +1,19 @@
 //! Binaire headless de ytmr : debug et usage sans interface graphique.
+//!
+//! En clair : une télécommande en mode texte. Toute la logique (file, préchargement,
+//! radio) est dans `ytmr-core` ; ici on ne fait que traduire le clavier en commandes.
 
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::broadcast::error::RecvError;
 use ytmr_catalog::Catalog;
-use ytmr_core::{AppPaths, Config, Track};
-use ytmr_player::{Dependencies, EndReason, MpvPlayer, Player, PlayerEvent};
+use ytmr_core::engine::{self, CoreOptions};
+use ytmr_core::{AppPaths, Command as Cmd, Config, CoreEvent, CoreHandle, Status, Track};
+use ytmr_player::{Dependencies, MpvPlayer, StreamQuality, YtDlpResolver};
 
 #[derive(Parser)]
 #[command(version, about = "Client YouTube Music en ligne de commande")]
@@ -26,15 +31,21 @@ enum Command {
         #[arg(required = true)]
         query: Vec<String>,
     },
-    /// Joue le premier morceau trouvé.
+    /// Joue le premier morceau trouvé, puis enchaîne (radio si l'autoplay est actif).
     Play {
+        /// Met tous les résultats de la recherche dans la file.
+        #[arg(long)]
+        all: bool,
+        /// Désactive l'autoplay (radio) pour cette session.
+        #[arg(long)]
+        no_autoplay: bool,
         #[arg(required = true)]
         query: Vec<String>,
     },
 }
 
-const HELP: &str = "commandes : [entrée] ou p = pause/reprise · s 1:30 = aller à · \
-                    + / - = volume · v 50 = volume · i = état · q = quitter";
+const HELP: &str = "[entrée]/p pause · n suivant · b précédent · s 1:30 aller à · +/- ou v 50 volume\n\
+                    z shuffle · r repeat · a autoplay · l file · i état · q quitter";
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -48,11 +59,15 @@ fn main() -> Result<()> {
         match cli.command {
             Command::Doctor => doctor(&config).await,
             Command::Search { query } => search(&query.join(" ")).await,
-            Command::Play { query } => play(&config, &query.join(" ")).await,
+            Command::Play {
+                all,
+                no_autoplay,
+                query,
+            } => play(&config, &query.join(" "), all, !no_autoplay).await,
         }
     });
     // La lecture de stdin bloque un thread jusqu'à la prochaine ligne : sans
-    // ça, quitter (mpv mort, fin du morceau) attendrait un appui sur Entrée.
+    // ça, quitter (mpv mort, fin de file) attendrait un appui sur Entrée.
     runtime.shutdown_background();
     result
 }
@@ -102,66 +117,65 @@ async fn search(query: &str) -> Result<()> {
     Ok(())
 }
 
-async fn play(config: &Config, query: &str) -> Result<()> {
+async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result<()> {
     // Vérifier les outils d'abord : inutile de chercher si on ne peut pas jouer.
     let deps = detect(config).await?;
-    let catalog = Catalog::new_unauthenticated().await?;
-    let track = catalog
-        .search_songs(query)
-        .await?
-        .into_iter()
-        .next()
-        .with_context(|| format!("aucun morceau trouvé pour « {query} »"))?;
+    let fast_client = config.player.fast_start_client();
+    let (catalog, player) = tokio::try_join!(
+        async { Ok::<_, anyhow::Error>(Catalog::new_unauthenticated().await?) },
+        async {
+            Ok(MpvPlayer::spawn(
+                &deps,
+                config.player.volume,
+                fast_client,
+                &config.player.ytdl_raw_options,
+            )
+            .await?)
+        },
+    )?;
+    let catalog = Arc::new(catalog);
+    let resolver = Arc::new(YtDlpResolver::new(
+        &deps,
+        fast_client.map(str::to_owned),
+        &config.player.ytdl_raw_options,
+    ));
 
-    let player =
-        MpvPlayer::spawn(&deps, config.player.volume, &config.player.ytdl_raw_options).await?;
-    let mut events = player.subscribe();
-    println!("♪ {}  [{}]", describe(&track), fmt_opt(track.duration));
+    let mut tracks = catalog.search_songs(query).await?;
+    anyhow::ensure!(!tracks.is_empty(), "aucun morceau trouvé pour « {query} »");
+    if !all {
+        tracks.truncate(1);
+    }
+
+    let (core, task) = engine::spawn(
+        player,
+        resolver,
+        Arc::clone(&catalog),
+        CoreOptions {
+            volume: config.player.volume,
+            autoplay,
+        },
+    );
     println!("{HELP}");
-    player.load(&track.watch_url()).await?;
+    core.send(Cmd::PlayTracks { tracks, start: 0 }).await?;
 
-    let result = control_loop(&player, &mut events, config.player.volume).await;
-    player.shutdown().await;
+    let result = control_loop(&core).await;
+    core.send(Cmd::Shutdown).await.ok();
+    task.await.ok();
     result
 }
 
-#[derive(Default)]
-struct Status {
-    position: Duration,
-    duration: Option<Duration>,
-    paused: bool,
-    volume: u8,
-}
-
-impl Status {
-    fn line(&self) -> String {
-        format!(
-            "{} {} / {}  vol {}",
-            if self.paused { "⏸" } else { "▶" },
-            fmt(self.position),
-            fmt_opt(self.duration),
-            self.volume
-        )
-    }
-}
-
-async fn control_loop(
-    player: &MpvPlayer,
-    events: &mut tokio::sync::broadcast::Receiver<PlayerEvent>,
-    volume: u8,
-) -> Result<()> {
+async fn control_loop(core: &CoreHandle) -> Result<()> {
     let mut stdin = BufReader::new(tokio::io::stdin()).lines();
     let mut stdin_open = true;
-    let mut status = Status {
-        volume,
-        ..Status::default()
-    };
+    let mut events = core.subscribe();
+    let mut state = core.watch_state();
+    let mut last = state.borrow().clone();
 
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => return Ok(()),
             line = stdin.next_line(), if stdin_open => {
-                // stdin fermé ou illisible : on continue à jouer jusqu'à la fin du morceau.
+                // stdin fermé ou illisible : on continue à jouer.
                 let line = match line {
                     Ok(Some(line)) => line,
                     Ok(None) => {
@@ -174,85 +188,140 @@ async fn control_loop(
                         continue;
                     }
                 };
-                if let Err(e) = handle_input(player, &mut status, line.trim()).await {
-                    match e {
-                        InputOutcome::Quit => return Ok(()),
-                        InputOutcome::Error(msg) => println!("✗ {msg}"),
-                    }
+                match handle_input(core, line.trim()).await {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(e) => println!("✗ {e}"),
                 }
             }
             event = events.recv() => match event {
-                Ok(PlayerEvent::Position(p)) => status.position = p,
-                Ok(PlayerEvent::Duration(d)) => status.duration = Some(d),
-                Ok(PlayerEvent::Volume(v)) => status.volume = v,
-                Ok(PlayerEvent::Paused(p)) => {
-                    status.paused = p;
-                    println!("{}", status.line());
+                Ok(CoreEvent::TrackChanged(Some(entry))) => {
+                    println!("♪ {}  [{}]", describe(&entry.track), fmt_opt(entry.track.duration));
                 }
-                Ok(PlayerEvent::Loaded) => println!("lecture lancée"),
-                Ok(PlayerEvent::Ended(EndReason::Eof)) => {
-                    println!("morceau terminé");
+                Ok(CoreEvent::Error(message)) => println!("✗ {message}"),
+                Ok(_) | Err(RecvError::Lagged(_)) => {}
+                Err(RecvError::Closed) => return Ok(()),
+            },
+            changed = state.changed() => {
+                if changed.is_err() {
                     return Ok(());
                 }
-                Ok(PlayerEvent::Ended(EndReason::Error(e))) => bail!("lecture impossible : {e}"),
-                Ok(PlayerEvent::Ended(EndReason::Stopped) | PlayerEvent::Idle) => {}
-                Ok(PlayerEvent::Exited) => bail!("mpv s'est arrêté"),
-                Err(RecvError::Lagged(n)) => tracing::debug!(n, "événements sautés"),
-                Err(RecvError::Closed) => bail!("mpv s'est arrêté"),
+                let now = state.borrow_and_update().clone();
+                if now.quality != last.quality && let Some(q) = now.quality {
+                    println!("  qualité : {}", quality_label(q));
+                }
+                if now.next_ready && !last.next_ready {
+                    println!("  suivant prêt (préchargé)");
+                }
+                if now.status != last.status && matches!(now.status, Status::Playing | Status::Paused) {
+                    println!("{}", status_line(&now));
+                }
+                if now.status == Status::Idle
+                    && matches!(last.status, Status::Playing | Status::Paused | Status::Loading)
+                    && !now.autoplay
+                    && now.current.is_some()
+                {
+                    println!("file terminée");
+                    return Ok(());
+                }
+                last = now;
             }
         }
     }
 }
 
-enum InputOutcome {
-    Quit,
-    Error(String),
+/// Rend `true` pour quitter.
+async fn handle_input(core: &CoreHandle, input: &str) -> Result<bool> {
+    let (cmd, arg) = input.split_once(' ').unwrap_or((input, ""));
+    let state = core.state();
+    let command = match cmd {
+        "" | "p" => Cmd::TogglePause,
+        "n" => Cmd::Next,
+        "b" => Cmd::Previous,
+        "q" => return Ok(true),
+        "z" => Cmd::SetShuffle(!state.shuffle),
+        "r" => Cmd::SetRepeat(state.repeat.cycle()),
+        "a" => Cmd::SetAutoplay(!state.autoplay),
+        "+" => Cmd::SetVolume(state.volume.saturating_add(5).min(100)),
+        "-" => Cmd::SetVolume(state.volume.saturating_sub(5)),
+        "v" => Cmd::SetVolume(
+            arg.trim()
+                .parse()
+                .with_context(|| format!("volume invalide : « {arg} »"))?,
+        ),
+        "s" => Cmd::Seek(
+            ytmr_core::track::parse_duration(arg)
+                .with_context(|| format!("position invalide : « {arg} »"))?,
+        ),
+        "i" => {
+            println!("{}", status_line(&state));
+            return Ok(false);
+        }
+        "l" => {
+            print_queue(core);
+            return Ok(false);
+        }
+        _ => anyhow::bail!("commande inconnue.\n{HELP}"),
+    };
+    let echo = match &command {
+        Cmd::SetShuffle(on) => Some(format!("shuffle {}", on_off(*on))),
+        Cmd::SetRepeat(r) => Some(format!("repeat {r:?}")),
+        Cmd::SetAutoplay(on) => Some(format!("autoplay {}", on_off(*on))),
+        Cmd::SetVolume(v) => Some(format!("vol {v}")),
+        Cmd::Seek(p) => Some(format!("→ {}", fmt(*p))),
+        _ => None,
+    };
+    core.send(command).await?;
+    if let Some(echo) = echo {
+        println!("{echo}");
+    }
+    Ok(false)
 }
 
-async fn handle_input(
-    player: &MpvPlayer,
-    status: &mut Status,
-    input: &str,
-) -> Result<(), InputOutcome> {
-    let err = |e: ytmr_player::PlayerError| InputOutcome::Error(e.to_string());
-    let (cmd, arg) = input.split_once(' ').unwrap_or((input, ""));
-    match cmd {
-        "" | "p" => player.toggle_pause().await.map_err(err),
-        "q" => Err(InputOutcome::Quit),
-        "i" => {
-            println!("{}", status.line());
-            Ok(())
-        }
-        "+" | "-" => {
-            let v = if cmd == "+" {
-                status.volume.saturating_add(5).min(100)
-            } else {
-                status.volume.saturating_sub(5)
-            };
-            player.set_volume(v).await.map_err(err)?;
-            // Sans attendre la confirmation de mpv, pour enchaîner « v 40 » puis « - ».
-            status.volume = v;
-            println!("vol {v}");
-            Ok(())
-        }
-        "v" => {
-            let v: u8 = arg
-                .trim()
-                .parse()
-                .map_err(|_| InputOutcome::Error(format!("volume invalide : « {arg} »")))?;
-            player.set_volume(v).await.map_err(err)?;
-            status.volume = v;
-            Ok(())
-        }
-        "s" => {
-            let pos = ytmr_core::track::parse_duration(arg)
-                .ok_or_else(|| InputOutcome::Error(format!("position invalide : « {arg} »")))?;
-            player.seek(pos).await.map_err(err)?;
-            println!("→ {}", fmt(pos));
-            Ok(())
-        }
-        _ => Err(InputOutcome::Error(format!("commande inconnue. {HELP}"))),
+fn print_queue(core: &CoreHandle) {
+    let queue = core.queue();
+    let current = queue.current.unwrap_or(0);
+    let from = current.saturating_sub(2);
+    for (i, entry) in queue.entries.iter().enumerate().skip(from).take(12) {
+        let marker = if Some(i) == queue.current { "▶" } else { " " };
+        println!(
+            "{marker} {:>3}. {}  [{}]",
+            i + 1,
+            describe(&entry.track),
+            fmt_opt(entry.track.duration)
+        );
     }
+    println!("  ({} morceaux dans la file)", queue.entries.len());
+}
+
+fn status_line(s: &ytmr_core::PlaybackState) -> String {
+    let icon = match s.status {
+        Status::Playing => "▶",
+        Status::Paused => "⏸",
+        Status::Loading => "…",
+        Status::Idle => "■",
+    };
+    format!(
+        "{icon} {} / {}  vol {}  shuffle {}  repeat {:?}  autoplay {}",
+        fmt(s.position),
+        fmt_opt(s.duration),
+        s.volume,
+        on_off(s.shuffle),
+        s.repeat,
+        on_off(s.autoplay)
+    )
+}
+
+fn quality_label(q: StreamQuality) -> &'static str {
+    match q {
+        StreamQuality::High => "haute (Opus, audio seul)",
+        StreamQuality::Low => "rapide (AAC ~96 kb/s, démarrage à froid)",
+        StreamQuality::Unknown => "inconnue (résolue par mpv)",
+    }
+}
+
+fn on_off(on: bool) -> &'static str {
+    if on { "on" } else { "off" }
 }
 
 fn describe(t: &Track) -> String {

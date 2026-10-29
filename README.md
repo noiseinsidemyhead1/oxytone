@@ -17,10 +17,13 @@ Projet en cours de développement : voir [`ytmr-plan.md`](ytmr-plan.md) pour le 
 ```sh
 ytmr-cli doctor                         # vérifie l'installation
 ytmr-cli search daft punk
-ytmr-cli play daft punk around the world
+ytmr-cli play daft punk around the world        # puis radio automatique
+ytmr-cli play --all --no-autoplay daft punk       # tous les résultats en file
 ```
 
-Pendant la lecture : `Entrée` ou `p` pause/reprise, `s 1:30` aller à, `+`/`-` volume, `v 50`, `i` état, `q` quitter.
+Pendant la lecture : `Entrée`/`p` pause, `n` suivant, `b` précédent, `s 1:30` aller à, `+`/`-` ou `v 50` volume, `z` shuffle, `r` repeat, `a` autoplay, `l` file, `i` état, `q` quitter.
+
+Le morceau suivant est préparé pendant la lecture du courant : l'enchaînement est sans blanc (~7 ms mesurés) et en qualité haute (Opus). Seul un démarrage à froid (premier morceau, saut vers un morceau pas encore préparé) passe par un flux plus rapide à obtenir mais de qualité moindre ; réglable avec `player.fast_start_client` dans `config.toml` (vide = toujours la qualité, quelques secondes d'attente en plus).
 
 ## Licence
 

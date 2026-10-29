@@ -69,6 +69,7 @@ impl AppPaths {
 pub struct Config {
     pub api: ApiConfig,
     pub player: PlayerConfig,
+    pub playback: PlaybackConfig,
     pub log: LogConfig,
 }
 
@@ -108,15 +109,14 @@ pub struct PlayerConfig {
     pub ytdlp_path: Option<PathBuf>,
     /// Volume initial, 0 à 100.
     pub volume: u8,
-    /// Options `clé=valeur` passées à yt-dlp via mpv (`--ytdl-raw-options-append`).
+    /// Options `clé=valeur` ajoutées à chaque appel de yt-dlp (ex. `force-ipv4=`).
     /// C'est ici qu'on s'adapte quand YouTube change ses règles, sans recompiler.
     pub ytdl_raw_options: Vec<String>,
+    /// Client YouTube de yt-dlp pour un démarrage à froid : son immédiat mais
+    /// qualité moindre (AAC ~96 kb/s). Vide = toujours la qualité (Opus), avec
+    /// quelques secondes d'attente. Les morceaux préchargés sont toujours en qualité.
+    pub fast_start_client: String,
 }
-
-/// Le client `web_music` donne des URL lisibles immédiatement ; les clients
-/// choisis par défaut par yt-dlp (TV, visionOS) imposent un délai que mpv ne
-/// respecte pas, d'où des 403 (constaté avec yt-dlp 2026.10.26).
-const DEFAULT_YTDL_RAW_OPTIONS: &[&str] = &["extractor-args=youtube:player_client=web_music"];
 
 impl Default for PlayerConfig {
     fn default() -> Self {
@@ -124,11 +124,28 @@ impl Default for PlayerConfig {
             mpv_path: None,
             ytdlp_path: None,
             volume: 70,
-            ytdl_raw_options: DEFAULT_YTDL_RAW_OPTIONS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
+            ytdl_raw_options: Vec::new(),
+            fast_start_client: "android".to_owned(),
         }
+    }
+}
+
+impl PlayerConfig {
+    pub fn fast_start_client(&self) -> Option<&str> {
+        Some(self.fast_start_client.trim()).filter(|c| !c.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PlaybackConfig {
+    /// En fin de file, ajoute des morceaux similaires (radio YouTube Music).
+    pub autoplay: bool,
+}
+
+impl Default for PlaybackConfig {
+    fn default() -> Self {
+        Self { autoplay: true }
     }
 }
 

@@ -2488,13 +2488,16 @@ name = "ytmr-core"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "fastrand",
  "serde",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "ytmr-player",
 ]
 
 [[package]]

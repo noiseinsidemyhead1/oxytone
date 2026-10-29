@@ -7,11 +7,12 @@
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 use thiserror::Error;
 use ytmapi_rs::auth::noauth::NoAuthToken;
-use ytmapi_rs::common::{Thumbnail, YoutubeID};
-use ytmapi_rs::parse::SearchResultSong;
+use ytmapi_rs::common::{Thumbnail, VideoID, YoutubeID};
+use ytmapi_rs::parse::{SearchResultSong, WatchPlaylistTrack};
 use ytmapi_rs::{YtMusic, YtMusicBuilder};
-use ytmr_core::Track;
+use ytmr_core::engine::BoxError;
 use ytmr_core::track::parse_duration;
+use ytmr_core::{Radio, Track};
 
 #[derive(Debug, Error)]
 pub enum CatalogError {
@@ -51,6 +52,34 @@ impl Catalog {
         tracing::debug!(query, count = results.len(), "recherche de morceaux");
         Ok(results.into_iter().map(track_from_song).collect())
     }
+
+    /// « Radio » du morceau : titres similaires, comme l'autoplay de YouTube Music.
+    /// Le premier résultat est en général le morceau lui-même.
+    pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>, CatalogError> {
+        let results = self
+            .yt
+            .get_watch_playlist_from_video_id(VideoID::from_raw(video_id.to_owned()))
+            .await?;
+        tracing::debug!(video_id, count = results.len(), "radio");
+        Ok(results.into_iter().map(track_from_watch).collect())
+    }
+}
+
+impl Radio for Catalog {
+    async fn radio(&self, video_id: &str) -> Result<Vec<Track>, BoxError> {
+        Ok(Catalog::radio(self, video_id).await?)
+    }
+}
+
+fn track_from_watch(t: WatchPlaylistTrack) -> Track {
+    Track {
+        video_id: t.video_id.get_raw().to_owned(),
+        title: t.title,
+        artist: t.author,
+        album: None,
+        duration: parse_duration(&t.duration),
+        thumbnail_url: largest_thumbnail(&t.thumbnails),
+    }
 }
 
 fn track_from_song(song: SearchResultSong) -> Track {
@@ -89,5 +118,14 @@ mod tests {
         let first = &tracks[0];
         assert_eq!(first.video_id.len(), 11);
         assert!(first.duration.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "nécessite le réseau"]
+    async fn radio_returns_similar_tracks() {
+        let catalog = Catalog::new_unauthenticated().await.unwrap();
+        let tracks = catalog.radio("Jb6gcoR266U").await.unwrap();
+        assert!(tracks.len() > 5);
+        assert!(tracks.iter().all(|t| t.video_id.len() == 11));
     }
 }

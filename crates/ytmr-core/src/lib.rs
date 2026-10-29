@@ -4,8 +4,15 @@
 //! ordres ici et écouter ce qui s'y passe ; c'est la seule source de vérité.
 
 pub mod config;
+pub mod engine;
 pub mod logging;
+pub mod queue;
 pub mod track;
 
 pub use config::{AppPaths, Config, ConfigError};
+pub use engine::{
+    Command, CoreError, CoreEvent, CoreHandle, CoreOptions, PlaybackState, QueueSnapshot, Radio,
+    Status,
+};
+pub use queue::{QueueId, QueuedTrack, Repeat};
 pub use track::Track;
