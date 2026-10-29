@@ -26,17 +26,17 @@ use crate::style;
 
 /// Tailles demandées au cache de jaquettes (en pixels physiques, ~2× l'affichage).
 pub const THUMB: u32 = 96;
-pub const CARD: u32 = 320;
+/// Cartes (~164 px à l'écran) : 160 Ko décodés chacune.
+pub const CARD: u32 = 200;
 pub const HERO: u32 = 640;
 /// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
-const COVER_BUDGET: u64 = 64 << 20;
+const COVER_BUDGET: u64 = 96 << 20;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
 /// Attente maximale des pochettes avant d'afficher des résultats de recherche.
 /// (Garde-fou : une pochette qui ne répond pas ne bloque pas la recherche.)
 const SEARCH_COVERS_WAIT: Duration = Duration::from_secs(6);
 /// Contrôles de la vue « En cours » visibles après le dernier mouvement de souris.
-const CONTROLS_SHOWN: Duration = Duration::from_millis(2500);
 /// Survol prolongé avant de préparer un morceau (évite de lancer yt-dlp en
 /// passant simplement la souris sur une liste).
 const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(250);
@@ -160,8 +160,11 @@ pub enum Message {
     /// Handle natif de la fenêtre, pour l'overlay média du système.
     NativeWindow(Option<usize>),
     /// La souris bouge dans la vue « En cours » : afficher les contrôles un moment.
-    Activity,
-    HideControls(u64),
+    /// Vue « En cours » : un clic affiche ou masque les contrôles.
+    ToggleControls,
+    /// Survol d'une ligne de la file (distinct du survol des listes).
+    QueueHover(Option<usize>),
+    QueueHoverSettled(String),
     MediaControls(Result<(), String>),
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
@@ -282,7 +285,11 @@ pub struct App {
     pub maximized: bool,
     /// Vue « En cours » : contrôles visibles (après un mouvement de souris).
     pub controls_visible: bool,
-    activity_seq: u64,
+    /// Ligne survolée dans la file d'attente.
+    pub queue_hover: Option<usize>,
+    queue_hover_video: Option<String>,
+    /// Pochettes des lignes affichées : jamais libérées tant qu'elles le sont.
+    visible_covers: std::collections::HashSet<(String, u32)>,
     /// Pochettes impossibles à charger : ne plus les attendre.
     cover_failed: std::collections::HashSet<(String, u32)>,
     pub show_queue: bool,
@@ -360,7 +367,9 @@ impl App {
             fullscreen: false,
             maximized: false,
             controls_visible: false,
-            activity_seq: 0,
+            queue_hover: None,
+            queue_hover_video: None,
+            visible_covers: std::collections::HashSet::new(),
             cover_failed: std::collections::HashSet::new(),
             show_queue: true,
             seek_preview: None,
@@ -443,14 +452,6 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::QueueDrag(QueueDrag::Release)),
-                _ => None,
-            }));
-        }
-        if self.route == Route::NowPlaying {
-            subscriptions.push(iced::event::listen_with(|event, _, _| match event {
-                iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
-                    Some(Message::Activity)
-                }
                 _ => None,
             }));
         }
@@ -659,6 +660,7 @@ impl App {
                 })
             })
             .collect();
+        self.visible_covers = ids.iter().flatten().map(|id| (id.clone(), THUMB)).collect();
         let task = Task::batch(ids.iter().cloned().map(|id| self.want_cover(id, THUMB)));
         for (id, pinned) in ids.into_iter().zip(pinned) {
             if let Some(id) = id
@@ -690,10 +692,13 @@ impl App {
             return;
         }
         let keep: Vec<Option<String>> = vec![self.current_cover(), self.page_cover()];
+        // Jamais une pochette à l'écran : libérée, elle restait un carré vide
+        // (seule celle du morceau en cours revenait).
         let mut loaded: Vec<((String, u32), u64)> = self
             .cover_evictable
             .iter()
             .filter(|key| matches!(self.covers.get(*key), Some(Some(_))))
+            .filter(|key| !self.visible_covers.contains(*key))
             .filter(|key| !keep.contains(&Some(key.0.clone())))
             .map(|key| (key.clone(), self.cover_used.get(key).copied().unwrap_or(0)))
             .collect();
@@ -1132,6 +1137,8 @@ impl App {
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "jaquette indisponible");
+                        // Retirée : une prochaine demande retentera (réseau revenu…).
+                        self.covers.remove(&(id.clone(), size));
                         self.cover_failed.insert((id, size));
                     }
                 }
@@ -1205,19 +1212,36 @@ impl App {
                     Message::MediaControls,
                 )
             }
-            Message::Activity => {
-                self.controls_visible = true;
-                self.activity_seq += 1;
-                let seq = self.activity_seq;
-                Task::perform(tokio::time::sleep(CONTROLS_SHOWN), move |()| {
-                    Message::HideControls(seq)
-                })
-            }
-            Message::HideControls(seq) => {
-                if seq == self.activity_seq {
-                    self.controls_visible = false;
-                }
+            Message::ToggleControls => {
+                self.controls_visible = !self.controls_visible;
                 Task::none()
+            }
+            Message::QueueHover(row) => {
+                self.queue_hover = row;
+                // Même préchargement qu'au survol d'une liste, sans toucher à
+                // son état (sinon la ligne de même titre s'allumait ailleurs).
+                let video = row
+                    .and_then(|i| self.queue.entries.get(i))
+                    .map(|e| e.track.video_id.clone());
+                match video {
+                    Some(video_id) => {
+                        self.queue_hover_video = Some(video_id.clone());
+                        Task::perform(tokio::time::sleep(HOVER_PREFETCH_DELAY), move |()| {
+                            Message::QueueHoverSettled(video_id.clone())
+                        })
+                    }
+                    None => {
+                        self.queue_hover_video = None;
+                        Task::none()
+                    }
+                }
+            }
+            Message::QueueHoverSettled(video_id) => {
+                if self.queue_hover_video.as_deref() == Some(video_id.as_str()) {
+                    self.send(Command::Prefetch(video_id))
+                } else {
+                    Task::none()
+                }
             }
             Message::MediaControls(result) => {
                 match result {
@@ -1423,12 +1447,22 @@ impl App {
             }
             Message::BacklogCover(id, size, result) => {
                 self.backlog_inflight = self.backlog_inflight.saturating_sub(1);
-                if let Ok(handle) = result {
-                    let key = (id, size);
-                    self.touch_cover(&key);
-                    self.cover_evictable.insert(key.clone());
-                    self.covers.insert(key, Some(handle));
-                    self.trim_covers();
+                let key = (id, size);
+                match result {
+                    Ok(handle) => {
+                        self.touch_cover(&key);
+                        // Demandée entre-temps pour être affichée : on la garde.
+                        if !self.visible_covers.contains(&key) {
+                            self.cover_evictable.insert(key.clone());
+                        }
+                        self.covers.insert(key, Some(handle));
+                        self.trim_covers();
+                    }
+                    Err(_) => {
+                        if matches!(self.covers.get(&key), Some(None)) {
+                            self.covers.remove(&key);
+                        }
+                    }
                 }
                 self.pump_backlog()
             }

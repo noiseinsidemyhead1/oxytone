@@ -40,9 +40,6 @@ pub const RENAME_INPUT: &str = "renommer-playlist";
 const PLAYLIST_TTL: Duration = Duration::from_secs(30 * 60);
 const LIST_TTL: Duration = Duration::from_secs(30 * 60);
 const LIKED_TTL: Duration = Duration::from_secs(60 * 60);
-const HOME_TTL: Duration = Duration::from_secs(15 * 60);
-/// Après une écoute signalée, « Réécouter » peut être redemandé plus tôt.
-const HOME_STALE_TTL: Duration = Duration::from_secs(3 * 60);
 
 /// Poignée clonable vers le compte (le jeton n'apparaît jamais dans les logs).
 #[derive(Debug, Clone)]
@@ -86,7 +83,7 @@ pub struct LibraryState {
     pub profile: Option<Profile>,
     /// Rangées de l'accueil de YouTube Music.
     pub home: Option<Load<Vec<HomeShelf>>>,
-    home_stale: bool,
+    /// Accueil demandé pendant cette session (une seule fois).
     home_at: Option<Instant>,
     /// Recherche dans la playlist ouverte.
     pub filter: String,
@@ -209,9 +206,13 @@ fn call<T: Send + 'static>(
 }
 
 impl App {
-    /// Accueil de YouTube Music : la version en cache s'affiche tout de suite,
-    /// la fraîche la remplace à son arrivée.
+    /// Accueil de YouTube Music, figé pendant toute la session : la version en
+    /// cache s'affiche au lancement et la fraîche est seulement enregistrée
+    /// (elle apparaîtra au prochain lancement). Sans cache, la fraîche s'affiche.
     pub fn load_home(&mut self) -> Task<Message> {
+        if self.lib.home_at.is_some() {
+            return Task::none();
+        }
         let op = self.lib.ready().map(|a| async move { a.home().await });
         if op.is_none() {
             return Task::none();
@@ -231,6 +232,7 @@ impl App {
                 None => Load::Loading,
             });
         }
+        self.lib.home_at = Some(Instant::now());
         tasks.push(call(op, Lib::HomeLoaded));
         Task::batch(tasks)
     }
@@ -246,13 +248,7 @@ impl App {
     }
 
     pub fn refresh_home(&mut self) -> Task<Message> {
-        let age = self.lib.home_at.map(|t| t.elapsed());
-        let due = match age {
-            None => true,
-            Some(age) if self.lib.home_stale => age > HOME_STALE_TTL,
-            Some(age) => age > HOME_TTL,
-        };
-        if due { self.load_home() } else { Task::none() }
+        self.load_home()
     }
 
     /// Signale à YouTube le morceau qui commence (une fois par entrée de file).
@@ -268,7 +264,6 @@ impl App {
         if op.is_none() {
             return Task::none();
         }
-        self.lib.home_stale = true;
         call(op, Lib::Reported)
     }
 
@@ -588,10 +583,12 @@ impl App {
             },
             Lib::HomeLoaded(result) => match result {
                 Ok(shelves) => {
-                    self.lib.home_stale = false;
-                    self.lib.home_at = Some(Instant::now());
                     if let Some(dir) = &self.lib.cache_dir {
                         write_json(&dir.join("home.json"), &shelves);
+                    }
+                    // Déjà une version à l'écran : on n'y touche pas.
+                    if matches!(self.lib.home, Some(Load::Ready(_))) {
+                        return Task::none();
                     }
                     let task = self.want_home_covers(&shelves);
                     self.lib.home = Some(Load::Ready(shelves));
@@ -1361,7 +1358,15 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             ));
     }
     // Le nombre de titres (dans `details`) monte en direct pendant le chargement.
-    let subtitle = column![muted(details), title_or_edit, actions].spacing(6);
+    let subtitle = column![
+        text(crate::views::ellipsize(&details, 90).into_owned())
+            .size(13)
+            .color(style::TEXT_DIM)
+            .wrapping(iced::widget::text::Wrapping::None),
+        title_or_edit,
+        actions
+    ]
+    .spacing(6);
 
     let cover_id = if liked {
         playlist.tracks.first().and_then(|t| app.track_cover(t))
@@ -1692,7 +1697,7 @@ fn grid_tile<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
     };
     button(
         row![
-            cover(app.cover(id.as_deref(), CARD), 56.0, radius),
+            cover(app.cover(id.as_deref(), THUMB), 56.0, radius),
             container(
                 text(&item.title)
                     .size(14)

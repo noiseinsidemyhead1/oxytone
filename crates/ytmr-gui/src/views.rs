@@ -392,6 +392,11 @@ pub(crate) fn icon_tip<'a>(
     .into()
 }
 
+/// Caractères d'un titre de page (40 px) qui tiennent à côté de la pochette.
+fn title_chars(app: &App) -> usize {
+    ((app.center_width() - 340.0) / 22.0).max(10.0) as usize
+}
+
 /// Texte coupé à `max` caractères avec « … » (iced ne sait pas le faire seul).
 pub(crate) fn ellipsize(s: &str, max: usize) -> std::borrow::Cow<'_, str> {
     if s.chars().count() <= max {
@@ -493,7 +498,7 @@ fn row_actions<'a>(app: &App, track: &'a Track, remove: Option<Message>) -> El<'
             14.0,
             style::TEXT_FAINT,
             message,
-            "Retirer de la playlist".into(),
+            "Retirer".into(),
         ));
     }
     container(buttons).width(width).into()
@@ -680,13 +685,8 @@ fn now_playing(app: &App) -> El<'_> {
     };
     let track = &entry.track;
     let id = app.track_cover(track);
-    // Un clic sur la pochette ramène à la page d'avant (comme Échap).
-    let big = button(
-        container(cover(app.cover(id.as_deref(), HERO), 420.0, 12.0)).style(style::cover_frame),
-    )
-    .padding(0)
-    .style(style::link)
-    .on_press(Message::Back);
+    let big =
+        container(cover(app.cover(id.as_deref(), HERO), 420.0, 12.0)).style(style::cover_frame);
     let mut info = column![
         text(&track.title).size(42).font(BOLD),
         text(&track.artist).size(19).color(style::TEXT_DIM),
@@ -700,16 +700,21 @@ fn now_playing(app: &App) -> El<'_> {
                 .on_press(Message::Navigate(Route::Album(album_id.clone()))),
         );
     }
-    container(
-        row![big, info.width(Length::Fill)]
-            .spacing(40)
-            .align_y(Alignment::Center)
-            .padding(48),
+    // Mode focus : rien n'apparaît tout seul ; un clic n'importe où affiche
+    // ou masque les contrôles (Échap pour revenir).
+    mouse_area(
+        container(
+            row![big, info.width(Length::Fill)]
+                .spacing(40)
+                .align_y(Alignment::Center)
+                .padding(48),
+        )
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_y(Length::Fill)
+        .style(style::hero(app.accent)),
     )
-    .width(Length::Fill)
-    .height(Length::Fill)
-    .center_y(Length::Fill)
-    .style(style::hero(app.accent))
+    .on_press(Message::ToggleControls)
     .into()
 }
 
@@ -893,7 +898,12 @@ pub(crate) fn page_header<'a>(
             art,
             column![
                 text(kicker).size(12).font(BOLD).color(accent),
-                text(title).size(40).font(BOLD),
+                // Une seule ligne : un titre sur deux lignes poussait les boutons
+                // hors de l'en-tête (hauteur fixe) et ils s'affichaient vides.
+                text(ellipsize(title, title_chars(app)))
+                    .size(40)
+                    .font(BOLD)
+                    .wrapping(iced::widget::text::Wrapping::None),
                 subtitle,
                 Space::new().height(Length::Fixed(8.0)),
                 actions,
@@ -1121,7 +1131,7 @@ fn queue_panel(app: &App) -> El<'_> {
             16.0,
             style::TEXT_DIM,
             Message::ToggleQueue,
-            "Masquer la file".into()
+            "Fermer".into()
         ),
     ]
     .spacing(8)
@@ -1156,7 +1166,7 @@ fn queue_panel(app: &App) -> El<'_> {
                     13.0,
                     style::TEXT_FAINT,
                     Message::Remove(entry.id),
-                    "Retirer de la file".into()
+                    "Retirer".into()
                 ),
             ]
             .spacing(10)
@@ -1164,8 +1174,7 @@ fn queue_panel(app: &App) -> El<'_> {
             // Pas de bouton ici : il garderait le clic pour lui. Un clic bref
             // lance le morceau, un clic maintenu le déplace (voir `QueueDrag`).
             let held = drag.is_some_and(|d| d.from == i && d.moved);
-            let hovered =
-                drag.is_none() && app.hovered.as_deref() == Some(entry.track.video_id.as_str());
+            let hovered = drag.is_none() && app.queue_hover == Some(i);
             let background = if held {
                 Some(style::alpha(accent, 0.24))
             } else if hovered {
@@ -1214,9 +1223,9 @@ fn queue_panel(app: &App) -> El<'_> {
                 .on_enter(if drag.is_some() {
                     Message::QueueDrag(QueueDrag::Over(i))
                 } else {
-                    Message::Hover(entry.track.video_id.clone())
+                    Message::QueueHover(Some(i))
                 })
-                .on_exit(Message::Unhover)
+                .on_exit(Message::QueueHover(None))
                 .interaction(if drag.is_some_and(|d| d.moved) {
                     iced::mouse::Interaction::Grabbing
                 } else {
@@ -1302,7 +1311,7 @@ fn player_bar(app: &App) -> El<'_> {
             17.0,
             lit(state.shuffle),
             Message::ToggleShuffle,
-            format!("Lecture aléatoire : {}", on_off(state.shuffle))
+            "Aléatoire".into()
         ),
         icon_tip(
             Icon::Prev,
@@ -1324,7 +1333,7 @@ fn player_bar(app: &App) -> El<'_> {
             17.0,
             lit(state.repeat != Repeat::Off),
             Message::CycleRepeat,
-            repeat_label(state.repeat).into()
+            "Répéter".into()
         ),
     ]
     .spacing(10)
@@ -1371,11 +1380,7 @@ fn player_bar(app: &App) -> El<'_> {
             17.0,
             lit(state.autoplay),
             Message::ToggleAutoplay,
-            format!(
-                "Radio automatique : {}
-Ajoute des titres similaires quand la file se termine",
-                on_off(state.autoplay)
-            )
+            "Radio".into()
         ),
         icon_tip(
             Icon::Queue,
@@ -1389,7 +1394,7 @@ Ajoute des titres similaires quand la file se termine",
             17.0,
             style::TEXT_DIM,
             Message::ToggleMute,
-            format!("Volume {} % (clic : couper)", state.volume)
+            "Volume".into()
         ),
         slider(0..=100u8, state.volume, Message::Volume)
             .width(Length::Fixed(110.0))
@@ -1427,18 +1432,6 @@ fn main_artist(artists: &str) -> &str {
         .map(str::trim)
         .filter(|a| !a.is_empty())
         .unwrap_or(artists)
-}
-
-fn on_off(on: bool) -> &'static str {
-    if on { "activée" } else { "désactivée" }
-}
-
-fn repeat_label(repeat: Repeat) -> &'static str {
-    match repeat {
-        Repeat::Off => "Répéter : non",
-        Repeat::All => "Répéter : toute la file",
-        Repeat::One => "Répéter : ce morceau",
-    }
 }
 
 pub fn fmt(d: Duration) -> String {
