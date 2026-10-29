@@ -10,3 +10,11 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+reqwest = { version = "0.13", default-features = false }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+ytmapi-rs = { version = "0.3.3", features = ["reqwest"] }
+ytmr-core = { version = "0.1.0", path = "../ytmr-core" }
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread"] }

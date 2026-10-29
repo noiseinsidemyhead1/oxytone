@@ -5,5 +5,7 @@
 
 pub mod config;
 pub mod logging;
+pub mod track;
 
 pub use config::{AppPaths, Config, ConfigError};
+pub use track::Track;

@@ -8,7 +8,19 @@ Projet en cours de développement : voir [`ytmr-plan.md`](ytmr-plan.md) pour le 
 
 - Rust stable (1.85 minimum)
 - Windows : Build Tools Visual Studio avec la charge de travail « Développement Desktop en C++ »
-- À partir de la phase 1 : `mpv` et `yt-dlp` dans le PATH
+- `mpv` et `yt-dlp` dans le PATH, plus un moteur JavaScript pour yt-dlp (`deno` conseillé, `node` accepté)
+  - Windows : `scoop bucket add extras && scoop install mpv yt-dlp deno`
+  - CachyOS / Arch : `sudo pacman -S mpv yt-dlp deno`
+
+## Utilisation (CLI)
+
+```sh
+ytmr-cli doctor                         # vérifie l'installation
+ytmr-cli search daft punk
+ytmr-cli play daft punk around the world
+```
+
+Pendant la lecture : `Entrée` ou `p` pause/reprise, `s 1:30` aller à, `+`/`-` volume, `v 50`, `i` état, `q` quitter.
 
 ## Licence
 

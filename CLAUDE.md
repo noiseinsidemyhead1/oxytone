@@ -28,14 +28,25 @@ cargo build --workspace
 cargo fmt --all
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo run -p ytmr-cli            # binaire headless
-cargo run -p ytmr                # binaire GUI
-RUST_LOG=debug cargo run -p ytmr-cli
+cargo run -p ytmr-cli -- doctor                     # vérifie mpv, yt-dlp, moteur JS
+cargo run -p ytmr-cli -- search daft punk           # recherche
+cargo run -p ytmr-cli -- play daft punk around the world
+cargo run -p ytmr                                   # binaire GUI
+RUST_LOG=ytmr_player=trace cargo run -p ytmr-cli -- play …   # trace l'IPC mpv
+cargo test -p ytmr-catalog -- --ignored             # tests réseau
 ```
 
 Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque le `link.exe` de MSVC.
 
 **CI :** `.github/workflows/ci.yml` existe, mais GitHub Actions est bloqué sur le compte (`startup_failure` même sur un workflow vide, quota non épuisé). La validation de fin de phase se fait donc **en local sur Windows ET sur CachyOS** (`cargo build`, `clippy`, `test`).
+
+## Pièges connus
+
+- **Consentement RGPD** : depuis l'UE, `music.youtube.com` redirige vers `consent.youtube.com` (400, corps vide) et ytmapi-rs échoue avec « Unable to parse ytcfg ». `ytmr-catalog` envoie le cookie `SOCS=CAI` via un client reqwest passé à `YtMusicBuilder::new_with_client` (feature `reqwest` de ytmapi-rs).
+- **403 sur les flux** : les clients yt-dlp par défaut (TV, visionOS) donnent des URL avec un délai d'attente que mpv ne respecte pas. Par défaut, `player.ytdl_raw_options = ["extractor-args=youtube:player_client=web_music"]`. Si la lecture recasse, tester d'autres clients à la main : `mpv --no-video --ytdl-raw-options-append=extractor-args=youtube:player_client=<client> <url>`.
+- **Moteur JS** : yt-dlp n'active que deno par défaut ; si seul node est présent, ytmr ajoute `js-runtimes=node`.
+- **stdin tokio** : la lecture de stdin bloque un thread ; la CLI termine avec `runtime.shutdown_background()` pour ne pas attendre un appui sur Entrée.
+- **PATH** : après `scoop install`, les shells déjà ouverts ne voient pas mpv ; ouvrir un nouveau terminal.
 
 ## Emplacements à l'exécution
 
@@ -50,7 +61,7 @@ Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque
 | Phase | État |
 |---|---|
 | 0 — Socle (workspace, lints, CI, tracing, config) | validée sous Windows ; à vérifier sous CachyOS |
-| 1 — Lecture headless | à faire |
+| 1 — Lecture headless (catalogue, mpv IPC, CLI) | validée sous Windows ; à vérifier sous CachyOS |
 | 2 — Core et file d'attente | à faire |
 | 3 — API et jaquettes | à faire |
 | 4 — Firmware CYD | à faire |

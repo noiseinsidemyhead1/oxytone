@@ -108,7 +108,15 @@ pub struct PlayerConfig {
     pub ytdlp_path: Option<PathBuf>,
     /// Volume initial, 0 à 100.
     pub volume: u8,
+    /// Options `clé=valeur` passées à yt-dlp via mpv (`--ytdl-raw-options-append`).
+    /// C'est ici qu'on s'adapte quand YouTube change ses règles, sans recompiler.
+    pub ytdl_raw_options: Vec<String>,
 }
+
+/// Le client `web_music` donne des URL lisibles immédiatement ; les clients
+/// choisis par défaut par yt-dlp (TV, visionOS) imposent un délai que mpv ne
+/// respecte pas, d'où des 403 (constaté avec yt-dlp 2026.10.26).
+const DEFAULT_YTDL_RAW_OPTIONS: &[&str] = &["extractor-args=youtube:player_client=web_music"];
 
 impl Default for PlayerConfig {
     fn default() -> Self {
@@ -116,6 +124,10 @@ impl Default for PlayerConfig {
             mpv_path: None,
             ytdlp_path: None,
             volume: 70,
+            ytdl_raw_options: DEFAULT_YTDL_RAW_OPTIONS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
         }
     }
 }

@@ -11,5 +11,9 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal", "time", "sync"] }
 tracing = "0.1.44"
+ytmr-catalog = { version = "0.1.0", path = "../../crates/ytmr-catalog" }
 ytmr-core = { version = "0.1.0", path = "../../crates/ytmr-core" }
+ytmr-player = { version = "0.1.0", path = "../../crates/ytmr-player" }
