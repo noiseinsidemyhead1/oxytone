@@ -13,6 +13,7 @@
 //! Radio : quand il reste moins de deux morceaux, des titres similaires au
 //! morceau courant sont ajoutés à la fin (si l'autoplay est actif).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -47,6 +48,8 @@ const RADIO_MAX_ADD: usize = 25;
 /// YouTube), un démarrage rapide ~3 s. Au-delà de ce temps écoulé, attendre le
 /// préchargement en cours est plus rapide (et en meilleure qualité).
 const PRELOAD_WAIT_THRESHOLD: Duration = Duration::from_secs(5);
+/// Résolutions « au cas où » (survol dans l'interface) menées en même temps.
+const MAX_WARMING: usize = 2;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Status {
@@ -117,6 +120,9 @@ pub enum Command {
     SetShuffle(bool),
     SetRepeat(Repeat),
     SetAutoplay(bool),
+    /// Indice : ce morceau risque d'être lancé bientôt (survol, page ouverte).
+    /// Le résout en avance pour un démarrage quasi instantané ; sans effet sur la lecture.
+    Prefetch(String),
     /// Arrête le lecteur et le moteur.
     Shutdown,
 }
@@ -230,6 +236,7 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         paused: false,
         radio_inflight: false,
         radio_seed: None,
+        warming: HashSet::new(),
         consecutive_errors: 0,
         player_alive: true,
     };
@@ -264,6 +271,9 @@ enum TaskDone {
     Radio {
         result: Result<Vec<Track>, BoxError>,
     },
+    Warmed {
+        video_id: String,
+    },
 }
 
 struct Engine<P, R, C> {
@@ -291,6 +301,8 @@ struct Engine<P, R, C> {
     radio_inflight: bool,
     /// Dernier morceau ayant servi de graine à la radio (évite de redemander en boucle).
     radio_seed: Option<QueueId>,
+    /// Morceaux en cours de résolution suite à un [`Command::Prefetch`].
+    warming: HashSet<String>,
     consecutive_errors: u32,
     player_alive: bool,
 }
@@ -417,8 +429,30 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.refresh_preload().await;
                 Ok(())
             }
+            Command::Prefetch(video_id) => {
+                self.warm(video_id);
+                Ok(())
+            }
             Command::Shutdown => Ok(()),
         }
+    }
+
+    fn warm(&mut self, video_id: String) {
+        let already = self
+            .resolver
+            .cached(&video_id)
+            .is_some_and(|s| s.quality == StreamQuality::High);
+        if already || self.warming.contains(&video_id) || self.warming.len() >= MAX_WARMING {
+            return;
+        }
+        self.warming.insert(video_id.clone());
+        let resolver = Arc::clone(&self.resolver);
+        self.tasks.spawn(async move {
+            if let Err(e) = resolver.resolve(&video_id, StartMode::Quality).await {
+                tracing::debug!(error = %e, video_id, "préchauffage échoué");
+            }
+            TaskDone::Warmed { video_id }
+        });
     }
 
     async fn after_insert(&mut self, ids: Vec<QueueId>) -> Result<(), CoreError> {
@@ -730,6 +764,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                     // Pas grave : le morceau démarrera à froid.
                     Err(e) => tracing::warn!(error = %e, "préchargement échoué"),
                 }
+            }
+            TaskDone::Warmed { video_id } => {
+                self.warming.remove(&video_id);
             }
             TaskDone::Radio { result } => {
                 self.radio_inflight = false;
@@ -1054,6 +1091,7 @@ mod tests {
             title: format!("t{n}"),
             artist: "a".into(),
             album: None,
+            album_id: None,
             duration: Some(Duration::from_secs(200)),
             thumbnail_url: None,
         }

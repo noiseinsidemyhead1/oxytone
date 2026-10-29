@@ -53,6 +53,14 @@ Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque
 - **stdin tokio** : la lecture de stdin bloque un thread ; la CLI termine avec `runtime.shutdown_background()` pour ne pas attendre un appui sur Entrée.
 - **PATH** : après `scoop install`, les shells déjà ouverts ne voient pas mpv ; ouvrir un nouveau terminal.
 
+## API (`ytmr-api`)
+
+Base `http://127.0.0.1:26540/api/v1`. Lecture : `GET /state`, `POST /toggle|play|pause|next|prev`, `POST /seek {position_ms}`, `/volume {value}`, `/shuffle {on}`, `/repeat {mode: off|all|one}`, `/autoplay {on}`, `/like` (501 avant la phase 6). File : `GET /queue?offset&limit`, `POST /queue/play {tracks,start}`, `/queue/add {tracks}`, `/queue/next {tracks}`, `/queue/jump {id}`, `/queue/remove {id}`, `/queue/move {id,to}`, `/queue/clear`. Catalogue : `GET /search?q=`, `/album/{id}`, `/artist/{id}`. `POST /prefetch {video_id}` (résolution en avance au survol). Jaquettes : `GET /cover/{id}?size=&fmt=jpg|rgb565` (jpg ≤ 1200 px pour l'UI, rgb565 ≤ 320 px pour le CYD, `Cache-Control: immutable`), `GET /cover/{id}/accent`. `WS /ws` : `state`, `position` (1 Hz), `track_changed`, `queue_changed`, `error`.
+
+Sécurité (`security.rs`) : `Host` limité aux noms de loopback en mode local (anti DNS rebinding), `Origin` étranger refusé (anti CSRF), token Bearer (ou `?token=`) dès que `bind` n'est pas loopback ou `require_token = true`. Les URL de jaquettes reçues des clients sont filtrées sur les domaines YouTube/Google (anti SSRF).
+
+Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (téléchargement + Lanczos), 1,7 ms depuis le cache.
+
 ## Emplacements à l'exécution
 
 | | Linux | Windows |
@@ -68,7 +76,7 @@ Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque
 | 0 — Socle (workspace, lints, CI, tracing, config) | validée sous Windows ; à vérifier sous CachyOS |
 | 1 — Lecture headless (catalogue, mpv IPC, CLI) | validée sous Windows ; à vérifier sous CachyOS |
 | 2 — Core et file d'attente (préchargement, radio) | validée sous Windows ; à vérifier sous CachyOS |
-| 3 — API et jaquettes | à faire |
+| 3 — API et jaquettes | validée sous Windows (curl, WebSocket, RGB565 décodée) |
 | 4 — Interface web (Svelte 5 + Vite, fenêtre wry/tao) | à faire |
 | 5 — Firmware CYD | à faire |
 | 6 — Authentification et bibliothèque | à faire |

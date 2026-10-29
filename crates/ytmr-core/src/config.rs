@@ -35,6 +35,8 @@ pub enum ConfigError {
     Serialize(#[from] toml::ser::Error),
     #[error("valeur invalide : {0}")]
     Invalid(String),
+    #[error("générateur aléatoire indisponible : {0}")]
+    Random(String),
 }
 
 /// Dossiers propres à l'application, résolus selon les conventions de l'OS.
@@ -84,6 +86,24 @@ pub struct ApiConfig {
     /// Généré au premier lancement de l'API (phase 3).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
+}
+
+impl ApiConfig {
+    /// Un token est exigé dès que l'API n'écoute plus seulement sur la machine.
+    pub fn token_required(&self) -> bool {
+        self.require_token || !self.bind.is_loopback()
+    }
+
+    /// Génère et rend `true` si un token est nécessaire mais absent (à sauvegarder ensuite).
+    pub fn ensure_token(&mut self) -> Result<bool, ConfigError> {
+        if !self.token_required() || self.token.as_deref().is_some_and(|t| !t.is_empty()) {
+            return Ok(false);
+        }
+        let mut bytes = [0u8; 24];
+        getrandom::fill(&mut bytes).map_err(|e| ConfigError::Random(e.to_string()))?;
+        self.token = Some(bytes.iter().map(|b| format!("{b:02x}")).collect());
+        Ok(true)
+    }
 }
 
 impl Default for ApiConfig {
@@ -291,6 +311,20 @@ mod tests {
         player.cookies_from_browser = "firefox".into();
         assert_eq!(player.fast_start_client(), None);
         assert_eq!(player.ytdl_options(), ["cookies-from-browser=firefox"]);
+    }
+
+    #[test]
+    fn token_generated_only_when_needed() {
+        let mut api = ApiConfig::default();
+        assert!(!api.ensure_token().unwrap());
+        assert!(api.token.is_none());
+
+        api.bind = "0.0.0.0".parse().unwrap();
+        assert!(api.ensure_token().unwrap());
+        let token = api.token.clone().unwrap();
+        assert_eq!(token.len(), 48);
+        assert!(!api.ensure_token().unwrap(), "pas régénéré");
+        assert_eq!(api.token.as_deref(), Some(token.as_str()));
     }
 
     #[test]

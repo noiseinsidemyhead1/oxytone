@@ -12,6 +12,8 @@ pub struct Track {
     pub title: String,
     pub artist: String,
     pub album: Option<String>,
+    /// Identifiant d'album YouTube Music (`MPREb…`), pour ouvrir sa page.
+    pub album_id: Option<String>,
     pub duration: Option<Duration>,
     /// URL de la plus grande jaquette connue.
     pub thumbnail_url: Option<String>,
@@ -21,6 +23,13 @@ impl Track {
     /// URL donnée à mpv, qui la résout lui-même via yt-dlp.
     pub fn watch_url(&self) -> String {
         format!("https://music.youtube.com/watch?v={}", self.video_id)
+    }
+
+    /// Jaquette connue, sinon la vignette vidéo (pochette au centre, à recadrer).
+    pub fn cover_url(&self) -> String {
+        self.thumbnail_url
+            .clone()
+            .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", self.video_id))
     }
 }
 

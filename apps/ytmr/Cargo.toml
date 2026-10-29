@@ -11,5 +11,12 @@ workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+tao = "0.37.2"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "sync", "signal"] }
 tracing = "0.1.44"
+wry = "0.57.1"
+ytmr-api = { version = "0.1.0", path = "../../crates/ytmr-api" }
+ytmr-catalog = { version = "0.1.0", path = "../../crates/ytmr-catalog" }
 ytmr-core = { version = "0.1.0", path = "../../crates/ytmr-core" }
+ytmr-media = { version = "0.1.0", path = "../../crates/ytmr-media" }
+ytmr-player = { version = "0.1.0", path = "../../crates/ytmr-player" }

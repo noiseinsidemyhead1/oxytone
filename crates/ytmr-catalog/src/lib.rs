@@ -1,4 +1,4 @@
-//! Catalogue YouTube Music : recherche, albums, playlists, radio.
+//! Catalogue YouTube Music : recherche, albums, artistes, radio.
 //!
 //! En clair : c'est l'annuaire. Il trouve les morceaux mais ne les joue pas.
 //! Enveloppe `ytmapi-rs` pour que le reste du code n'en dépende pas directement :
@@ -7,8 +7,11 @@
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 use thiserror::Error;
 use ytmapi_rs::auth::noauth::NoAuthToken;
-use ytmapi_rs::common::{Thumbnail, VideoID, YoutubeID};
-use ytmapi_rs::parse::{SearchResultSong, WatchPlaylistTrack};
+use ytmapi_rs::common::{AlbumID, AlbumType, ArtistChannelID, Thumbnail, VideoID, YoutubeID};
+use ytmapi_rs::parse::{
+    AlbumResult, AlbumSong, ArtistSong, GetAlbum, GetArtist, ParsedSongArtist, SearchResultAlbum,
+    SearchResultArtist, SearchResultSong, WatchPlaylistTrack,
+};
 use ytmapi_rs::{YtMusic, YtMusicBuilder};
 use ytmr_core::engine::BoxError;
 use ytmr_core::track::parse_duration;
@@ -26,6 +29,58 @@ pub enum CatalogError {
 /// redirige vers `consent.youtube.com` (400, corps vide) et ytmapi-rs ne trouve
 /// pas son `ytcfg`.
 const CONSENT_COOKIE: &str = "SOCS=CAI";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AlbumSummary {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub year: String,
+    /// `Album`, `Single` ou `EP`.
+    pub kind: String,
+    pub thumbnail_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtistSummary {
+    pub id: String,
+    pub name: String,
+    pub subscribers: Option<String>,
+    pub thumbnail_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchAll {
+    pub songs: Vec<Track>,
+    pub albums: Vec<AlbumSummary>,
+    pub artists: Vec<ArtistSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Album {
+    pub id: String,
+    pub title: String,
+    pub artist: String,
+    pub artist_id: Option<String>,
+    pub year: String,
+    pub kind: String,
+    /// Durée totale telle qu'affichée par YouTube (« 1 heure et 2 minutes »).
+    pub duration_text: String,
+    pub thumbnail_url: Option<String>,
+    pub tracks: Vec<Track>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Artist {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub subscribers: Option<String>,
+    pub thumbnail_url: Option<String>,
+    pub songs: Vec<Track>,
+    pub albums: Vec<AlbumSummary>,
+    pub singles: Vec<AlbumSummary>,
+}
 
 /// Accès au catalogue. Garde une connexion HTTP réutilisable : à créer une fois.
 pub struct Catalog {
@@ -53,6 +108,43 @@ impl Catalog {
         Ok(results.into_iter().map(track_from_song).collect())
     }
 
+    /// Morceaux, albums et artistes, trois requêtes lancées en parallèle.
+    /// Un échec partiel (ex. albums) n'empêche pas de rendre le reste.
+    pub async fn search_all(&self, query: &str) -> Result<SearchAll, CatalogError> {
+        let (songs, albums, artists) = tokio::join!(
+            self.yt.search_songs(query),
+            self.yt.search_albums(query),
+            self.yt.search_artists(query),
+        );
+        let songs: Vec<Track> = songs?.into_iter().map(track_from_song).collect();
+        let albums = albums
+            .inspect_err(|e| tracing::warn!(error = %e, "recherche d'albums"))
+            .map(|v| v.into_iter().map(album_from_search).collect())
+            .unwrap_or_default();
+        let artists = artists
+            .inspect_err(|e| tracing::warn!(error = %e, "recherche d'artistes"))
+            .map(|v| v.into_iter().map(artist_from_search).collect())
+            .unwrap_or_default();
+        Ok(SearchAll {
+            songs,
+            albums,
+            artists,
+        })
+    }
+
+    pub async fn album(&self, id: &str) -> Result<Album, CatalogError> {
+        let album = self.yt.get_album(AlbumID::from_raw(id.to_owned())).await?;
+        Ok(album_from_get(id, album))
+    }
+
+    pub async fn artist(&self, id: &str) -> Result<Artist, CatalogError> {
+        let artist = self
+            .yt
+            .get_artist(ArtistChannelID::from_raw(id.to_owned()))
+            .await?;
+        Ok(artist_from_get(artist))
+    }
+
     /// « Radio » du morceau : titres similaires, comme l'autoplay de YouTube Music.
     /// Le premier résultat est en général le morceau lui-même.
     pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>, CatalogError> {
@@ -77,20 +169,159 @@ fn track_from_watch(t: WatchPlaylistTrack) -> Track {
         title: t.title,
         artist: t.author,
         album: None,
+        album_id: None,
         duration: parse_duration(&t.duration),
         thumbnail_url: largest_thumbnail(&t.thumbnails),
     }
 }
 
 fn track_from_song(song: SearchResultSong) -> Track {
+    let (album, album_id) = song
+        .album
+        .map(|a| (Some(a.name), Some(a.id.get_raw().to_owned())))
+        .unwrap_or_default();
     Track {
         video_id: song.video_id.get_raw().to_owned(),
         title: song.title,
         artist: song.artist,
-        album: song.album.map(|a| a.name),
+        album,
+        album_id,
         duration: parse_duration(&song.duration),
         thumbnail_url: largest_thumbnail(&song.thumbnails),
     }
+}
+
+/// Les morceaux d'un album n'ont pas de vignette propre : ils prennent la pochette.
+fn track_from_album_song(song: AlbumSong, album: &Album) -> Track {
+    Track {
+        video_id: song.video_id.get_raw().to_owned(),
+        title: song.title,
+        artist: album.artist.clone(),
+        album: Some(album.title.clone()),
+        album_id: Some(album.id.clone()),
+        duration: parse_duration(&song.duration),
+        thumbnail_url: album.thumbnail_url.clone(),
+    }
+}
+
+fn track_from_artist_song(song: ArtistSong) -> Track {
+    Track {
+        video_id: song.video_id.get_raw().to_owned(),
+        title: song.title,
+        artist: join_artists(&song.artists),
+        album: Some(song.album.name),
+        album_id: Some(song.album.id.get_raw().to_owned()),
+        duration: None,
+        // Pas de vignette dans cette réponse : la vignette vidéo servira de repli.
+        thumbnail_url: None,
+    }
+}
+
+fn album_kind(kind: &AlbumType) -> String {
+    match kind {
+        AlbumType::Album => "Album",
+        AlbumType::Single => "Single",
+        AlbumType::EP => "EP",
+    }
+    .to_owned()
+}
+
+fn album_from_search(a: SearchResultAlbum) -> AlbumSummary {
+    AlbumSummary {
+        id: a.album_id.get_raw().to_owned(),
+        title: a.title,
+        artist: a.artist,
+        year: a.year,
+        kind: album_kind(&a.album_type),
+        thumbnail_url: largest_thumbnail(&a.thumbnails),
+    }
+}
+
+fn album_from_artist(a: AlbumResult, artist: &str, kind: &str) -> AlbumSummary {
+    AlbumSummary {
+        id: a.album_id.get_raw().to_owned(),
+        title: a.title,
+        artist: artist.to_owned(),
+        year: a.year,
+        kind: kind.to_owned(),
+        thumbnail_url: largest_thumbnail(&a.thumbnails),
+    }
+}
+
+fn artist_from_search(a: SearchResultArtist) -> ArtistSummary {
+    ArtistSummary {
+        id: a.browse_id.get_raw().to_owned(),
+        name: a.artist,
+        subscribers: a.subscribers,
+        thumbnail_url: largest_thumbnail(&a.thumbnails),
+    }
+}
+
+fn album_from_get(id: &str, a: GetAlbum) -> Album {
+    let mut album = Album {
+        id: id.to_owned(),
+        title: a.title,
+        artist: join_artists(&a.artists),
+        artist_id: a
+            .artists
+            .iter()
+            .find_map(|x| x.id.as_ref())
+            .map(|i| i.get_raw().to_owned()),
+        year: a.year,
+        kind: album_kind(&a.category),
+        duration_text: a.duration,
+        thumbnail_url: largest_thumbnail(&a.thumbnails),
+        tracks: Vec::new(),
+    };
+    album.tracks = a
+        .tracks
+        .into_iter()
+        .map(|song| track_from_album_song(song, &album))
+        .collect();
+    album
+}
+
+fn artist_from_get(a: GetArtist) -> Artist {
+    let releases = a.top_releases;
+    let albums = releases
+        .albums
+        .map(|r| {
+            r.results
+                .into_iter()
+                .map(|x| album_from_artist(x, &a.name, "Album"))
+                .collect()
+        })
+        .unwrap_or_default();
+    let singles = releases
+        .singles
+        .map(|r| {
+            r.results
+                .into_iter()
+                .map(|x| album_from_artist(x, &a.name, "Single"))
+                .collect()
+        })
+        .unwrap_or_default();
+    Artist {
+        id: a.channel_id.get_raw().to_owned(),
+        description: a.description,
+        subscribers: a.subscribers,
+        thumbnail_url: largest_thumbnail(&a.thumbnails),
+        songs: releases
+            .songs
+            .map(|s| s.results.into_iter().map(track_from_artist_song).collect())
+            .unwrap_or_default(),
+        albums,
+        singles,
+        name: a.name,
+    }
+}
+
+fn join_artists(artists: &[ParsedSongArtist]) -> String {
+    artists
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn largest_thumbnail(thumbnails: &[Thumbnail]) -> Option<String> {
@@ -104,7 +335,7 @@ fn largest_thumbnail(thumbnails: &[Thumbnail]) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Test réseau : `cargo test -p ytmr-catalog -- --ignored`.
+    /// Tests réseau : `cargo test -p ytmr-catalog -- --ignored`.
     #[tokio::test]
     #[ignore = "nécessite le réseau"]
     async fn search_returns_playable_tracks() {
@@ -127,5 +358,23 @@ mod tests {
         let tracks = catalog.radio("Jb6gcoR266U").await.unwrap();
         assert!(tracks.len() > 5);
         assert!(tracks.iter().all(|t| t.video_id.len() == 11));
+    }
+
+    #[tokio::test]
+    #[ignore = "nécessite le réseau"]
+    async fn search_all_then_album_and_artist_pages() {
+        let catalog = Catalog::new_unauthenticated().await.unwrap();
+        let results = catalog.search_all("daft punk discovery").await.unwrap();
+        assert!(!results.songs.is_empty());
+        let album = results.albums.first().expect("au moins un album");
+        let artist = results.artists.first().expect("au moins un artiste");
+
+        let album = catalog.album(&album.id).await.unwrap();
+        assert!(!album.tracks.is_empty());
+        assert!(album.tracks.iter().all(|t| t.thumbnail_url.is_some()));
+
+        let artist = catalog.artist(&artist.id).await.unwrap();
+        assert!(!artist.name.is_empty());
+        assert!(!artist.songs.is_empty() || !artist.albums.is_empty());
     }
 }

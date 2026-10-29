@@ -304,6 +304,7 @@ mod tests {
             title: format!("titre {n}"),
             artist: "artiste".into(),
             album: None,
+            album_id: None,
             duration: None,
             thumbnail_url: None,
         }
