@@ -142,6 +142,9 @@ pub struct PlayerConfig {
     /// ~256 kb/s (Opus 774 / AAC 141). Les cookies sont lus à chaque résolution,
     /// jamais copiés. Chrome et Edge ne marchent pas sous Windows (cookies chiffrés).
     pub cookies_from_browser: String,
+    /// Place gardée pour les morceaux déjà écoutés (Mo). Ils repartent alors
+    /// instantanément, sans yt-dlp. 0 = pas de cache audio.
+    pub audio_cache_mb: u64,
 }
 
 impl Default for PlayerConfig {
@@ -153,6 +156,7 @@ impl Default for PlayerConfig {
             ytdl_raw_options: Vec::new(),
             fast_start_client: String::new(),
             cookies_from_browser: String::new(),
+            audio_cache_mb: 2048,
         }
     }
 }

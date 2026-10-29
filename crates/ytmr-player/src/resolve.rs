@@ -132,6 +132,8 @@ pub struct ResolverOptions {
     pub raw_options: Vec<String>,
     /// Fichier où garder les adresses résolues entre deux lancements.
     pub cache_file: Option<PathBuf>,
+    /// Fichiers audio déjà écoutés, relus sans yt-dlp.
+    pub audio_cache: Option<Arc<crate::AudioCache>>,
 }
 
 pub struct YtDlpResolver {
@@ -145,6 +147,7 @@ pub struct YtDlpResolver {
     worker: Mutex<Option<Arc<Worker>>>,
     cache_file: Option<PathBuf>,
     cache: Mutex<HashMap<String, MediaSource>>,
+    audio: Option<Arc<crate::AudioCache>>,
     /// Résolutions en cours, partagées entre demandeurs.
     inflight: Mutex<HashMap<String, Shared>>,
     urgent: Semaphore,
@@ -177,6 +180,7 @@ impl YtDlpResolver {
             worker: Mutex::default(),
             cache_file: options.cache_file,
             cache: Mutex::new(cache),
+            audio: options.audio_cache,
             inflight: Mutex::default(),
             urgent: Semaphore::new(MAX_URGENT),
             background: Semaphore::new(MAX_BACKGROUND),
@@ -382,6 +386,10 @@ impl YtDlpResolver {
 
 impl Resolver for YtDlpResolver {
     fn cached(&self, video_id: &str) -> Option<MediaSource> {
+        // Déjà sur le disque : rien à résoudre, rien à télécharger.
+        if let Some(local) = self.audio.as_ref().and_then(|a| a.get(video_id)) {
+            return Some(local);
+        }
         let mut cache = lock(&self.cache);
         match cache.get(video_id) {
             Some(source) if source.is_fresh() => Some(source.clone()),
@@ -451,6 +459,9 @@ impl Resolver for YtDlpResolver {
         let _done = Done(&self.inflight, video_id);
 
         let result = self.resolve_now(video_id, mode, priority).await;
+        if let (Some(audio), Ok(source)) = (&self.audio, &result) {
+            audio.store(video_id, source);
+        }
         let _ = tx.send(Some(
             result
                 .as_ref()

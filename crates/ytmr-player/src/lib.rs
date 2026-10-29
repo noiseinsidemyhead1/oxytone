@@ -4,6 +4,7 @@
 //! de lecture ; on ne touche jamais à l'extraction des flux YouTube. Le trait
 //! permet de changer de moteur plus tard (libmpv, rodio) sans toucher au reste.
 
+pub mod audio_cache;
 pub mod deps;
 mod mpv;
 mod process;
@@ -15,6 +16,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::broadcast;
 
+pub use audio_cache::AudioCache;
 pub use deps::Dependencies;
 pub use mpv::MpvPlayer;
 pub use resolve::{

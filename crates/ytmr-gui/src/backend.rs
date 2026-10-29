@@ -79,6 +79,10 @@ impl Backend {
                 cookies_from_browser: config.player.cookies_from_browser().map(str::to_owned),
                 raw_options: config.player.ytdl_raw_options.clone(),
                 cache_file: Some(paths.cache_dir.join("streams.json")),
+                audio_cache: ytmr_player::AudioCache::new(
+                    paths.cache_dir.join("audio"),
+                    config.player.audio_cache_mb,
+                ),
             },
         ));
         let (account_tx, account) = watch::channel(AccountState::Connecting);

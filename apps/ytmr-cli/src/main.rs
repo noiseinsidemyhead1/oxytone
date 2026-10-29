@@ -136,6 +136,7 @@ async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result
             cookies_from_browser: config.player.cookies_from_browser().map(str::to_owned),
             raw_options: config.player.ytdl_raw_options.clone(),
             cache_file: None,
+            audio_cache: None,
         },
     ));
 

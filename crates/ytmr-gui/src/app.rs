@@ -28,6 +28,8 @@ use crate::style;
 pub const THUMB: u32 = 96;
 pub const CARD: u32 = 320;
 pub const HERO: u32 = 640;
+/// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
+const COVER_BUDGET: u64 = 64 << 20;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
 /// Attente maximale des pochettes avant d'afficher des résultats de recherche.
@@ -223,6 +225,10 @@ pub struct App {
     pub album: Option<(String, Load<Album>)>,
     pub artist: Option<(String, Load<Artist>)>,
     covers: HashMap<(String, u32), Option<image::Handle>>,
+    /// Dernière demande de chaque pochette : les moins récentes sont libérées
+    /// en premier quand la mémoire réservée aux images est pleine.
+    cover_used: HashMap<(String, u32), u64>,
+    cover_tick: u64,
     accents: HashMap<String, Color>,
     /// Teinte du morceau en cours (barre du bas, file), en fondu.
     pub accent: Color,
@@ -295,6 +301,8 @@ impl App {
             album: None,
             artist: None,
             covers: HashMap::new(),
+            cover_used: HashMap::new(),
+            cover_tick: 0,
             accents: HashMap::new(),
             accent: style::DEFAULT_ACCENT,
             accent_fade: Fade::new(style::DEFAULT_ACCENT),
@@ -439,6 +447,7 @@ impl App {
             return Task::none();
         };
         let key = (id.clone(), size);
+        self.touch_cover(&key);
         if self.covers.contains_key(&key) {
             return Task::none();
         }
@@ -514,6 +523,44 @@ impl App {
             );
         }
         self.want_track_covers(&tracks, THUMB)
+    }
+
+    fn touch_cover(&mut self, key: &(String, u32)) {
+        self.cover_tick += 1;
+        self.cover_used.insert(key.clone(), self.cover_tick);
+    }
+
+    /// Libère les pochettes décodées les moins récemment demandées au-delà
+    /// de `COVER_BUDGET` (elles restent sur le disque : on les relit si on
+    /// revient dessus). Une liste de 1 000 vignettes tient dans le budget.
+    fn trim_covers(&mut self) {
+        let bytes = |size: u32| u64::from(size) * u64::from(size) * 4;
+        let used: u64 = self
+            .covers
+            .iter()
+            .filter(|(_, h)| h.is_some())
+            .map(|((_, size), _)| bytes(*size))
+            .sum();
+        if used <= COVER_BUDGET {
+            return;
+        }
+        let keep: Vec<Option<String>> = vec![self.current_cover(), self.page_cover()];
+        let mut loaded: Vec<((String, u32), u64)> = self
+            .covers
+            .iter()
+            .filter(|(key, h)| h.is_some() && !keep.contains(&Some(key.0.clone())))
+            .map(|(key, _)| (key.clone(), self.cover_used.get(key).copied().unwrap_or(0)))
+            .collect();
+        loaded.sort_by_key(|(_, tick)| *tick);
+        let mut used = used;
+        for (key, _) in loaded {
+            if used <= COVER_BUDGET * 3 / 4 {
+                break;
+            }
+            used -= bytes(key.1);
+            self.covers.remove(&key);
+            self.cover_used.remove(&key);
+        }
     }
 
     /// Pochettes à précharger en tâche de fond (après celles qui sont visibles).
@@ -922,6 +969,7 @@ impl App {
                 match result {
                     Ok(handle) => {
                         self.covers.insert((id, size), Some(handle));
+                        self.trim_covers();
                     }
                     Err(e) => tracing::debug!(error = %e, "jaquette indisponible"),
                 }
@@ -1180,7 +1228,10 @@ impl App {
             Message::BacklogCover(id, size, result) => {
                 self.backlog_inflight = self.backlog_inflight.saturating_sub(1);
                 if let Ok(handle) = result {
-                    self.covers.insert((id, size), Some(handle));
+                    let key = (id, size);
+                    self.touch_cover(&key);
+                    self.covers.insert(key, Some(handle));
+                    self.trim_covers();
                 }
                 self.pump_backlog()
             }
