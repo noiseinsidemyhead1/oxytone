@@ -27,6 +27,7 @@ pub enum Settings {
     Normalize(bool),
     CacheSize(u64),
     ClearCache,
+    Notifications(bool),
 }
 
 #[derive(Debug, Default)]
@@ -40,6 +41,13 @@ pub struct SettingsState {
 impl App {
     pub fn update_settings(&mut self, message: Settings) -> Task<Message> {
         match message {
+            Settings::Notifications(on) => {
+                self.notify
+                    .enabled
+                    .store(on, std::sync::atomic::Ordering::Relaxed);
+                self.save_ui();
+                Task::none()
+            }
             Settings::Band(band, gain) => {
                 let mut eq = self.settings.draft.unwrap_or(self.state.effects.eq);
                 if let Some(slot) = eq.get_mut(band) {
@@ -246,6 +254,23 @@ pub fn settings_page(app: &App) -> El<'_> {
             ),
             section_title("Son"),
             card(normalize.into()),
+            section_title("Notifications"),
+            card(
+                row![
+                    column![
+                        text("Nouveau morceau").size(15).font(SEMIBOLD),
+                        muted("Une bulle du système quand un titre commence et que ytmr n'est pas au premier plan."),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill),
+                    toggler(app.notifications_on())
+                        .on_toggle(|on| Message::Settings(Settings::Notifications(on)))
+                        .size(22),
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .into()
+            ),
             section_title("Stockage"),
             card(cache.into()),
             section_title("Compte"),

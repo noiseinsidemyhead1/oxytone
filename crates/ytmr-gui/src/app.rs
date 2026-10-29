@@ -174,12 +174,13 @@ pub enum Message {
     ArtistFound(Result<Option<String>, String>),
     /// Handle natif de la fenêtre, pour l'overlay média du système.
     NativeWindow(Option<usize>),
-    /// La souris bouge dans la vue « En cours » : afficher les contrôles un moment.
     /// Vue « En cours » : un clic affiche ou masque les contrôles.
     ToggleControls,
     /// Survol d'une ligne de la file (distinct du survol des listes).
     QueueHover(Option<usize>),
     QueueHoverSettled(String),
+    /// La fenêtre passe au premier plan (ou le quitte).
+    Focus(bool),
     MediaControls(Result<(), String>),
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
@@ -244,6 +245,13 @@ struct UiSettings {
     left_width: f32,
     queue_width: f32,
     show_queue: bool,
+    /// Notification système à chaque nouveau morceau.
+    #[serde(default = "yes")]
+    notifications: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for UiSettings {
@@ -252,6 +260,7 @@ impl Default for UiSettings {
             left_width: LEFT_DEFAULT,
             queue_width: RIGHT_DEFAULT,
             show_queue: true,
+            notifications: true,
         }
     }
 }
@@ -331,6 +340,8 @@ pub struct App {
     pub lyrics: HashMap<String, Load<Option<Lyrics>>>,
     /// Suggestions de la recherche en cours de frappe.
     pub suggestions: Vec<String>,
+    /// Notifications (partagé avec `ytmr-os`).
+    pub notify: ytmr_os::NotifySettings,
     dragging: Option<Panel>,
     pub queue_drag: Option<QueueDragState>,
     /// Point de départ du glissement : (x de la souris, largeur d'alors).
@@ -415,6 +426,7 @@ impl App {
             context_menu: None,
             lyrics: HashMap::new(),
             suggestions: Vec::new(),
+            notify: ytmr_os::NotifySettings::new(true),
             dragging: None,
             queue_drag: None,
             drag_anchor: None,
@@ -474,6 +486,12 @@ impl App {
                 _ => None,
             }));
         }
+        // Premier plan : pas de notification quand la fenêtre est sous les yeux.
+        subscriptions.push(iced::event::listen_with(|event, _, _| match event {
+            iced::Event::Window(window::Event::Focused) => Some(Message::Focus(true)),
+            iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(false)),
+            _ => None,
+        }));
         // Morceau saisi dans la file : il tombe au relâchement, où qu'il soit.
         if self.queue_drag.is_some() {
             subscriptions.push(iced::event::listen_with(|event, _, _| match event {
@@ -546,6 +564,12 @@ impl App {
                 self.send(Command::Move { id, to })
             }
         }
+    }
+
+    pub(crate) fn notifications_on(&self) -> bool {
+        self.notify
+            .enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn catalog(&self) -> Option<Arc<ytmr_catalog::Catalog>> {
@@ -842,9 +866,12 @@ impl App {
         self.left_width = settings.left_width.clamp(LEFT_RANGE.0, LEFT_RANGE.1);
         self.queue_width = settings.queue_width.clamp(RIGHT_RANGE.0, RIGHT_RANGE.1);
         self.show_queue = settings.show_queue;
+        self.notify
+            .enabled
+            .store(settings.notifications, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn save_ui(&self) {
+    pub(crate) fn save_ui(&self) {
         let Some(path) = &self.ui_file else {
             return;
         };
@@ -852,6 +879,7 @@ impl App {
             left_width: self.left_width,
             queue_width: self.queue_width,
             show_queue: self.show_queue,
+            notifications: self.notifications_on(),
         };
         if let Ok(json) = serde_json::to_vec(&settings) {
             let _ = std::fs::write(path, json);
@@ -1269,17 +1297,24 @@ impl App {
                 let Some(core) = self.backend().map(|b| b.core.clone()) else {
                     return Task::none();
                 };
+                let notify = self.notify.clone();
                 Task::perform(
                     async move {
                         let runtime = tokio::runtime::Handle::current();
                         tokio::task::spawn_blocking(move || {
-                            ytmr_os::start(core, handle, runtime).map_err(|e| e.to_string())
+                            ytmr_os::start(core, handle, runtime, notify).map_err(|e| e.to_string())
                         })
                         .await
                         .map_err(|e| e.to_string())?
                     },
                     Message::MediaControls,
                 )
+            }
+            Message::Focus(on) => {
+                self.notify
+                    .focused
+                    .store(on, std::sync::atomic::Ordering::Relaxed);
+                Task::none()
             }
             Message::ToggleControls => {
                 self.controls_visible = !self.controls_visible;
@@ -1775,7 +1810,13 @@ impl App {
 fn native_handle(window: &dyn window::Window) -> Option<usize> {
     use raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as usize),
+        RawWindowHandle::Win32(h) => {
+            let hwnd = h.hwnd.get() as usize;
+            // Sur le fil de la fenêtre : boutons du mini-lecteur de la barre des tâches.
+            #[cfg(windows)]
+            ytmr_os::taskbar::install(hwnd);
+            Some(hwnd)
+        }
         _ => None,
     }
 }

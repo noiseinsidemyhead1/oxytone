@@ -2,9 +2,17 @@
 //!
 //! En clair : fait apparaître le morceau dans l'overlay média du système
 //! (Windows : le panneau du volume et l'écran de verrouillage ; Linux : la
-//! zone média du bureau) et branche les touches multimédia du clavier. Comme
+//! zone média du bureau) et branche les touches multimédia du clavier. Il
+//! ajoute aussi les boutons du mini-lecteur de la barre des tâches (Windows)
+//! et une notification à chaque nouveau morceau. Comme
 //! la GUI et l'API, ce module ne fait qu'envoyer des commandes au moteur et
 //! afficher son état.
+
+mod notify;
+#[cfg(windows)]
+pub mod taskbar;
+
+pub use notify::NotifySettings;
 
 use std::ffi::c_void;
 use std::time::Duration;
@@ -29,11 +37,18 @@ const SEEK_STEP: Duration = Duration::from_secs(10);
 /// Lance l'intégration sur un fil dédié, pour toute la vie de l'appli.
 ///
 /// `window` : handle natif de la fenêtre (HWND), exigé sous Windows.
-pub fn start(core: CoreHandle, window: Option<usize>, runtime: Handle) -> Result<(), OsError> {
+pub fn start(
+    core: CoreHandle,
+    window: Option<usize>,
+    runtime: Handle,
+    notify: NotifySettings,
+) -> Result<(), OsError> {
+    #[cfg(windows)]
+    taskbar::connect(core.clone(), runtime.clone());
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("ytmr-os".into())
-        .spawn(move || run(core, window, runtime, ready_tx))
+        .spawn(move || run(core, window, runtime, notify, ready_tx))
         .map_err(|e| OsError::Controls(e.to_string()))?;
     ready_rx
         .recv()
@@ -44,6 +59,7 @@ fn run(
     core: CoreHandle,
     window: Option<usize>,
     runtime: Handle,
+    notify: NotifySettings,
     ready: std::sync::mpsc::Sender<Result<(), OsError>>,
 ) {
     let config = PlatformConfig {
@@ -80,7 +96,10 @@ fn run(
 
     // On recopie l'état du moteur à chaque changement utile.
     let mut rx = core.watch_state();
-    let mut shown = Shown::default();
+    let mut shown = Shown {
+        notify,
+        ..Shown::default()
+    };
     loop {
         let state = rx.borrow_and_update().clone();
         shown.update(&mut controls, &state);
@@ -97,6 +116,9 @@ struct Shown {
     status: Option<Status>,
     /// Instant et position du dernier envoi, pour repérer un saut (seek).
     anchor: Option<(std::time::Instant, Duration)>,
+    notify: NotifySettings,
+    /// Dernier morceau notifié (une bulle par morceau, même après une pause).
+    notified: Option<String>,
 }
 
 impl Shown {
@@ -130,9 +152,22 @@ impl Shown {
             _ => pos,
         });
         let jumped = expected.is_none_or(|e| e.abs_diff(state.position) > Duration::from_secs(2));
+        if state.status == Status::Playing
+            && self.video_id.is_some()
+            && self.notified != self.video_id
+        {
+            if let Some(entry) = &state.current
+                && self.notify.wanted()
+            {
+                notify::track_started(&entry.track);
+            }
+            self.notified = self.video_id.clone();
+        }
         if self.status == Some(state.status) && !jumped {
             return;
         }
+        #[cfg(windows)]
+        taskbar::set_playing(state.status == Status::Playing);
         let progress = Some(MediaPosition(state.position));
         let playback = match state.status {
             Status::Playing => MediaPlayback::Playing { progress },
