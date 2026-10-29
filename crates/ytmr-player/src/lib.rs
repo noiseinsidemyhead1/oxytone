@@ -6,6 +6,7 @@
 
 pub mod audio_cache;
 pub mod deps;
+pub mod effects;
 mod mpv;
 mod process;
 pub mod resolve;
@@ -18,6 +19,7 @@ use tokio::sync::broadcast;
 
 pub use audio_cache::AudioCache;
 pub use deps::Dependencies;
+pub use effects::AudioEffects;
 pub use mpv::MpvPlayer;
 pub use resolve::{
     MediaSource, Priority, Resolver, ResolverOptions, StartMode, StreamQuality, YtDlpResolver,
@@ -110,6 +112,11 @@ pub trait Player: Send + Sync + 'static {
     fn seek(&self, position: Duration) -> impl Future<Output = Result<(), PlayerError>> + Send;
     /// 0 à 100 ; au-delà, [`PlayerError::InvalidArgument`].
     fn set_volume(&self, volume: u8) -> impl Future<Output = Result<(), PlayerError>> + Send;
+    /// Égaliseur et volume homogène, appliqués tout de suite.
+    fn set_effects(
+        &self,
+        effects: &AudioEffects,
+    ) -> impl Future<Output = Result<(), PlayerError>> + Send;
     fn subscribe(&self) -> broadcast::Receiver<PlayerEvent>;
     /// Arrête le moteur proprement. Plus aucune commande n'est possible ensuite.
     fn shutdown(&self) -> impl Future<Output = ()> + Send;

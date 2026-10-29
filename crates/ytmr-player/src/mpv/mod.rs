@@ -182,6 +182,10 @@ impl Player for MpvPlayer {
         self.set("volume", json!(check_volume(volume)?)).await
     }
 
+    async fn set_effects(&self, effects: &crate::AudioEffects) -> Result<(), PlayerError> {
+        self.set("af", json!(effects.to_mpv_af())).await
+    }
+
     fn subscribe(&self) -> broadcast::Receiver<PlayerEvent> {
         self.events.subscribe()
     }

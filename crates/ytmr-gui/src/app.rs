@@ -54,6 +54,7 @@ pub enum Route {
     Artist(String),
     Library,
     Playlist(String),
+    Settings,
 }
 
 #[derive(Debug, Clone)]
@@ -153,6 +154,7 @@ pub enum Message {
     OpenArtist(Option<String>, String),
     ArtistFound(Result<Option<String>, String>),
     Lib(crate::library::Lib),
+    Settings(crate::settings::Settings),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
     CloseRequested,
@@ -251,6 +253,7 @@ pub struct App {
     toast_seq: u64,
     scrolling: Scrolling,
     pub lib: crate::library::LibraryState,
+    pub settings: crate::settings::SettingsState,
     pub page_view: View,
     pub queue_view: View,
     covers_seq: u64,
@@ -320,6 +323,7 @@ impl App {
             toast_seq: 0,
             scrolling: Scrolling::default(),
             lib: crate::library::LibraryState::default(),
+            settings: crate::settings::SettingsState::default(),
             page_view: View::default(),
             queue_view: View::default(),
             covers_seq: 0,
@@ -341,6 +345,7 @@ impl App {
         // l'ouverture, avant même que le backend ait fini de démarrer.
         app.load_ui();
         app.lib.cache_dir = Some(config.1.cache_dir.join("library"));
+        app.settings.audio_dir = Some(config.1.cache_dir.join("audio"));
         (app, start)
     }
 
@@ -781,6 +786,7 @@ impl App {
             Route::Playlist(id) => self.open_playlist(id),
             Route::Home => self.refresh_home(),
             Route::NowPlaying => Task::none(),
+            Route::Settings => self.open_settings(),
         }
     }
 
@@ -1236,6 +1242,7 @@ impl App {
                 self.pump_backlog()
             }
             Message::Lib(message) => self.update_library(message),
+            Message::Settings(message) => self.update_settings(message),
             Message::Noop => Task::none(),
             Message::ShutdownDone => iced::exit(),
         }

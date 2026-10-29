@@ -25,8 +25,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use ytmr_player::{
-    EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent, Priority, Resolver,
-    StartMode, StreamQuality,
+    AudioEffects, EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent, Priority,
+    Resolver, StartMode, StreamQuality,
 };
 
 use crate::Track;
@@ -79,6 +79,8 @@ pub struct PlaybackState {
     pub quality: Option<StreamQuality>,
     /// Le morceau suivant est déjà chargé dans le lecteur (enchaînement sans blanc).
     pub next_ready: bool,
+    /// Égaliseur et volume homogène.
+    pub effects: AudioEffects,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -124,6 +126,8 @@ pub enum Command {
     SetShuffle(bool),
     SetRepeat(Repeat),
     SetAutoplay(bool),
+    /// Égaliseur, volume homogène (bornés par le moteur).
+    SetEffects(AudioEffects),
     /// Indice : ce morceau risque d'être lancé bientôt (survol, page ouverte).
     /// Le résout en avance pour un démarrage quasi instantané ; sans effet sur la lecture.
     Prefetch(String),
@@ -162,6 +166,8 @@ struct Session {
     volume: Option<u8>,
     repeat: Option<Repeat>,
     autoplay: Option<bool>,
+    #[serde(default)]
+    effects: Option<AudioEffects>,
 }
 
 impl Session {
@@ -261,6 +267,9 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         }
         if let Some(autoplay) = session.autoplay {
             state.autoplay = autoplay;
+        }
+        if let Some(effects) = session.effects {
+            state.effects = effects.clamped();
         }
         queue.set_repeat(session.repeat.unwrap_or_default());
         if let Some(id) = queue.replace(session.tracks, session.current.unwrap_or(0)) {
@@ -393,6 +402,11 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         {
             tracing::warn!(error = %e, "volume de la session précédente");
         }
+        if self.state.effects != AudioEffects::default()
+            && let Err(e) = self.player.set_effects(&self.state.effects).await
+        {
+            tracing::warn!(error = %e, "effets audio de la session précédente");
+        }
         self.queue_dirty = self.queue.current().is_some();
         self.refresh_lookahead();
         self.publish();
@@ -524,6 +538,12 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.refresh_preload().await;
                 Ok(())
             }
+            Command::SetEffects(effects) => {
+                let effects = effects.clamped();
+                self.player.set_effects(&effects).await?;
+                self.state.effects = effects;
+                Ok(())
+            }
             Command::Prefetch(video_id) => {
                 self.warm(video_id);
                 Ok(())
@@ -624,6 +644,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             volume: Some(self.state.volume),
             repeat: Some(self.queue.repeat()),
             autoplay: Some(self.state.autoplay),
+            effects: Some(self.state.effects),
         }
         .save(path);
     }
@@ -1267,6 +1288,9 @@ mod tests {
             Ok(())
         }
         async fn set_volume(&self, _volume: u8) -> Result<(), PlayerError> {
+            Ok(())
+        }
+        async fn set_effects(&self, _effects: &AudioEffects) -> Result<(), PlayerError> {
             Ok(())
         }
         fn subscribe(&self) -> broadcast::Receiver<PlayerEvent> {

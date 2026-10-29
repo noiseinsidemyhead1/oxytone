@@ -39,6 +39,7 @@ pub enum Icon {
     Trash,
     Logout,
     Refresh,
+    Settings,
 }
 
 const STROKE: &str =
@@ -72,6 +73,7 @@ fn source(icon: Icon) -> String {
         Icon::Trash => format!(r#"<g {STROKE}><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></g>"#),
         Icon::Logout => format!(r#"<g {STROKE}><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></g>"#),
         Icon::Refresh => format!(r#"<g {STROKE}><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></g>"#),
+        Icon::Settings => format!(r#"<g {STROKE}><path d="M4 6h10"/><path d="M18 6h2"/><circle cx="16" cy="6" r="2"/><path d="M4 12h3"/><path d="M11 12h9"/><circle cx="9" cy="12" r="2"/><path d="M4 18h11"/><path d="M19 18h1"/><circle cx="17" cy="18" r="2"/></g>"#),
         Icon::Radio => format!(r#"<g {STROKE}><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><path d="M19.1 4.9a10 10 0 0 1 0 14.2"/><path d="M4.9 19.1a10 10 0 0 1 0-14.2"/></g>"#),
     };
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{body}</svg>"#)
@@ -107,6 +109,7 @@ static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
         Trash,
         Logout,
         Refresh,
+        Settings,
     ]
     .into_iter()
     .map(|icon| svg::Handle::from_memory(source(icon).into_bytes()))

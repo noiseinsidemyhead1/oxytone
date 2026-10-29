@@ -164,6 +164,7 @@ fn main_layout(app: &App) -> El<'_> {
         Route::Artist(_) => artist_page(app),
         Route::Library => library::library_page(app),
         Route::Playlist(_) => library::playlist_page(app),
+        Route::Settings => crate::settings::settings_page(app),
     };
     // La barre de chargement passe par-dessus la page : elle ne la décale pas
     // (sinon une bande noire de 3 px restait au-dessus du dégradé).
@@ -270,6 +271,7 @@ fn sidebar(app: &App) -> El<'_> {
             column![
                 nav("Accueil", Icon::Home, Route::Home),
                 nav("Bibliothèque", Icon::Library, Route::Library),
+                nav("Paramètres", Icon::Settings, Route::Settings),
             ]
             .spacing(4),
             Space::new().height(Length::Fill),
