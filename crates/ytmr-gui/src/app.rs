@@ -355,6 +355,8 @@ pub struct App {
     pub controls_visible: bool,
     /// Opacité des contrôles de la vue « En cours » (0 à 1, animée).
     pub controls_level: f32,
+    /// Curseurs et interrupteurs animés.
+    pub anims: crate::anim::Anims,
     /// Fondu des contrôles en cours : (début, opacité de départ).
     controls_anim: Option<(std::time::Instant, f32)>,
     /// Ligne survolée dans la file d'attente.
@@ -465,6 +467,7 @@ impl App {
             maximized: false,
             controls_visible: false,
             controls_level: 0.0,
+            anims: crate::anim::Anims::default(),
             controls_anim: None,
             queue_hover: None,
             queue_hover_video: None,
@@ -578,6 +581,7 @@ impl App {
         if self.scrolling.is_animating()
             || self.fps_meter.is_some()
             || self.controls_anim.is_some()
+            || self.anims.is_running()
             || self.is_loading()
             || self.accent_fade.is_running()
             || self.page_fade.is_running()
@@ -1173,6 +1177,36 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let task = self.update_inner(message);
+        self.aim_anims();
+        task
+    }
+
+    /// Où doivent aller les curseurs et interrupteurs animés, d'après l'état.
+    fn aim_anims(&mut self) {
+        use crate::anim::Key;
+        let eq = self.settings.draft.unwrap_or(self.state.effects.eq);
+        for (i, gain) in eq.iter().enumerate() {
+            self.anims.aim(Key::Band(i), f32::from(*gain), 0.0);
+        }
+        self.anims
+            .aim(Key::Volume, f32::from(self.state.volume), 0.0);
+        // Position : seul le saut demandé (clic sur la barre) est animé ; la
+        // lecture qui avance ou un nouveau morceau sont suivis tels quels.
+        match self.seek_preview {
+            Some(target) => self.anims.aim(Key::Seek, target, 0.0),
+            None => self
+                .anims
+                .aim(Key::Seek, self.state.position.as_secs_f32(), f32::INFINITY),
+        }
+        let on = |b: bool| if b { 1.0 } else { 0.0 };
+        self.anims
+            .aim(Key::Normalize, on(self.state.effects.normalize), 0.0);
+        self.anims
+            .aim(Key::Notifications, on(self.notifications_on()), 0.0);
+    }
+
+    fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::BackendReady(result) => match result.map(|slot| slot.take()) {
                 Ok(Some(backend)) => {
@@ -1737,6 +1771,7 @@ impl App {
                 self.run_search()
             }
             Message::Frame(now) => {
+                self.anims.frame(now);
                 if let Some((since, from)) = self.controls_anim {
                     let t = (now.saturating_duration_since(since).as_secs_f32()
                         / CONTROLS_FADE.as_secs_f32())

@@ -6,6 +6,7 @@
 //! métier ici : l'interface envoie des commandes au moteur et affiche ce qu'il
 //! publie, au même titre que l'API.
 
+mod anim;
 mod app;
 mod backend;
 mod chrome;

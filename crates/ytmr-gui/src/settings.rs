@@ -7,12 +7,13 @@
 
 use std::path::{Path, PathBuf};
 
-use iced::widget::{Space, button, column, container, row, text, toggler, vertical_slider};
-use iced::{Alignment, Length, Padding, Task};
+use iced::widget::{Space, button, column, container, row, text, vertical_slider};
+use iced::{Alignment, Color, Length, Padding, Task, color};
 use ytmr_core::Command;
 use ytmr_player::AudioEffects;
 use ytmr_player::effects::{EQ_BANDS, EQ_MAX_DB, EQ_PRESETS};
 
+use crate::anim::Key;
 use crate::app::{App, Message};
 use crate::style;
 use crate::views::{BOLD, El, SEMIBOLD, muted, page_scroll, section_title};
@@ -158,6 +159,58 @@ fn band_label(freq: u32) -> String {
     }
 }
 
+/// Interrupteur animé : la pastille glisse et les couleurs passent du gris à
+/// la teinte du morceau (`level` : 0 = éteint, 1 = allumé, entre les deux
+/// pendant le mouvement). Visible éteint : rail gris liseré, pastille claire.
+fn switch<'a>(level: f32, accent: Color, message: Message) -> El<'a> {
+    const W: f32 = 46.0;
+    const H: f32 = 26.0;
+    const KNOB: f32 = 18.0;
+    const PAD: f32 = 4.0;
+    let travel = W - KNOB - 2.0 * PAD;
+    let rail = style::mix(color!(0x2c2c34), accent, level);
+    let edge = style::mix(color!(0x5a5a64), accent, level);
+    let knob = style::mix(style::TEXT_DIM, Color::WHITE, level);
+    button(
+        row![
+            Space::new().width(Length::Fixed(travel * level)),
+            container(Space::new())
+                .width(Length::Fixed(KNOB))
+                .height(Length::Fixed(KNOB))
+                .style(move |_| container::Style {
+                    background: Some(knob.into()),
+                    border: iced::Border {
+                        radius: (KNOB / 2.0).into(),
+                        ..iced::Border::default()
+                    },
+                    ..container::Style::default()
+                }),
+        ]
+        .align_y(Alignment::Center),
+    )
+    .width(Length::Fixed(W))
+    .height(Length::Fixed(H))
+    .padding(Padding::from([0.0, PAD]))
+    .style(move |_, status| button::Style {
+        background: Some(
+            if matches!(status, button::Status::Hovered) {
+                style::mix(rail, Color::WHITE, 0.08)
+            } else {
+                rail
+            }
+            .into(),
+        ),
+        border: iced::Border {
+            radius: (H / 2.0).into(),
+            width: 1.0,
+            color: edge,
+        },
+        ..button::Style::default()
+    })
+    .on_press(message)
+    .into()
+}
+
 pub fn settings_page(app: &App) -> El<'_> {
     let effects = app.state.effects;
     let eq = app.settings.draft.unwrap_or(effects.eq);
@@ -173,12 +226,14 @@ pub fn settings_page(app: &App) -> El<'_> {
                     .size(12)
                     .font(SEMIBOLD)
                     .color(if gain == 0 { style::TEXT_FAINT } else { accent }),
-                // i16 : le curseur d'iced exige `From<u8>`, que i8 n'a pas.
+                // Valeur affichée animée (un réglage tout prêt fait glisser les
+                // curseurs) ; le gain envoyé reste un entier.
                 vertical_slider(
-                    i16::from(-EQ_MAX_DB)..=i16::from(EQ_MAX_DB),
-                    i16::from(gain),
-                    move |g| Message::Settings(Settings::Band(i, i8::try_from(g).unwrap_or(0))),
+                    f32::from(-EQ_MAX_DB)..=f32::from(EQ_MAX_DB),
+                    app.anims.get(Key::Band(i), f32::from(gain)),
+                    move |g: f32| Message::Settings(Settings::Band(i, g.round() as i8)),
                 )
+                .step(1.0_f32)
                 .on_release(Message::Settings(Settings::Release))
                 .height(Length::Fixed(180.0)),
                 text(band_label(freq)).size(12).color(style::TEXT_DIM),
@@ -214,10 +269,11 @@ pub fn settings_page(app: &App) -> El<'_> {
         ]
         .spacing(4)
         .width(Length::Fill),
-        toggler(effects.normalize)
-            .on_toggle(|on| Message::Settings(Settings::Normalize(on)))
-            .size(22)
-            .style(style::switch(accent)),
+        switch(
+            app.anims.get(Key::Normalize, 0.0),
+            accent,
+            Message::Settings(Settings::Normalize(!effects.normalize)),
+        ),
     ]
     .spacing(16)
     .align_y(Alignment::Center);
@@ -264,10 +320,11 @@ pub fn settings_page(app: &App) -> El<'_> {
                     ]
                     .spacing(4)
                     .width(Length::Fill),
-                    toggler(app.notifications_on())
-                        .on_toggle(|on| Message::Settings(Settings::Notifications(on)))
-                        .size(22)
-            .style(style::switch(accent)),
+                    switch(
+                        app.anims.get(Key::Notifications, 0.0),
+                        accent,
+                        Message::Settings(Settings::Notifications(!app.notifications_on())),
+                    ),
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center)

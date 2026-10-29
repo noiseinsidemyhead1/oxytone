@@ -95,9 +95,8 @@ pub fn view(app: &App) -> El<'_> {
             .as_ref()
             .map_or_else(nothing, |(_, message)| toast(message)),
     ];
-    // Barre de titre maison, cachée en plein écran et dans la vue « En cours »
-    // tant que les contrôles sont masqués.
-    let immersive = app.fullscreen || (app.route == Route::NowPlaying && !app.controls_visible);
+    // Barre de titre maison, cachée en plein écran.
+    let immersive = app.fullscreen;
     let framed = column![
         if immersive {
             nothing()
@@ -205,9 +204,12 @@ fn main_layout(app: &App) -> El<'_> {
         // Plein écran épuré : les contrôles n'apparaissent qu'au mouvement de la souris.
         // Les contrôles apparaissent et disparaissent en fondu : un voile du
         // fond de la page (noir) passe d'opaque à transparent par-dessus.
+        // La barre se pose *par-dessus* le bas de la page (rien ne change de
+        // taille). Le bas de la vue est noir : un voile noir qui s'efface y
+        // donne un vrai fondu.
         let level = app.controls_level;
         let bar: El<'_> = if level > 0.001 {
-            stack![
+            container(iced::widget::opaque(stack![
                 player_bar(app),
                 container(Space::new())
                     .width(Length::Fill)
@@ -216,12 +218,15 @@ fn main_layout(app: &App) -> El<'_> {
                         background: Some(style::alpha(style::BG, 1.0 - level).into()),
                         ..Default::default()
                     }),
-            ]
+            ]))
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .align_y(Alignment::End)
             .into()
         } else {
             Space::new().into()
         };
-        return column![page, bar].into();
+        return stack![page, bar].into();
     }
     let mut middle = row![sidebar(app), resize_handle(Panel::Left), page];
     if app.show_queue {
@@ -1552,11 +1557,15 @@ fn player_bar(app: &App) -> El<'_> {
             .color(style::TEXT_FAINT)
             .width(Length::Fixed(42.0))
             .align_x(Alignment::End),
-        slider(0.0..=total, shown, Message::SeekPreview)
-            .on_release(Message::SeekCommit)
-            .step(0.5_f32)
-            .height(14)
-            .style(style::progress(accent)),
+        slider(
+            0.0..=total,
+            app.anims.get(crate::anim::Key::Seek, shown).min(total),
+            Message::SeekPreview
+        )
+        .on_release(Message::SeekCommit)
+        .step(0.5_f32)
+        .height(14)
+        .style(style::progress(accent)),
         text(fmt_opt(state.duration))
             .size(12)
             .color(style::TEXT_FAINT)
@@ -1600,10 +1609,16 @@ fn player_bar(app: &App) -> El<'_> {
             Message::ToggleMute,
             "Volume".into()
         ),
-        slider(0..=100u8, state.volume, Message::Volume)
-            .width(Length::Fixed(110.0))
-            .height(14)
-            .style(style::progress(accent)),
+        slider(
+            0.0..=100.0_f32,
+            app.anims
+                .get(crate::anim::Key::Volume, f32::from(state.volume)),
+            |v| Message::Volume(v.round().clamp(0.0, 100.0) as u8)
+        )
+        .step(1.0_f32)
+        .width(Length::Fixed(110.0))
+        .height(14)
+        .style(style::progress(accent)),
     ]
     .spacing(4)
     .align_y(Alignment::Center);
