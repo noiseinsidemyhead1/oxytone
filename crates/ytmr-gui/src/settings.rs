@@ -216,7 +216,8 @@ pub fn settings_page(app: &App) -> El<'_> {
         .width(Length::Fill),
         toggler(effects.normalize)
             .on_toggle(|on| Message::Settings(Settings::Normalize(on)))
-            .size(22),
+            .size(22)
+            .style(style::switch(accent)),
     ]
     .spacing(16)
     .align_y(Alignment::Center);
@@ -265,7 +266,8 @@ pub fn settings_page(app: &App) -> El<'_> {
                     .width(Length::Fill),
                     toggler(app.notifications_on())
                         .on_toggle(|on| Message::Settings(Settings::Notifications(on)))
-                        .size(22),
+                        .size(22)
+            .style(style::switch(accent)),
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center)

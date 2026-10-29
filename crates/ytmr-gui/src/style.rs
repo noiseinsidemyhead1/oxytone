@@ -5,7 +5,7 @@
 //! avec la pochette du morceau en cours.
 
 use iced::border::Radius;
-use iced::widget::{button, container, scrollable, slider, svg, text_input};
+use iced::widget::{button, container, scrollable, slider, svg, text_input, toggler};
 use iced::{Background, Border, Color, Gradient, Shadow, Theme, Vector, color, gradient};
 
 // Noir pur pour le fond : les pixels d'un écran OLED s'éteignent vraiment.
@@ -409,6 +409,39 @@ pub fn card(_: &Theme, status: button::Status) -> button::Style {
             ..Border::default()
         },
         ..button::Style::default()
+    }
+}
+
+/// Interrupteur : rail gris clair et pastille visibles une fois éteint (le
+/// thème par défaut les rendait presque noirs sur fond noir).
+pub fn switch(accent: Color) -> impl Fn(&Theme, toggler::Status) -> toggler::Style {
+    move |_, status| {
+        let (on, hovered) = match status {
+            toggler::Status::Active { is_toggled } => (is_toggled, false),
+            toggler::Status::Hovered { is_toggled } => (is_toggled, true),
+            toggler::Status::Disabled { is_toggled } => (is_toggled, false),
+        };
+        toggler::Style {
+            background: if on {
+                accent.into()
+            } else if hovered {
+                color!(0x3a3a44).into()
+            } else {
+                color!(0x2c2c34).into()
+            },
+            background_border_width: 1.0,
+            background_border_color: if on { accent } else { color!(0x55555f) },
+            foreground: if on {
+                Color::WHITE.into()
+            } else {
+                TEXT_DIM.into()
+            },
+            foreground_border_width: 0.0,
+            foreground_border_color: Color::TRANSPARENT,
+            text_color: None,
+            border_radius: None,
+            padding_ratio: 0.1,
+        }
     }
 }
 

@@ -823,7 +823,20 @@ impl App {
                 } else {
                     Task::none()
                 };
-                Task::batch([load, iced::widget::operation::focus(NEW_PLAYLIST_INPUT)])
+                // Vignettes des lignes du sélecteur (petite taille : décodage léger).
+                let ids: Vec<_> = match &self.lib.playlists {
+                    Some(Load::Ready(list)) => list
+                        .iter()
+                        .map(|p| self.url_cover(p.thumbnail_url.as_deref()))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let covers = Task::batch(ids.into_iter().map(|id| self.want_cover(id, THUMB)));
+                Task::batch([
+                    load,
+                    covers,
+                    iced::widget::operation::focus(NEW_PLAYLIST_INPUT),
+                ])
             }
             Lib::OpenNew => {
                 self.lib.new_name.clear();
@@ -1561,12 +1574,13 @@ pub fn overlay(app: &App) -> Option<El<'_>> {
             }),
     )
     .on_press(Message::Lib(Lib::CloseOverlay));
+    let wide = matches!(app.lib.overlay, Some(Overlay::AddTo(_)));
     let centered = container(
         // Le panneau capture les clics : ils ne ferment pas la fenêtre.
         mouse_area(
             container(panel)
                 .padding(20)
-                .width(Length::Fixed(400.0))
+                .width(Length::Fixed(if wide { 560.0 } else { 400.0 }))
                 .style(style::panel),
         )
         .on_press(Message::Noop),
@@ -1609,12 +1623,22 @@ fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
                     list = list.push(
                         button(
                             row![
-                                cover(app.cover(id.as_deref(), CARD), 36.0, 5.0),
-                                column![
-                                    text(&p.title).size(14).font(SEMIBOLD),
-                                    text(&p.tracks_text).size(12).color(style::TEXT_DIM),
-                                ]
-                                .spacing(1),
+                                cover(app.cover(id.as_deref(), THUMB), 44.0, 6.0),
+                                container(
+                                    column![
+                                        text(&p.title)
+                                            .size(15)
+                                            .font(SEMIBOLD)
+                                            .wrapping(iced::widget::text::Wrapping::None),
+                                        text(&p.tracks_text)
+                                            .size(12)
+                                            .color(style::TEXT_DIM)
+                                            .wrapping(iced::widget::text::Wrapping::None),
+                                    ]
+                                    .spacing(2),
+                                )
+                                .width(Length::Fill)
+                                .clip(true),
                             ]
                             .spacing(10)
                             .align_y(Alignment::Center),
@@ -1632,8 +1656,9 @@ fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
         content = content.push(section_title("Mes playlists")).push(
             // Défilement animé (molette), comme les autres listes : la liste
             // native sautait de 60 px par cran.
-            container(crate::views::smooth_scroll(list, ADD_TO_SCROLL))
-                .height(Length::Fixed(300.0)),
+            container(crate::views::smooth_scroll(list, ADD_TO_SCROLL)).height(Length::Fixed(
+                (app.window_size.height * 0.6).clamp(260.0, 680.0),
+            )),
         );
     }
     content.into()
@@ -1970,11 +1995,22 @@ pub fn account_widget(app: &App) -> El<'_> {
                 button(
                     row![
                         cover(app.cover(photo.as_deref(), THUMB), 34.0, 17.0),
-                        column![
-                            text(name).size(13).font(SEMIBOLD),
-                            text(handle).size(11).color(style::TEXT_DIM),
-                        ]
-                        .spacing(1),
+                        // Une ligne chacun, coupée : la barre latérale peut être étroite.
+                        container(
+                            column![
+                                text(name)
+                                    .size(13)
+                                    .font(SEMIBOLD)
+                                    .wrapping(iced::widget::text::Wrapping::None),
+                                text(handle)
+                                    .size(11)
+                                    .color(style::TEXT_DIM)
+                                    .wrapping(iced::widget::text::Wrapping::None),
+                            ]
+                            .spacing(1),
+                        )
+                        .width(Length::Fill)
+                        .clip(true),
                     ]
                     .spacing(10)
                     .align_y(Alignment::Center),

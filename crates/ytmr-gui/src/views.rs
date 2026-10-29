@@ -82,32 +82,40 @@ pub fn view(app: &App) -> El<'_> {
     let content: El<'_> = match &app.phase {
         Phase::Starting => splash("Démarrage…"),
         Phase::Failed(e) => failure(e),
-        Phase::Ready(_) => match library::overlay(app) {
-            Some(overlay) => stack![main_layout(app), overlay].into(),
-            None => main_layout(app),
-        },
+        Phase::Ready(_) => main_layout(app),
     };
-    let content: El<'_> = match crate::context::menu(app) {
-        Some(menu) => stack![content, menu].into(),
-        None => content,
-    };
-    let with_toast: El<'_> = match &app.toast {
-        Some((_, message)) => stack![content, toast(message)].into(),
-        None => content,
-    };
+    // La structure de l'arbre ne change jamais (une couche vide quand il n'y a
+    // rien) : sinon iced recrée la page dessous et ses listes défilantes
+    // repartent en haut (clic droit, fenêtre d'ajout, message).
+    let nothing = || -> El<'_> { Space::new().into() };
+    let layers = stack![
+        content,
+        library::overlay(app).unwrap_or_else(nothing),
+        app.toast
+            .as_ref()
+            .map_or_else(nothing, |(_, message)| toast(message)),
+    ];
     // Barre de titre maison, cachée en plein écran et dans la vue « En cours »
-    // tant que la souris ne bouge pas.
+    // tant que les contrôles sont masqués.
     let immersive = app.fullscreen || (app.route == Route::NowPlaying && !app.controls_visible);
-    let framed: El<'_> = if immersive {
-        with_toast
-    } else {
-        column![crate::chrome::title_bar(app), with_toast].into()
-    };
-    let framed: El<'_> = if app.maximized || app.fullscreen {
-        framed
-    } else {
-        stack![framed, crate::chrome::resize_edges()].into()
-    };
+    let framed = column![
+        if immersive {
+            nothing()
+        } else {
+            crate::chrome::title_bar(app)
+        },
+        layers
+    ];
+    let framed = stack![
+        framed,
+        if app.maximized || app.fullscreen {
+            nothing()
+        } else {
+            crate::chrome::resize_edges()
+        },
+        // Tout en haut, dans le repère de la fenêtre : il s'ouvre sous la souris.
+        crate::context::menu(app).unwrap_or_else(nothing),
+    ];
     // Note la position des clics droits (menu contextuel).
     crate::context::catch_points(
         container(framed)
@@ -195,11 +203,25 @@ fn main_layout(app: &App) -> El<'_> {
     // Grande vue « En cours » : plein écran, aucune barre latérale.
     if app.route == Route::NowPlaying {
         // Plein écran épuré : les contrôles n'apparaissent qu'au mouvement de la souris.
-        return if app.controls_visible {
-            column![page, player_bar(app)].into()
+        // Les contrôles apparaissent et disparaissent en fondu : un voile du
+        // fond de la page (noir) passe d'opaque à transparent par-dessus.
+        let level = app.controls_level;
+        let bar: El<'_> = if level > 0.001 {
+            stack![
+                player_bar(app),
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(style::alpha(style::BG, 1.0 - level).into()),
+                        ..Default::default()
+                    }),
+            ]
+            .into()
         } else {
-            page.into()
+            Space::new().into()
         };
+        return column![page, bar].into();
     }
     let mut middle = row![sidebar(app), resize_handle(Panel::Left), page];
     if app.show_queue {
@@ -1563,13 +1585,6 @@ fn player_bar(app: &App) -> El<'_> {
             // Paroles à la place de la file ; second clic : fermées.
             Message::ToggleLyrics,
             "Paroles".into()
-        ),
-        icon_tip(
-            Icon::Radio,
-            17.0,
-            lit(state.autoplay),
-            Message::ToggleAutoplay,
-            "Radio".into()
         ),
         icon_tip(
             Icon::Queue,

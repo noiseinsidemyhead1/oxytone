@@ -41,6 +41,8 @@ const SEARCH_COVERS_WAIT: Duration = Duration::from_secs(6);
 /// passant simplement la souris sur une liste).
 const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(250);
 const TOAST_DURATION: Duration = Duration::from_secs(4);
+/// Fondu des contrôles de la vue « En cours ».
+const CONTROLS_FADE: Duration = Duration::from_millis(260);
 /// Suggestions demandées un peu avant la recherche complète.
 const SUGGEST_DEBOUNCE: Duration = Duration::from_millis(140);
 /// Paroles gardées en mémoire (les plus anciennes sont oubliées au-delà).
@@ -162,7 +164,6 @@ pub enum Message {
     ToggleMute,
     ToggleShuffle,
     CycleRepeat,
-    ToggleAutoplay,
     ToggleQueue,
     /// Bouton micro : panneau des paroles à la place de la file.
     ToggleLyrics,
@@ -352,6 +353,10 @@ pub struct App {
     pub maximized: bool,
     /// Vue « En cours » : contrôles visibles (après un mouvement de souris).
     pub controls_visible: bool,
+    /// Opacité des contrôles de la vue « En cours » (0 à 1, animée).
+    pub controls_level: f32,
+    /// Fondu des contrôles en cours : (début, opacité de départ).
+    controls_anim: Option<(std::time::Instant, f32)>,
     /// Ligne survolée dans la file d'attente.
     pub queue_hover: Option<usize>,
     queue_hover_video: Option<String>,
@@ -426,6 +431,10 @@ impl App {
                 Message::BackendReady,
             )
         };
+        let size = window::oldest()
+            .and_then(window::size)
+            .map(Message::WindowResized);
+        let start = Task::batch([start, size]);
         let app = Self {
             state: PlaybackState {
                 volume: config.0.player.volume,
@@ -455,6 +464,8 @@ impl App {
             fullscreen: false,
             maximized: false,
             controls_visible: false,
+            controls_level: 0.0,
+            controls_anim: None,
             queue_hover: None,
             queue_hover_video: None,
             visible_covers: std::collections::HashSet::new(),
@@ -566,6 +577,7 @@ impl App {
         // `YTMR_FPS=1` : redessin continu et images/s dans le journal (mesure).
         if self.scrolling.is_animating()
             || self.fps_meter.is_some()
+            || self.controls_anim.is_some()
             || self.is_loading()
             || self.accent_fade.is_running()
             || self.page_fade.is_running()
@@ -1421,6 +1433,7 @@ impl App {
             }
             Message::ToggleControls => {
                 self.controls_visible = !self.controls_visible;
+                self.controls_anim = Some((std::time::Instant::now(), self.controls_level));
                 Task::none()
             }
             Message::QueueHover(row) => {
@@ -1521,7 +1534,6 @@ impl App {
             },
             Message::ToggleShuffle => self.send(Command::SetShuffle(!self.state.shuffle)),
             Message::CycleRepeat => self.send(Command::SetRepeat(self.state.repeat.cycle())),
-            Message::ToggleAutoplay => self.send(Command::SetAutoplay(!self.state.autoplay)),
             Message::ToggleQueue => {
                 self.show_queue = !(self.show_queue && self.right_panel == RightPanel::Queue);
                 self.right_panel = RightPanel::Queue;
@@ -1725,6 +1737,18 @@ impl App {
                 self.run_search()
             }
             Message::Frame(now) => {
+                if let Some((since, from)) = self.controls_anim {
+                    let t = (now.saturating_duration_since(since).as_secs_f32()
+                        / CONTROLS_FADE.as_secs_f32())
+                    .min(1.0);
+                    // Courbe douce (début et fin ralentis).
+                    let eased = t * t * (3.0 - 2.0 * t);
+                    let target = if self.controls_visible { 1.0 } else { 0.0 };
+                    self.controls_level = from + (target - from) * eased;
+                    if t >= 1.0 {
+                        self.controls_anim = None;
+                    }
+                }
                 if let Some((since, frames)) = &mut self.fps_meter {
                     *frames += 1;
                     let elapsed = now.saturating_duration_since(*since);

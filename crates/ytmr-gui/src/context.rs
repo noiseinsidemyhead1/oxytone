@@ -326,16 +326,18 @@ pub fn menu(app: &App) -> Option<El<'_>> {
             .on_press(message),
         );
     }
-    // Le menu reste dans la fenêtre (vers la gauche / le haut près des bords).
-    let x = if point.x + MENU_W > app.window_size.width {
-        (point.x - MENU_W).max(0.0)
+    // Juste sous la pointe de la souris ; vers la gauche / le haut près des
+    // bords, pour rester dans la fenêtre.
+    const NUDGE: f32 = 2.0;
+    let x = if point.x + NUDGE + MENU_W > app.window_size.width {
+        (point.x - MENU_W - NUDGE).max(0.0)
     } else {
-        point.x
+        point.x + NUDGE
     };
-    let y = if point.y + height > app.window_size.height {
-        (point.y - height).max(0.0)
+    let y = if point.y + NUDGE + height > app.window_size.height {
+        (point.y - height - NUDGE).max(0.0)
     } else {
-        point.y
+        point.y + NUDGE
     };
     let panel = container(list)
         .width(Length::Fixed(MENU_W))
