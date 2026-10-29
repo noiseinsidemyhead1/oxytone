@@ -9,6 +9,7 @@
 mod app;
 mod backend;
 mod icons;
+mod library;
 mod smooth;
 mod style;
 mod views;

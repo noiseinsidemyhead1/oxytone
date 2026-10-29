@@ -52,10 +52,24 @@ def emit(obj):
         sys.stdout.write(json.dumps(obj) + "\n")
         sys.stdout.flush()
 
+def browser_cookie(spec):
+    from yt_dlp.cookies import extract_cookies_from_browser
+    name, _, profile = spec.partition(":")
+    jar = extract_cookies_from_browser(name, profile or None)
+    values = {}
+    for c in jar:
+        domain = c.domain.lstrip(".")
+        if domain == "youtube.com" or domain.endswith(".youtube.com"):
+            values[c.name] = c.value
+    return "; ".join(f"{k}={v}" for k, v in values.items())
+
 def work(req):
     try:
         if req.get("op") == "warm":
             ydl()
+            return
+        if req.get("op") == "cookie":
+            emit({"id": req["id"], "ok": {"cookie": browser_cookie(req["browser"])}})
             return
         info = ydl().extract_info(req["url"], download=False)
         emit({"id": req["id"], "ok": {
@@ -133,10 +147,28 @@ impl Worker {
 
     /// Infos yt-dlp (`url`, `vcodec`, `available_at`, `http_headers`) pour `url`.
     pub async fn extract(&self, url: &str) -> Result<Value, String> {
+        self.request(json!({ "url": url })).await
+    }
+
+    /// En-tête `Cookie` YouTube de la session du navigateur (`firefox`,
+    /// `firefox:<profil>`). Reste en mémoire : rien n'est écrit sur le disque.
+    pub async fn browser_cookie(&self, browser: &str) -> Result<String, String> {
+        let value = self
+            .request(json!({ "op": "cookie", "browser": browser }))
+            .await?;
+        value["cookie"]
+            .as_str()
+            .filter(|c| c.contains("SAPISID="))
+            .map(str::to_owned)
+            .ok_or_else(|| format!("pas de session YouTube dans {browser} (es-tu connecté ?)"))
+    }
+
+    async fn request(&self, mut body: Value) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         lock(&self.pending).insert(id, tx);
-        let mut line = json!({ "id": id, "url": url }).to_string();
+        body["id"] = json!(id);
+        let mut line = body.to_string();
         line.push('\n');
         let written = {
             let mut stdin = self.stdin.lock().await;

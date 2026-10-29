@@ -9,20 +9,30 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use ytmr_api::{AppState, Guard};
 use ytmr_catalog::Catalog;
+use ytmr_catalog::account::Account;
 use ytmr_core::engine::{self, CoreOptions};
 use ytmr_core::{AppPaths, Command, Config, CoreHandle};
 use ytmr_media::Covers;
 use ytmr_player::worker::{self, Worker};
 use ytmr_player::{Dependencies, MpvPlayer, ResolverOptions, YtDlpResolver};
 
+/// Connexion au compte YouTube (playlists, likes).
+#[derive(Clone)]
+pub enum AccountState {
+    Connecting,
+    Ready(Arc<Account>),
+    Unavailable(String),
+}
+
 pub struct Backend {
     pub core: CoreHandle,
     pub catalog: Arc<Catalog>,
     pub covers: Arc<Covers>,
+    pub account: watch::Receiver<AccountState>,
     core_task: JoinHandle<()>,
     server: Option<(JoinHandle<std::io::Result<()>>, oneshot::Sender<()>)>,
 }
@@ -75,7 +85,8 @@ impl Backend {
                 cache_file: Some(paths.cache_dir.join("streams.json")),
             },
         ));
-        start_worker(&resolver, paths.cache_dir.join("ytdlp-env"));
+        let (account_tx, account) = watch::channel(AccountState::Connecting);
+        start_worker(&resolver, paths.cache_dir.join("ytdlp-env"), account_tx);
         let covers = Arc::new(
             Covers::new(paths.cache_dir.join("covers"))
                 .context("dossier de cache des jaquettes")?,
@@ -119,6 +130,7 @@ impl Backend {
             core,
             catalog,
             covers,
+            account,
             core_task,
             server,
         })
@@ -141,23 +153,28 @@ impl Backend {
     }
 }
 
-/// Installe (au besoin) puis démarre le yt-dlp permanent, en tâche de fond :
-/// en attendant, le résolveur utilise l'exécutable.
-fn start_worker(resolver: &Arc<YtDlpResolver>, env_dir: std::path::PathBuf) {
+/// Installe (au besoin) puis démarre le yt-dlp permanent, en tâche de fond
+/// (en attendant, le résolveur utilise l'exécutable), puis se connecte au
+/// compte YouTube avec la session du navigateur.
+fn start_worker(
+    resolver: &Arc<YtDlpResolver>,
+    env_dir: std::path::PathBuf,
+    account: watch::Sender<AccountState>,
+) {
     let Some(options) = resolver.worker_options() else {
+        account.send_replace(AccountState::Unavailable(
+            "options yt-dlp personnalisées : compte non géré".into(),
+        ));
         return;
     };
     let resolver = Arc::clone(resolver);
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let python = match worker::ensure_env(&env_dir).await {
-            Ok(python) => python,
-            Err(e) => {
-                tracing::warn!("worker yt-dlp indisponible : {e}");
-                return;
-            }
+        let worker = match worker::ensure_env(&env_dir).await {
+            Ok(python) => Worker::spawn(&python, &options).await,
+            Err(e) => Err(e),
         };
-        match Worker::spawn(&python, &options).await {
+        match worker {
             Ok(w) => {
                 resolver.attach_worker(w);
                 tracing::info!(
@@ -165,7 +182,25 @@ fn start_worker(resolver: &Arc<YtDlpResolver>, env_dir: std::path::PathBuf) {
                     "worker yt-dlp branché"
                 );
             }
-            Err(e) => tracing::warn!("worker yt-dlp indisponible : {e}"),
+            Err(e) => {
+                tracing::warn!("worker yt-dlp indisponible : {e}");
+                account.send_replace(AccountState::Unavailable(e));
+                return;
+            }
         }
+        let state = match resolver.browser_cookie().await {
+            Ok(cookie) => match Account::connect(&cookie).await {
+                Ok(a) => {
+                    tracing::info!("compte YouTube connecté");
+                    AccountState::Ready(Arc::new(a))
+                }
+                Err(e) => AccountState::Unavailable(format!("connexion au compte : {e}")),
+            },
+            Err(e) => AccountState::Unavailable(e),
+        };
+        if let AccountState::Unavailable(e) = &state {
+            tracing::warn!("compte indisponible : {e}");
+        }
+        account.send_replace(state);
     });
 }

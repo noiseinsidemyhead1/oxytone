@@ -31,6 +31,12 @@ pub enum Icon {
     Back,
     Music,
     Radio,
+    Heart,
+    HeartFilled,
+    Library,
+    PlaylistAdd,
+    Edit,
+    Trash,
 }
 
 const STROKE: &str =
@@ -51,10 +57,17 @@ fn source(icon: Icon) -> String {
         Icon::Home => format!(r#"<g {STROKE}><path d="M3 10.5L12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></g>"#),
         Icon::Queue => format!(r#"<g {STROKE}><path d="M3 6h13"/><path d="M3 12h13"/><path d="M3 18h9"/><path fill="black" stroke="none" d="M17 14.5v7l5-3.5z"/></g>"#),
         Icon::Plus => format!(r#"<g {STROKE}><path d="M12 5v14"/><path d="M5 12h14"/></g>"#),
-        Icon::PlayNext => format!(r#"<g {STROKE}><path d="M3 6h12"/><path d="M3 12h8"/><path d="M3 18h8"/><path d="M18 11v10"/><path d="M13 16h10"/></g>"#),
+        // Flèche qui « passe devant » dans la liste : distincte de l'ajout en playlist.
+        Icon::PlayNext => format!(r#"<g {STROKE}><path d="M11 6h10"/><path d="M11 12h10"/><path d="M11 18h10"/><path d="M3 5v5a3 3 0 0 0 3 3h3"/><path d="M7 10l2.5 3L7 16"/></g>"#),
         Icon::Close => format!(r#"<g {STROKE}><path d="M18 6L6 18"/><path d="M6 6l12 12"/></g>"#),
         Icon::Back => format!(r#"<g {STROKE}><path d="M15 18l-6-6 6-6"/></g>"#),
         Icon::Music => format!(r#"<g {STROKE}><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></g>"#),
+        Icon::Heart => format!(r#"<g {STROKE}><path d="M19.5 12.6 12 20l-7.5-7.4A5 5 0 1 1 12 6a5 5 0 1 1 7.5 6.6z"/></g>"#),
+        Icon::HeartFilled => r#"<path fill="black" d="M19.5 12.6 12 20l-7.5-7.4A5 5 0 1 1 12 6a5 5 0 1 1 7.5 6.6z"/>"#.to_owned(),
+        Icon::Library => format!(r#"<g {STROKE}><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M14 17.5h7"/><path d="M17.5 14v7"/></g>"#),
+        Icon::PlaylistAdd => format!(r#"<g {STROKE}><path d="M3 6h12"/><path d="M3 12h12"/><path d="M3 18h7"/><path d="M17 14v8"/><path d="M13 18h8"/></g>"#),
+        Icon::Edit => format!(r#"<g {STROKE}><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></g>"#),
+        Icon::Trash => format!(r#"<g {STROKE}><path d="M3 6h18"/><path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></g>"#),
         Icon::Radio => format!(r#"<g {STROKE}><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><path d="M19.1 4.9a10 10 0 0 1 0 14.2"/><path d="M4.9 19.1a10 10 0 0 1 0-14.2"/></g>"#),
     };
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{body}</svg>"#)
@@ -64,8 +77,30 @@ fn source(icon: Icon) -> String {
 static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
     use Icon::*;
     [
-        Play, Pause, Prev, Next, Shuffle, Repeat, RepeatOne, Volume, VolumeMute, Search, Home,
-        Queue, Plus, PlayNext, Close, Back, Music, Radio,
+        Play,
+        Pause,
+        Prev,
+        Next,
+        Shuffle,
+        Repeat,
+        RepeatOne,
+        Volume,
+        VolumeMute,
+        Search,
+        Home,
+        Queue,
+        Plus,
+        PlayNext,
+        Close,
+        Back,
+        Music,
+        Radio,
+        Heart,
+        HeartFilled,
+        Library,
+        PlaylistAdd,
+        Edit,
+        Trash,
     ]
     .into_iter()
     .map(|icon| svg::Handle::from_memory(source(icon).into_bytes()))

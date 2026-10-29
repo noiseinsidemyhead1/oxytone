@@ -46,6 +46,8 @@ pub enum Route {
     Search,
     Album(String),
     Artist(String),
+    Library,
+    Playlist(String),
 }
 
 #[derive(Debug, Clone)]
@@ -124,6 +126,9 @@ pub enum Message {
     Wheel(&'static str, f32),
     Scrolled(&'static str, iced::widget::scrollable::Viewport),
     Frame(std::time::Instant),
+    Lib(crate::library::Lib),
+    /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
+    Noop,
     CloseRequested,
     ShutdownDone,
 }
@@ -151,10 +156,11 @@ pub struct App {
     pub show_queue: bool,
     pub seek_preview: Option<f32>,
     muted_volume: Option<u8>,
-    hovered: Option<String>,
+    pub hovered: Option<String>,
     pub toast: Option<(u64, String)>,
     toast_seq: u64,
     scrolling: Scrolling,
+    pub lib: crate::library::LibraryState,
     shutting_down: bool,
 }
 
@@ -196,6 +202,7 @@ impl App {
             toast: None,
             toast_seq: 0,
             scrolling: Scrolling::default(),
+            lib: crate::library::LibraryState::default(),
             shutting_down: false,
         };
         (app, start)
@@ -261,7 +268,7 @@ impl App {
     }
 
     /// Demande la teinte d'une pochette si elle n'est pas encore connue.
-    fn want_accent(&mut self, id: Option<String>) -> Task<Message> {
+    pub(crate) fn want_accent(&mut self, id: Option<String>) -> Task<Message> {
         let Some(id) = id else {
             return Task::none();
         };
@@ -287,7 +294,7 @@ impl App {
     }
 
     /// Lance le chargement d'une jaquette si elle n'est ni chargée ni en cours.
-    fn want_cover(&mut self, id: Option<String>, size: u32) -> Task<Message> {
+    pub(crate) fn want_cover(&mut self, id: Option<String>, size: u32) -> Task<Message> {
         let Some(id) = id else {
             return Task::none();
         };
@@ -312,7 +319,7 @@ impl App {
         )
     }
 
-    fn want_track_covers<'a>(
+    pub(crate) fn want_track_covers<'a>(
         &mut self,
         tracks: impl IntoIterator<Item = &'a Track>,
         size: u32,
@@ -322,7 +329,7 @@ impl App {
     }
 
     /// Envoie une commande au moteur ; une erreur s'affiche dans un toast.
-    fn send(&self, command: Command) -> Task<Message> {
+    pub(crate) fn send(&self, command: Command) -> Task<Message> {
         let Some(backend) = self.backend() else {
             return Task::none();
         };
@@ -333,13 +340,18 @@ impl App {
         )
     }
 
-    fn show_toast(&mut self, message: String) -> Task<Message> {
+    pub(crate) fn show_toast(&mut self, message: String) -> Task<Message> {
         self.toast_seq += 1;
         let seq = self.toast_seq;
         self.toast = Some((seq, message));
         Task::perform(tokio::time::sleep(TOAST_DURATION), move |()| {
             Message::DismissToast(seq)
         })
+    }
+
+    /// Navigation déclenchée par le code (après une suppression, par exemple).
+    pub(crate) fn go_to(&mut self, route: Route) -> Task<Message> {
+        self.navigate(route)
     }
 
     fn navigate(&mut self, route: Route) -> Task<Message> {
@@ -386,6 +398,8 @@ impl App {
                 )
             }
             Route::Search => operation::focus(SEARCH_INPUT),
+            Route::Library => self.load_playlists(),
+            Route::Playlist(id) => self.open_playlist(id),
             Route::Home => Task::none(),
         }
     }
@@ -415,10 +429,11 @@ impl App {
             Message::BackendReady(result) => match result.map(|slot| slot.take()) {
                 Ok(Some(backend)) => {
                     let core = backend.core.clone();
+                    let account = crate::library::wait_for_account(backend.account.clone());
                     self.phase = Phase::Ready(backend);
                     // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
                     let initial = self.on_core(CoreUpdate::State(core.state()));
-                    Task::batch([initial, Task::stream(core_updates(core))])
+                    Task::batch([initial, account, Task::stream(core_updates(core))])
                 }
                 Ok(None) => Task::none(),
                 Err(e) => {
@@ -664,6 +679,8 @@ impl App {
                 Task::none()
             }
             Message::Frame(now) => self.scrolling.frame(now),
+            Message::Lib(message) => self.update_library(message),
+            Message::Noop => Task::none(),
             Message::ShutdownDone => iced::exit(),
         }
     }

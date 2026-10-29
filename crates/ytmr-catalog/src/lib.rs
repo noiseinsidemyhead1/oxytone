@@ -4,6 +4,8 @@
 //! Enveloppe `ytmapi-rs` pour que le reste du code n'en dépende pas directement :
 //! si YouTube change son API interne, seul ce crate est à adapter.
 
+pub mod account;
+
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 use thiserror::Error;
 use ytmapi_rs::auth::noauth::NoAuthToken;
@@ -23,6 +25,8 @@ pub enum CatalogError {
     Api(#[from] ytmapi_rs::Error),
     #[error("client HTTP : {0}")]
     Http(#[from] reqwest::Error),
+    #[error("{0}")]
+    Refused(&'static str),
 }
 
 /// Refus des cookies non essentiels. Sans lui, depuis l'UE, la page d'accueil
@@ -316,7 +320,7 @@ fn artist_from_get(a: GetArtist) -> Artist {
     }
 }
 
-fn join_artists(artists: &[ParsedSongArtist]) -> String {
+pub(crate) fn join_artists(artists: &[ParsedSongArtist]) -> String {
     artists
         .iter()
         .map(|a| a.name.as_str())
@@ -324,7 +328,7 @@ fn join_artists(artists: &[ParsedSongArtist]) -> String {
         .join(", ")
 }
 
-fn largest_thumbnail(thumbnails: &[Thumbnail]) -> Option<String> {
+pub(crate) fn largest_thumbnail(thumbnails: &[Thumbnail]) -> Option<String> {
     thumbnails
         .iter()
         .max_by_key(|t| t.width * t.height)

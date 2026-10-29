@@ -18,16 +18,17 @@ use crate::app::{
     App, CARD, HERO, Load, Message, PAGE_SCROLL, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT, THUMB,
 };
 use crate::icons::{Icon, icon};
+use crate::library::{self, AccountView, Lib};
 use crate::smooth::wheel;
 use crate::style;
 
-type El<'a> = Element<'a, Message>;
+pub(crate) type El<'a> = Element<'a, Message>;
 
-const BOLD: Font = Font {
+pub(crate) const BOLD: Font = Font {
     weight: font::Weight::Bold,
     ..Font::DEFAULT
 };
-const SEMIBOLD: Font = Font {
+pub(crate) const SEMIBOLD: Font = Font {
     weight: font::Weight::Semibold,
     ..Font::DEFAULT
 };
@@ -36,7 +37,10 @@ pub fn view(app: &App) -> El<'_> {
     let content: El<'_> = match &app.phase {
         Phase::Starting => splash("Démarrage…"),
         Phase::Failed(e) => failure(e),
-        Phase::Ready(_) => main_layout(app),
+        Phase::Ready(_) => match library::overlay(app) {
+            Some(overlay) => stack![main_layout(app), overlay].into(),
+            None => main_layout(app),
+        },
     };
     let with_toast: El<'_> = match &app.toast {
         Some((_, message)) => stack![content, toast(message)].into(),
@@ -111,6 +115,8 @@ fn main_layout(app: &App) -> El<'_> {
         Route::Search => search_page(app),
         Route::Album(_) => album_page(app),
         Route::Artist(_) => artist_page(app),
+        Route::Library => library::library_page(app),
+        Route::Playlist(_) => library::playlist_page(app),
     };
     let mut middle = row![
         sidebar(app),
@@ -127,7 +133,8 @@ fn main_layout(app: &App) -> El<'_> {
 fn sidebar(app: &App) -> El<'_> {
     let nav = |label: &'static str, ic: Icon, route: Route| {
         let active = app.route == route
-            || (route == Route::Search && matches!(app.route, Route::Album(_) | Route::Artist(_)));
+            || (route == Route::Search && matches!(app.route, Route::Album(_) | Route::Artist(_)))
+            || (route == Route::Library && matches!(app.route, Route::Playlist(_)));
         let color = if active { app.accent } else { style::TEXT_DIM };
         button(
             row![icon(ic, 18.0, color), text(label).size(14).font(SEMIBOLD)]
@@ -162,9 +169,11 @@ fn sidebar(app: &App) -> El<'_> {
             column![
                 nav("Accueil", Icon::Home, Route::Home),
                 nav("Recherche", Icon::Search, Route::Search),
+                nav("Bibliothèque", Icon::Library, Route::Library),
             ]
             .spacing(4),
             Space::new().height(Length::Fill),
+            account_status(app),
             text("Espace : lecture/pause · ← → : ±10 s · Ctrl+F : rechercher")
                 .size(11)
                 .color(style::TEXT_FAINT),
@@ -178,10 +187,43 @@ fn sidebar(app: &App) -> El<'_> {
     .into()
 }
 
+fn account_status(app: &App) -> El<'_> {
+    let (label, color) = match &app.lib.account {
+        AccountView::Connecting => ("Compte YouTube : connexion…", style::TEXT_FAINT),
+        AccountView::Ready(_) => ("Compte YouTube connecté", style::TEXT_DIM),
+        AccountView::Unavailable(_) => ("Compte YouTube indisponible", style::TEXT_FAINT),
+    };
+    row![
+        container(
+            Space::new()
+                .width(Length::Fixed(7.0))
+                .height(Length::Fixed(7.0))
+        )
+        .style(move |_| iced::widget::container::Style {
+            background: Some(
+                match &app.lib.account {
+                    AccountView::Ready(_) => Color::from_rgb8(0x4a, 0xde, 0x80),
+                    _ => style::TEXT_FAINT,
+                }
+                .into()
+            ),
+            border: iced::Border {
+                radius: 4.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        text(label).size(12).color(color),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 // ----- éléments communs -----
 
 /// Jaquette carrée, ou un carré neutre tant qu'elle charge.
-fn cover<'a>(handle: Option<image::Handle>, size: f32, radius: f32) -> El<'a> {
+pub(crate) fn cover<'a>(handle: Option<image::Handle>, size: f32, radius: f32) -> El<'a> {
     match handle {
         Some(h) => image(h)
             .width(Length::Fixed(size))
@@ -200,12 +242,12 @@ fn cover<'a>(handle: Option<image::Handle>, size: f32, radius: f32) -> El<'a> {
     }
 }
 
-fn track_cover<'a>(app: &App, track: &Track, size: f32) -> El<'a> {
+pub(crate) fn track_cover<'a>(app: &App, track: &Track, size: f32) -> El<'a> {
     let id = app.track_cover(track);
     cover(app.cover(id.as_deref(), THUMB), size, 6.0)
 }
 
-fn icon_btn<'a>(ic: Icon, size: f32, color: Color, message: Message) -> El<'a> {
+pub(crate) fn icon_btn<'a>(ic: Icon, size: f32, color: Color, message: Message) -> El<'a> {
     button(icon(ic, size, color))
         .padding(7)
         .style(style::icon_button)
@@ -213,8 +255,48 @@ fn icon_btn<'a>(ic: Icon, size: f32, color: Color, message: Message) -> El<'a> {
         .into()
 }
 
+/// Cœur et « ajouter à une playlist », quand le compte est connecté.
+pub(crate) fn account_buttons<'a>(app: &App, track: &'a Track) -> El<'a> {
+    if app.lib.ready().is_none() {
+        return Space::new().width(Length::Fixed(0.0)).into();
+    }
+    let liked = app.lib.is_liked(&track.video_id);
+    row![
+        icon_tip(
+            if liked {
+                Icon::HeartFilled
+            } else {
+                Icon::Heart
+            },
+            16.0,
+            if liked { app.accent } else { style::TEXT_DIM },
+            Message::Lib(Lib::ToggleLike(track.clone())),
+            if liked {
+                "Retirer des titres likés"
+            } else {
+                "Liker"
+            }
+            .into(),
+        ),
+        icon_tip(
+            Icon::PlaylistAdd,
+            16.0,
+            style::TEXT_DIM,
+            Message::Lib(Lib::OpenAddTo(track.clone())),
+            "Ajouter à une playlist".into(),
+        ),
+    ]
+    .into()
+}
+
 /// Bouton icône avec une bulle d'aide au survol.
-fn icon_tip<'a>(ic: Icon, size: f32, color: Color, message: Message, tip: String) -> El<'a> {
+pub(crate) fn icon_tip<'a>(
+    ic: Icon,
+    size: f32,
+    color: Color,
+    message: Message,
+    tip: String,
+) -> El<'a> {
     tooltip(
         icon_btn(ic, size, color, message),
         container(text(tip).size(12))
@@ -227,11 +309,11 @@ fn icon_tip<'a>(ic: Icon, size: f32, color: Color, message: Message, tip: String
     .into()
 }
 
-fn section_title(title: &str) -> El<'_> {
+pub(crate) fn section_title(title: &str) -> El<'_> {
     text(title).size(20).font(BOLD).into()
 }
 
-fn muted(content: impl text::IntoFragment<'static>) -> El<'static> {
+pub(crate) fn muted(content: impl text::IntoFragment<'static>) -> El<'static> {
     text(content).size(13).color(style::TEXT_DIM).into()
 }
 
@@ -245,7 +327,7 @@ fn scroll_page<'a>(content: impl Into<El<'a>>) -> El<'a> {
 }
 
 /// Liste défilante de la page centrale, avec défilement animé à la molette.
-fn page_scroll<'a>(content: impl Into<El<'a>>) -> El<'a> {
+pub(crate) fn page_scroll<'a>(content: impl Into<El<'a>>) -> El<'a> {
     smooth_scroll(content, PAGE_SCROLL)
 }
 
@@ -271,7 +353,7 @@ fn back_bar<'a>() -> El<'a> {
         .into()
 }
 
-fn with_back(content: El<'_>) -> El<'_> {
+pub(crate) fn with_back(content: El<'_>) -> El<'_> {
     column![
         container(back_bar()).padding(Padding::from([0, 20])),
         container(content).padding(Padding::from([0, 28])),
@@ -279,8 +361,61 @@ fn with_back(content: El<'_>) -> El<'_> {
     .into()
 }
 
-/// Ligne de morceau : clic = lecture ; boutons « lire ensuite » et « ajouter ».
-fn track_row<'a>(app: &App, track: &'a Track, number: Option<usize>, on_play: Message) -> El<'a> {
+/// Boutons d'une ligne de morceau, visibles au survol de la ligne (un titre
+/// liké garde son cœur). La place est toujours réservée : rien ne bouge.
+fn row_actions<'a>(app: &App, track: &'a Track, remove: Option<Message>) -> El<'a> {
+    let width = Length::Fixed(if remove.is_some() { 210.0 } else { 170.0 });
+    let hovered = app.hovered.as_deref() == Some(track.video_id.as_str());
+    if !hovered {
+        let liked: El<'a> = if app.lib.is_liked(&track.video_id) {
+            container(icon(Icon::HeartFilled, 16.0, app.accent))
+                .padding(7)
+                .into()
+        } else {
+            Space::new().into()
+        };
+        return container(liked).width(width).into();
+    }
+    let mut buttons = row![
+        account_buttons(app, track),
+        icon_tip(
+            Icon::PlayNext,
+            16.0,
+            style::TEXT_DIM,
+            Message::PlayNext(track.clone()),
+            "Lire ensuite".into()
+        ),
+        icon_tip(
+            Icon::Plus,
+            16.0,
+            style::TEXT_DIM,
+            Message::Enqueue(track.clone()),
+            "Ajouter à la file".into()
+        ),
+    ]
+    .spacing(2)
+    .align_y(Alignment::Center);
+    if let Some(message) = remove {
+        buttons = buttons.push(icon_tip(
+            Icon::Close,
+            14.0,
+            style::TEXT_FAINT,
+            message,
+            "Retirer de la playlist".into(),
+        ));
+    }
+    container(buttons).width(width).into()
+}
+
+/// Ligne de morceau : clic = lecture ; boutons like, playlist, « lire ensuite »,
+/// « ajouter à la file » et, dans une playlist, « retirer ».
+pub(crate) fn track_row<'a>(
+    app: &App,
+    track: &'a Track,
+    number: Option<usize>,
+    on_play: Message,
+    remove: Option<Message>,
+) -> El<'a> {
     let playing = app
         .state
         .current
@@ -312,20 +447,7 @@ fn track_row<'a>(app: &App, track: &'a Track, number: Option<usize>, on_play: Me
         text(fmt_opt(track.duration))
             .size(13)
             .color(style::TEXT_FAINT),
-        icon_tip(
-            Icon::PlayNext,
-            16.0,
-            style::TEXT_DIM,
-            Message::PlayNext(track.clone()),
-            "Lire ensuite".into()
-        ),
-        icon_tip(
-            Icon::Plus,
-            16.0,
-            style::TEXT_DIM,
-            Message::Enqueue(track.clone()),
-            "Ajouter à la file".into()
-        ),
+        row_actions(app, track, remove),
     ]
     .spacing(14)
     .align_y(Alignment::Center);
@@ -393,17 +515,17 @@ fn artist_card<'a>(app: &App, artist: &'a ArtistSummary) -> El<'a> {
     .into()
 }
 
-fn cards<'a>(items: Vec<El<'a>>) -> El<'a> {
+pub(crate) fn cards<'a>(items: Vec<El<'a>>) -> El<'a> {
     row(items).spacing(6).wrap().into()
 }
 
-fn loading<'a>(label: &'static str) -> El<'a> {
+pub(crate) fn loading<'a>(label: &'static str) -> El<'a> {
     container(muted(label))
         .padding(Padding::from([40, 0]))
         .into()
 }
 
-fn error_box(message: &str) -> El<'_> {
+pub(crate) fn error_box(message: &str) -> El<'_> {
     container(
         text(format!("Impossible de charger : {message}"))
             .size(14)
@@ -489,7 +611,7 @@ fn home(app: &App) -> El<'_> {
         }));
     }
     for e in upcoming {
-        list = list.push(track_row(app, &e.track, None, Message::JumpTo(e.id)));
+        list = list.push(track_row(app, &e.track, None, Message::JumpTo(e.id), None));
     }
 
     page_scroll(column![
@@ -558,6 +680,7 @@ fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
                 track,
                 None,
                 Message::Play(vec![track.clone()], 0),
+                None,
             ));
         }
         page = page.push(songs);
@@ -598,7 +721,7 @@ fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
     page.into()
 }
 
-fn page_header<'a>(
+pub(crate) fn page_header<'a>(
     app: &App,
     cover_id: Option<String>,
     radius: f32,
@@ -715,6 +838,7 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
             track,
             Some(i + 1),
             Message::Play(album.tracks.clone(), i),
+            None,
         ));
     }
     column![
@@ -762,6 +886,7 @@ fn artist_body<'a>(app: &'a App, artist: &'a Artist) -> El<'a> {
                 track,
                 None,
                 Message::Play(artist.songs.clone(), i),
+                None,
             ));
         }
         page = page.push(songs);
@@ -890,6 +1015,7 @@ fn player_bar(app: &App) -> El<'_> {
             row![
                 track_cover(app, track, 56.0),
                 column![title, text(&track.artist).size(13).color(style::TEXT_DIM)].spacing(3),
+                account_buttons(app, track),
             ]
             .spacing(12)
             .align_y(Alignment::Center)

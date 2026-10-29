@@ -217,6 +217,18 @@ impl YtDlpResolver {
         *lock(&self.worker) = Some(Arc::new(worker));
     }
 
+    /// Session YouTube du navigateur configuré, lue par le worker.
+    pub async fn browser_cookie(&self) -> Result<String, String> {
+        let browser = self
+            .cookies
+            .clone()
+            .ok_or("aucun navigateur configuré (player.cookies_from_browser)")?;
+        let worker = self
+            .live_worker()
+            .ok_or("le worker yt-dlp n'est pas prêt")?;
+        worker.browser_cookie(&browser).await
+    }
+
     fn live_worker(&self) -> Option<Arc<Worker>> {
         let mut slot = lock(&self.worker);
         if slot.as_ref().is_some_and(|w| !w.is_alive()) {

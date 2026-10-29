@@ -78,6 +78,14 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 - **Défilement** : iced fait sauter les listes de 60 px par cran de molette (pas d'animation) ; `smooth.rs` intercepte les crans (`WheelCatcher`) et anime la position via `window::frames()` (abonnement actif seulement pendant l'animation). Le pavé tactile (`ScrollDelta::Pixels`) n'est pas intercepté.
 - Tests visuels sous Windows : scripts PowerShell (capture via `DwmGetWindowAttribute` + `CopyFromScreen`, clics via `SetCursorPos`/`mouse_event`) **avec `SetProcessDPIAware()`**, sinon les coordonnées sont décalées de 125 %. Ne jamais simuler clavier/souris quand l'utilisateur se sert de l'appli.
 
+## Compte YouTube (`ytmr-catalog::account`, `ytmr-gui::library`)
+
+- Cookies de la session Firefox lus **par le worker** (`Worker::browser_cookie`, `yt_dlp.cookies.extract_cookies_from_browser`), gardés en mémoire seulement, passés à ytmapi-rs (`with_browser_token_cookie`). `Account` a un `Debug` manuel pour ne jamais logger le jeton. Sans worker (pas de Python, options yt-dlp personnalisées), pas de compte.
+- Identifiants de playlist : lecture = `VL<id>` (navigation), modifications = id nu. ytmr manipule l'id nu (`bare_id`, `browse_id`, `edit_id`). Titres likés : `LM`. Listes de podcasts `RDPN…` écartées.
+- ytmapi-rs 0.3.3 contourné en lisant le **JSON brut** : (1) pas de `setVideoId` dans ses morceaux (exigé pour retirer) → `playlistItemData.playlistSetVideoId` ; (2) son décodeur rejette une page entière si un morceau n'a pas de page artiste → décodeur tolérant `collect_tracks` ; (3) sa pagination ré-encode le jeton de continuation (`%3D` → `%253D`), donc s'arrête à la 1re page → requête maison `NextPage` (jeton décodé, `type=next`, une relance en cas d'échec). Mesuré : 1 188/1 188 titres et 908 likes (yt-dlp en voit 943, avec les indisponibles).
+- GUI : modifications optimistes (affichage immédiat, correction + toast si YouTube refuse). Boutons des lignes visibles au survol.
+- Pas encore : `/api/v1/like` (501) pour le CYD.
+
 ## Emplacements à l'exécution
 
 | | Linux | Windows |
@@ -96,6 +104,6 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 | 3 — API et jaquettes | validée sous Windows (curl, WebSocket, RGB565 décodée) |
 | 4 — GUI native iced | validée sous Windows (recherche, album, artiste, file, lecture) |
 | 5 — Firmware CYD | à faire |
-| 6 — Authentification et bibliothèque | à faire |
+| 6 — Authentification et bibliothèque (playlists, likes) | faite sous Windows (lecture vérifiée sur un vrai compte ; modifications à confirmer par l'utilisateur) |
 | 7 — Intégration OS | à faire |
 | 8 — Packaging | à faire |
