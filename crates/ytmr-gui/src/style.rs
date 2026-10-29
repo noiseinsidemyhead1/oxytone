@@ -158,14 +158,14 @@ pub fn hero(accent: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-/// Salutation de l'accueil : dégradé discret de la teinte, en biais, qui
-/// s'éteint vers le bas à droite (plus léger que l'en-tête d'une page).
+/// Salutation de l'accueil : dégradé discret de la teinte, du haut vers le
+/// bas, qui se fond dans le noir de la page (plus léger que l'en-tête d'une page).
 pub fn greeting(accent: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Gradient(Gradient::Linear(
-            gradient::Linear::new(std::f32::consts::PI * 0.82)
-                .add_stop(0.0, alpha(shade(accent, 0.24), 0.95))
-                .add_stop(0.55, alpha(shade(accent, 0.14), 0.45))
+            gradient::Linear::new(std::f32::consts::PI)
+                .add_stop(0.0, shade(accent, 0.20))
+                .add_stop(0.6, alpha(shade(accent, 0.12), 0.5))
                 .add_stop(1.0, alpha(BG, 0.0)),
         ))),
         ..container::Style::default()

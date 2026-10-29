@@ -1249,7 +1249,7 @@ pub(crate) fn is_fresh(path: &Path, ttl: Duration) -> bool {
         .is_some_and(|age| age < ttl)
 }
 
-fn read_playlist(dir: &Path, id: &str) -> Option<Playlist> {
+pub(crate) fn read_playlist(dir: &Path, id: &str) -> Option<Playlist> {
     let text = std::fs::read_to_string(playlist_file(dir, id)).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -1311,22 +1311,30 @@ pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
         .map(|n| format!("{n} titres"))
         .unwrap_or_else(|| "…".into());
     let accent = app.accent;
+    let hovered = app.card_hover.as_deref() == Some(LIKED_ID);
     let tile = button(
         column![
-            container(icon(Icon::HeartFilled, 54.0, Color::WHITE))
-                .center(Length::Fixed(164.0))
-                .style(move |_| iced::widget::container::Style {
-                    background: Some(iced::Background::Gradient(iced::Gradient::Linear(
-                        iced::gradient::Linear::new(std::f32::consts::FRAC_PI_4)
-                            .add_stop(0.0, style::shade(accent, 0.45))
-                            .add_stop(1.0, accent),
-                    ))),
-                    border: iced::Border {
-                        radius: 8.0.into(),
+            crate::views::cover_with_play(
+                app,
+                container(icon(Icon::HeartFilled, 54.0, Color::WHITE))
+                    .center(Length::Fixed(164.0))
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                            iced::gradient::Linear::new(std::f32::consts::FRAC_PI_4)
+                                .add_stop(0.0, style::shade(accent, 0.45))
+                                .add_stop(1.0, accent),
+                        ))),
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
                         ..Default::default()
-                    },
-                    ..Default::default()
-                }),
+                    })
+                    .into(),
+                164.0,
+                hovered,
+                Message::PlayItem(HomeKind::Playlist, LIKED_ID.to_owned()),
+            ),
             text("Titres likés")
                 .size(14)
                 .font(SEMIBOLD)
@@ -1341,6 +1349,9 @@ pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
     .padding(10)
     .style(style::card)
     .on_press(Message::Navigate(Route::Playlist(LIKED_ID.to_owned())));
+    let tile = mouse_area(tile)
+        .on_enter(Message::CardHover(LIKED_ID.to_owned()))
+        .on_exit(Message::CardUnhover(LIKED_ID.to_owned()));
     crate::views::drop_zone(
         tile.into(),
         crate::app::DropTarget::Playlist(LIKED_ID.to_owned()),
@@ -1354,9 +1365,16 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
         .filter(|s| !s.trim().is_empty() && s.trim() != "•")
         .collect::<Vec<_>>()
         .join(" · ");
+    let hovered = app.card_hover.as_deref() == Some(p.id.as_str());
     let card = button(
         column![
-            cover(app.cover(id.as_deref(), CARD), 164.0, 8.0),
+            crate::views::cover_with_play(
+                app,
+                cover(app.cover(id.as_deref(), CARD), 164.0, 8.0),
+                164.0,
+                hovered,
+                Message::PlayItem(HomeKind::Playlist, p.id.clone()),
+            ),
             text(&p.title)
                 .size(14)
                 .font(SEMIBOLD)
@@ -1375,6 +1393,8 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
         .on_right_press(crate::context::open(crate::context::Target::Playlist(
             p.clone(),
         )))
+        .on_enter(Message::CardHover(p.id.clone()))
+        .on_exit(Message::CardUnhover(p.id.clone()))
         .into();
     // On peut y déposer des morceaux (playlists du compte seulement).
     if app.playlist_is_mine(p) {
@@ -1791,11 +1811,25 @@ fn home_open(item: &HomeItem, shelf: usize, index: usize) -> Message {
 fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> El<'a> {
     let id = app.url_cover(item.thumbnail_url.as_deref());
     let artist = item.kind == HomeKind::Artist;
+    let hovered = match &item.track {
+        Some(track) => app.hovered.as_deref() == Some(track.video_id.as_str()),
+        None => app.card_hover.as_deref() == Some(item.id.as_str()),
+    };
+    let play = match item.kind {
+        HomeKind::Song => home_open(item, shelf, index),
+        kind => Message::PlayItem(kind, item.id.clone()),
+    };
     let body = column![
-        cover(
-            app.cover(id.as_deref(), CARD),
+        crate::views::cover_with_play(
+            app,
+            cover(
+                app.cover(id.as_deref(), CARD),
+                150.0,
+                if artist { 75.0 } else { 8.0 }
+            ),
             150.0,
-            if artist { 75.0 } else { 8.0 }
+            hovered,
+            play,
         ),
         text(crate::views::ellipsize(&item.title, 19))
             .size(14)
@@ -1811,16 +1845,13 @@ fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
     .clip(true);
     match &item.track {
         // Morceau : double-clic pour le lancer (un clic simple ne lance rien).
-        Some(track) => {
-            let hovered = app.hovered.as_deref() == Some(track.video_id.as_str());
-            mouse_area(container(body).padding(8).style(style::card_box(hovered)))
-                .on_double_click(home_open(item, shelf, index))
-                .on_right_press(crate::context::open(home_target(item)))
-                .on_enter(Message::Hover(track.video_id.clone()))
-                .on_exit(Message::Unhover(track.video_id.clone()))
-                .interaction(iced::mouse::Interaction::Pointer)
-                .into()
-        }
+        Some(track) => mouse_area(container(body).padding(8).style(style::card_box(hovered)))
+            .on_double_click(home_open(item, shelf, index))
+            .on_right_press(crate::context::open(home_target(item)))
+            .on_enter(Message::Hover(track.video_id.clone()))
+            .on_exit(Message::Unhover(track.video_id.clone()))
+            .interaction(iced::mouse::Interaction::Pointer)
+            .into(),
         None => mouse_area(
             button(body)
                 .padding(8)
@@ -1828,6 +1859,8 @@ fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
                 .on_press(home_open(item, shelf, index)),
         )
         .on_right_press(crate::context::open(home_target(item)))
+        .on_enter(Message::CardHover(item.id.clone()))
+        .on_exit(Message::CardUnhover(item.id.clone()))
         .into(),
     }
 }
@@ -1904,7 +1937,22 @@ fn grid_tile<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
     } else {
         6.0
     };
-    button(
+    let key = format!("grille:{}", item.id);
+    let hovered = app.card_hover.as_deref() == Some(key.as_str());
+    let play: El<'a> = if hovered {
+        container(crate::views::play_bubble(
+            app,
+            match item.kind {
+                HomeKind::Song => home_open(item, shelf, index),
+                kind => Message::PlayItem(kind, item.id.clone()),
+            },
+        ))
+        .padding(Padding::from([0, 8]))
+        .into()
+    } else {
+        Space::new().into()
+    };
+    let tile = button(
         row![
             // Taille « carte » : c'est celle que l'accueil demande pour toutes ses
             // pochettes (en vignette, rien ne la demandait : cases vides).
@@ -1917,6 +1965,7 @@ fn grid_tile<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
             )
             .width(Length::Fill)
             .clip(true),
+            play,
         ]
         .spacing(12)
         .align_y(Alignment::Center),
@@ -1924,13 +1973,16 @@ fn grid_tile<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
     .width(Length::Fill)
     .padding(Padding {
         top: 0.0,
-        right: 12.0,
+        right: 4.0,
         bottom: 0.0,
         left: 0.0,
     })
     .style(style::grid_tile(app.accent))
-    .on_press(home_open(item, shelf, index))
-    .into()
+    .on_press(home_open(item, shelf, index));
+    mouse_area(tile)
+        .on_enter(Message::CardHover(key.clone()))
+        .on_exit(Message::CardUnhover(key))
+        .into()
 }
 
 fn home_grid<'a>(app: &App, shelf: usize, items: &'a [HomeItem]) -> El<'a> {

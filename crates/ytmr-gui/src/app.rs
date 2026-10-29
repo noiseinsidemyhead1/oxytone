@@ -206,6 +206,12 @@ pub enum Message {
     DropLeave(DropTarget),
     /// Fenêtre d'aide des raccourcis (touche ?).
     ToggleHelp,
+    /// Survol d'une carte de l'accueil (bouton lecture).
+    CardHover(String),
+    CardUnhover(String),
+    /// Bouton lecture d'une carte : album, playlist ou artiste à charger puis lire.
+    PlayItem(ytmr_catalog::home::HomeKind, String),
+    PlayFetched(Result<Vec<Track>, String>),
     /// Double-clic sur une ligne de la file.
     JumpTo(QueueId),
     /// La souris quitte une ligne de la file.
@@ -414,6 +420,8 @@ pub struct App {
     pub track_drag: Option<TrackDrag>,
     pub drop_target: Option<DropTarget>,
     pub show_help: bool,
+    /// Carte de l'accueil survolée.
+    pub card_hover: Option<String>,
     /// Morceau sélectionné dans la file (par identifiant : il suit le morceau).
     pub queue_selected: Option<QueueId>,
     /// Aléatoire demandé : la prochaine file reçue apparaîtra en fondu.
@@ -555,6 +563,7 @@ impl App {
             track_drag: None,
             drop_target: None,
             show_help: false,
+            card_hover: None,
             queue_selected: None,
             shuffle_pending: false,
             queue_fade: None,
@@ -1695,6 +1704,24 @@ impl App {
                 self.show_help = !self.show_help;
                 Task::none()
             }
+            Message::CardHover(key) => {
+                self.card_hover = Some(key);
+                Task::none()
+            }
+            Message::CardUnhover(key) => {
+                if self.card_hover.as_ref() == Some(&key) {
+                    self.card_hover = None;
+                }
+                Task::none()
+            }
+            Message::PlayItem(kind, id) => self.play_item(kind, id),
+            Message::PlayFetched(result) => match result {
+                Ok(tracks) if !tracks.is_empty() => {
+                    self.send(Command::PlayTracks { tracks, start: 0 })
+                }
+                Ok(_) => self.show_toast("Rien à lire ici".into()),
+                Err(e) => self.show_toast(format!("Lecture impossible : {e}")),
+            },
             Message::QueueUnhover(row) => {
                 // Seulement si c'est bien la ligne survolée : en remontant, la
                 // nouvelle ligne est survolée avant que l'ancienne soit quittée.
@@ -2119,16 +2146,28 @@ impl App {
             self.modifiers = modifiers;
             return Task::none();
         }
-        let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
+        let keyboard::Event::KeyPressed {
+            key,
+            modified_key,
+            modifiers,
+            ..
+        } = event
+        else {
             return Task::none();
         };
+        // `key` est la touche *sans* Maj : en AZERTY, « / » et « ? » se tapent
+        // avec Maj (« : » et « , » sans elle). Ces deux-là se lisent sur la
+        // touche modifiée.
+        match modified_key.as_ref() {
+            Key::Character("?") => return self.update(Message::ToggleHelp),
+            Key::Character("/") => return operation::focus(SEARCH_INPUT),
+            _ => {}
+        }
         match key.as_ref() {
             Key::Named(key::Named::Escape) if self.show_help => {
                 self.show_help = false;
                 Task::none()
             }
-            Key::Character("?") => self.update(Message::ToggleHelp),
-            Key::Character("/") => operation::focus(SEARCH_INPUT),
             Key::Character("l" | "L") if !modifiers.control() => self.like_shortcut(),
             Key::Character("m" | "M") if !modifiers.control() => self.update(Message::ToggleMute),
             Key::Named(key::Named::ArrowUp) => {
@@ -2313,6 +2352,60 @@ impl App {
                     None => Task::none(),
                 }
             }
+        }
+    }
+
+    /// Bouton lecture d'une carte : la liste est chargée (cache s'il y en a un)
+    /// puis lue depuis le début.
+    fn play_item(&mut self, kind: ytmr_catalog::home::HomeKind, id: String) -> Task<Message> {
+        use ytmr_catalog::home::HomeKind;
+        let done = |r: Result<Vec<Track>, ytmr_catalog::CatalogError>| {
+            Message::PlayFetched(r.map_err(|e| e.to_string()))
+        };
+        match kind {
+            HomeKind::Album => {
+                let Some(catalog) = self.catalog() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { catalog.album(&id).await.map(|a| a.tracks) },
+                    done,
+                )
+            }
+            HomeKind::Artist => {
+                let Some(catalog) = self.catalog() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { catalog.artist(&id).await.map(|a| a.songs) },
+                    done,
+                )
+            }
+            HomeKind::Playlist => {
+                // Déjà ouverte ou en cache : tout de suite.
+                if let Some((open, Load::Ready(p))) = &self.lib.playlist
+                    && *open == id
+                {
+                    let tracks = p.tracks.clone();
+                    return self.update(Message::PlayFetched(Ok(tracks)));
+                }
+                if let Some(p) = self
+                    .lib
+                    .cache_dir
+                    .as_deref()
+                    .and_then(|dir| crate::library::read_playlist(dir, &id))
+                {
+                    return self.update(Message::PlayFetched(Ok(p.tracks)));
+                }
+                let Some(account) = self.lib.ready() else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move { account.playlist(&id).await.map(|p| p.tracks) },
+                    done,
+                )
+            }
+            HomeKind::Song => Task::none(),
         }
     }
 

@@ -303,6 +303,11 @@ impl Queue {
     /// L'historique ne bouge pas.
     pub fn set_shuffle(&mut self, on: bool) {
         self.shuffle = on;
+        // File terminée (plus de morceau en cours) : rien à reconstruire. Sinon
+        // toute la liste d'origine revenait, morceau qu'on venait d'écouter compris.
+        if self.current.is_none() {
+            return;
+        }
         self.rebuild_upcoming();
         self.top_up();
     }
@@ -567,6 +572,29 @@ mod tests {
         q.clear_upcoming();
         q.set_shuffle(true);
         assert_eq!(visible(&q), ["1"]);
+    }
+
+    #[test]
+    fn toggling_shuffle_on_a_lone_track_never_duplicates_it() {
+        // File réduite au morceau en cours (réajouté une fois : il est deux fois
+        // dans le contexte), aléatoire activé puis coupé.
+        let mut q = queue();
+        q.replace(tracks(0..1), 0);
+        q.append(tracks(0..1));
+        q.advance_auto();
+        q.set_shuffle(true);
+        assert_eq!(visible(&q), ["0"]);
+        q.set_shuffle(false);
+        assert_eq!(
+            visible(&q),
+            ["0"],
+            "le morceau ne revient pas derrière lui-même"
+        );
+        // Sans morceau en cours, rien n'est reconstruit.
+        let mut empty = queue();
+        empty.set_shuffle(true);
+        empty.set_shuffle(false);
+        assert!(empty.visible().is_empty());
     }
 
     #[test]

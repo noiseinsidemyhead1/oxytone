@@ -16,9 +16,11 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
+use windows::Win32::UI::Shell::{ITaskbarList2, TaskbarList};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowPlacement, HWND_TOP, SWP_FRAMECHANGED, SWP_NOOWNERZORDER, SetWindowPlacement,
-    SetWindowPos, WINDOWPLACEMENT,
+    GetWindowPlacement, HWND_TOP, IsZoomed, SW_SHOWNORMAL, SWP_FRAMECHANGED, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT,
 };
 
 /// Place de la fenêtre avant le plein écran (taille, position, agrandie ou non).
@@ -55,8 +57,17 @@ fn enter(window: HWND) -> windows::core::Result<()> {
     {
         *saved = Some(placement);
     }
-    let r = info.rcMonitor;
     unsafe {
+        // Une fenêtre agrandie reste bornée à la zone de travail (sans la
+        // barre des tâches) : on la repasse d'abord en taille normale.
+        if IsZoomed(window).as_bool() {
+            let normal = WINDOWPLACEMENT {
+                showCmd: SW_SHOWNORMAL.0 as u32,
+                ..placement
+            };
+            SetWindowPlacement(window, &normal)?;
+        }
+        let r = info.rcMonitor;
         SetWindowPos(
             window,
             Some(HWND_TOP),
@@ -65,7 +76,24 @@ fn enter(window: HWND) -> windows::core::Result<()> {
             r.right - r.left,
             r.bottom - r.top,
             SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+        )?;
+    }
+    mark_fullscreen(window, true);
+    Ok(())
+}
+
+/// Dit à la barre des tâches de s'effacer devant la fenêtre (ou de revenir).
+fn mark_fullscreen(window: HWND, on: bool) {
+    let result = unsafe {
+        CoCreateInstance::<_, ITaskbarList2>(&TaskbarList, None, CLSCTX_INPROC_SERVER).and_then(
+            |list| {
+                list.HrInit()?;
+                list.MarkFullscreenWindow(window, on)
+            },
         )
+    };
+    if let Err(e) = result {
+        tracing::debug!(error = %e, "barre des tâches en plein écran");
     }
 }
 
@@ -74,6 +102,7 @@ fn leave(window: HWND) -> windows::core::Result<()> {
     let Some(placement) = saved else {
         return Ok(());
     };
+    mark_fullscreen(window, false);
     unsafe {
         SetWindowPlacement(window, &placement)?;
         SetWindowPos(
@@ -83,11 +112,7 @@ fn leave(window: HWND) -> windows::core::Result<()> {
             0,
             0,
             0,
-            windows::Win32::UI::WindowsAndMessaging::SWP_NOMOVE
-                | windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
-                | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
-                | SWP_NOOWNERZORDER
-                | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
         )
     }
 }

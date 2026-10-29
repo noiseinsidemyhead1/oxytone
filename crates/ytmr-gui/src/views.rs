@@ -463,6 +463,41 @@ fn title_chars(app: &App) -> usize {
     ((app.center_width() - 340.0) / 22.0).max(10.0) as usize
 }
 
+/// Bouton lecture rond posé sur une pochette au survol (accueil).
+pub(crate) fn play_bubble<'a>(app: &App, message: Message) -> El<'a> {
+    button(container(icon(Icon::Play, 16.0, style::BG)).center(Length::Fixed(40.0)))
+        .padding(0)
+        .style(style::primary_round(app.accent))
+        .on_press(message)
+        .into()
+}
+
+/// Pochette avec, au survol, le bouton lecture en bas à droite. La couche est
+/// toujours là (vide au repos) : la structure ne change pas au survol.
+pub(crate) fn cover_with_play<'a>(
+    app: &App,
+    art: El<'a>,
+    side: f32,
+    hovered: bool,
+    play: Message,
+) -> El<'a> {
+    let bubble: El<'a> = if hovered {
+        play_bubble(app, play)
+    } else {
+        Space::new().into()
+    };
+    stack![
+        art,
+        container(bubble)
+            .width(Length::Fixed(side))
+            .height(Length::Fixed(side))
+            .align_x(Alignment::End)
+            .align_y(Alignment::End)
+            .padding(8),
+    ]
+    .into()
+}
+
 /// Morceaux affichés dans les résultats de recherche.
 pub(crate) const SEARCH_SONGS: usize = 10;
 
@@ -980,7 +1015,7 @@ fn lyrics_side(app: &App) -> El<'_> {
     let body: El<'_> = match (current, lyrics) {
         (None, _) => message("Rien en lecture."),
         (Some(e), None) => match app.lyrics.get(&e.track.video_id) {
-            None | Some(Load::Loading) => message("Recherche des paroles…"),
+            None | Some(Load::Loading) => message("Chargement…"),
             _ => message("Paroles indisponibles pour ce titre."),
         },
         (Some(_), Some(lyrics)) => match &lyrics.body {

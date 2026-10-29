@@ -140,6 +140,9 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 - **Pochettes stables** : l'identifiant d'une vignette `i.ytimg.com` ignore ses paramètres signés (`?sqp=…&rs=…`, différents à chaque réponse pour la même image) ; avant, toute une playlist se rechargeait à chaque mise à jour. `finish_playlist` garde l'ancienne adresse de l'en-tête si c'est la même image.
 - **Artistes sans photo d'en-tête** : `get_artist` de ytmapi-rs échoue (« Key /header/musicImmersiveHeaderRenderer/thumbnail/… not found ») → `Catalog::artist_raw` relit la page en JSON brut (`raw::artist_page`).
 - **Aléatoire sur une file vide** : le morceau en cours n'est jamais remis dans sa propre suite (il peut figurer deux fois dans le contexte), `Queue::order_after`.
+- **Raccourcis-caractères** : dans iced 0.14, `KeyPressed::key` est la touche *sans* Maj ; en AZERTY, « / » et « ? » ne se lisent que sur `modified_key`.
+- **Plein écran Windows** : une fenêtre agrandie est d'abord repassée en taille normale (sinon bornée à la zone de travail), puis étendue sur `rcMonitor` et déclarée à la barre des tâches (`ITaskbarList2::MarkFullscreenWindow`).
+- **Accueil** : bouton lecture rond au survol des cartes (`views::cover_with_play`, `card_hover`) ; album / artiste / playlist chargés puis lus (`Message::PlayItem`, playlist depuis le cache si possible).
 - Pas encore : `/api/v1/like` (501) pour le CYD.
 
 ## Emplacements à l'exécution
