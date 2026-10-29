@@ -8,6 +8,8 @@
 //! la GUI et l'API, ce module ne fait qu'envoyer des commandes au moteur et
 //! afficher son état.
 
+#[cfg(windows)]
+pub mod fullscreen;
 mod notify;
 #[cfg(windows)]
 pub mod taskbar;

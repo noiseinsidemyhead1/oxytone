@@ -158,6 +158,20 @@ pub fn hero(accent: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
+/// Salutation de l'accueil : dégradé discret de la teinte, en biais, qui
+/// s'éteint vers le bas à droite (plus léger que l'en-tête d'une page).
+pub fn greeting(accent: Color) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
+        background: Some(Background::Gradient(Gradient::Linear(
+            gradient::Linear::new(std::f32::consts::PI * 0.82)
+                .add_stop(0.0, alpha(shade(accent, 0.24), 0.95))
+                .add_stop(0.55, alpha(shade(accent, 0.14), 0.45))
+                .add_stop(1.0, alpha(BG, 0.0)),
+        ))),
+        ..container::Style::default()
+    }
+}
+
 /// Cadre arrondi comme l'image qu'il entoure (rond pour un artiste).
 pub fn cover_frame_round(radius: f32) -> impl Fn(&Theme) -> container::Style {
     move |theme| {

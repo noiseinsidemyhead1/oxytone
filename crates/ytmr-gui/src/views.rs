@@ -728,12 +728,28 @@ fn home(app: &App) -> El<'_> {
     ]
     .spacing(8);
     match library::home_sections(app) {
-        Some(sections) => page_scroll(column![greeting, sections].spacing(28).padding(Padding {
-            top: 40.0,
-            right: 28.0,
-            bottom: 32.0,
-            left: 28.0,
-        })),
+        Some(sections) => {
+            // Léger dégradé de la teinte du morceau derrière la salutation,
+            // qui se fond dans le noir de la page.
+            let header = container(greeting)
+                .width(Length::Fill)
+                .padding(Padding {
+                    top: 40.0,
+                    right: 28.0,
+                    bottom: 36.0,
+                    left: 28.0,
+                })
+                .style(style::greeting(app.accent));
+            page_scroll(column![
+                header,
+                container(sections).padding(Padding {
+                    top: 0.0,
+                    right: 28.0,
+                    bottom: 32.0,
+                    left: 28.0,
+                }),
+            ])
+        }
         None => container(
             column![
                 text("Que veux-tu écouter ?").size(34).font(BOLD),

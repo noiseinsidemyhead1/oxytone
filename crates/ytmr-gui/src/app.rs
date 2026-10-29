@@ -1430,12 +1430,29 @@ impl App {
             },
             Message::ToggleFullscreen => {
                 self.fullscreen = !self.fullscreen;
-                let mode = if self.fullscreen {
-                    window::Mode::Fullscreen
-                } else {
-                    window::Mode::Windowed
-                };
-                window::oldest().and_then(move |id| window::set_mode(id, mode))
+                let on = self.fullscreen;
+                // Windows : plein écran fait main (voir `ytmr_os::fullscreen`) ;
+                // celui de winit ramenait un vieux cadre système à la sortie.
+                #[cfg(windows)]
+                {
+                    window::oldest().and_then(move |id| {
+                        window::run(id, move |w| {
+                            if let Some(hwnd) = window_hwnd(w) {
+                                ytmr_os::fullscreen::set(hwnd, on);
+                            }
+                        })
+                        .discard()
+                    })
+                }
+                #[cfg(not(windows))]
+                {
+                    let mode = if on {
+                        window::Mode::Fullscreen
+                    } else {
+                        window::Mode::Windowed
+                    };
+                    window::oldest().and_then(move |id| window::set_mode(id, mode))
+                }
             }
             Message::OpenArtist(id, name) => match id {
                 Some(id) => self.navigate(Route::Artist(id)),
@@ -2068,15 +2085,18 @@ impl App {
 
 /// HWND sous Windows (exigé par l'overlay média) ; rien ailleurs.
 fn native_handle(window: &dyn window::Window) -> Option<usize> {
+    let hwnd = window_hwnd(window)?;
+    // Sur le fil de la fenêtre : boutons du mini-lecteur de la barre des tâches.
+    #[cfg(windows)]
+    ytmr_os::taskbar::install(hwnd);
+    Some(hwnd)
+}
+
+/// HWND de la fenêtre (Windows), sans rien installer.
+fn window_hwnd(window: &dyn window::Window) -> Option<usize> {
     use raw_window_handle::RawWindowHandle;
     match window.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(h) => {
-            let hwnd = h.hwnd.get() as usize;
-            // Sur le fil de la fenêtre : boutons du mini-lecteur de la barre des tâches.
-            #[cfg(windows)]
-            ytmr_os::taskbar::install(hwnd);
-            Some(hwnd)
-        }
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as usize),
         _ => None,
     }
 }
