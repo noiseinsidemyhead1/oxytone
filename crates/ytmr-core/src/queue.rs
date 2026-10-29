@@ -176,6 +176,13 @@ impl Queue {
             Some(f) => (f + 1..len).chain(0..f.min(len)).collect(),
             None => (0..len).collect(),
         };
+        // Jamais le morceau en cours dans sa propre suite : il peut figurer deux
+        // fois dans le contexte (ajouté de nouveau, radio) ou ne pas y avoir de
+        // place connue ; il revenait alors en tête d'une file vide passée en
+        // aléatoire.
+        if let Some(current) = self.current().map(|e| e.track.video_id.clone()) {
+            order.retain(|&o| self.context[o].video_id != current);
+        }
         if self.shuffle {
             self.rng.shuffle(&mut order);
         }
@@ -538,6 +545,28 @@ mod tests {
     fn current(q: &Queue) -> Option<String> {
         q.current()
             .map(|e| e.track.title.trim_start_matches("titre ").to_owned())
+    }
+
+    #[test]
+    fn shuffle_on_empty_queue_never_requeues_the_current_track() {
+        // Le morceau en cours figure deux fois dans le contexte (réajouté).
+        let mut q = queue();
+        q.replace(tracks(0..1), 0);
+        q.append(tracks(0..1));
+        q.advance_auto();
+        assert_eq!(visible(&q), ["0"]);
+        q.set_shuffle(true);
+        assert_eq!(
+            visible(&q),
+            ["0"],
+            "rien ne revient derrière le morceau en cours"
+        );
+        // Suite vidée puis aléatoire : toujours rien.
+        let mut q = queue();
+        q.replace(tracks(0..3), 1);
+        q.clear_upcoming();
+        q.set_shuffle(true);
+        assert_eq!(visible(&q), ["1"]);
     }
 
     #[test]

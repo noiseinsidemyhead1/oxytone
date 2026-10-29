@@ -60,9 +60,13 @@ pub enum AccountView {
 /// Fenêtres par-dessus la page.
 #[derive(Debug, Clone)]
 pub enum Overlay {
-    AddTo(Track),
+    /// Ajout d'un ou plusieurs morceaux à une playlist.
+    AddTo(Vec<Track>),
     NewPlaylist,
-    ConfirmDelete { id: String, title: String },
+    ConfirmDelete {
+        id: String,
+        title: String,
+    },
 }
 
 #[derive(Default)]
@@ -141,10 +145,14 @@ pub enum Lib {
     PlaylistStreamEnded(u64, Result<(), String>),
     ToggleLike(Track),
     LikeDone(Track, bool, Result<(), String>),
-    OpenAddTo(Track),
+    OpenAddTo(Vec<Track>),
     OpenNew,
     CloseOverlay,
-    AddTo(String, Track),
+    AddTo(String, Vec<Track>),
+    /// Playlist choisie dans la fenêtre d'ajout (les morceaux sont dans la fenêtre).
+    AddToPicked(String),
+    /// Retrait de plusieurs morceaux d'une playlist.
+    RemoveTracks(String, Vec<String>),
     Added(String, Result<(), String>),
     NewNameInput(String),
     Create,
@@ -502,11 +510,20 @@ impl App {
         if let Some((cur, shown)) = &self.lib.playlist
             && *cur == fresh.id
         {
-            // YouTube ne rend pas toujours la pochette dans la page : on garde l'ancienne.
-            if fresh.thumbnail_url.is_none()
-                && let Load::Ready(old) = shown
-            {
-                fresh.thumbnail_url = old.thumbnail_url.clone();
+            // YouTube ne rend pas toujours la pochette dans la page, et en change
+            // parfois seulement les paramètres (même image) : on garde alors
+            // l'ancienne adresse, rien n'est rechargé ni ne clignote.
+            if let Load::Ready(old) = shown {
+                let same_image = match (&fresh.thumbnail_url, &old.thumbnail_url) {
+                    (None, _) => true,
+                    (Some(new), Some(old)) => {
+                        ytmr_media::normalize_url(new) == ytmr_media::normalize_url(old)
+                    }
+                    (Some(_), None) => false,
+                };
+                if same_image {
+                    fresh.thumbnail_url = old.thumbnail_url.clone();
+                }
             }
             // L'adresse a pu changer : la nouvelle pochette doit être demandée,
             // sinon l'en-tête reste vide à la fin de la mise à jour.
@@ -815,9 +832,9 @@ impl App {
                     self.show_toast(format!("Like refusé : {e}"))
                 }
             },
-            Lib::OpenAddTo(track) => {
+            Lib::OpenAddTo(tracks) => {
                 self.lib.new_name.clear();
-                self.lib.overlay = Some(Overlay::AddTo(track));
+                self.lib.overlay = Some(Overlay::AddTo(tracks));
                 let load = if self.lib.playlists.is_none() {
                     self.load_playlists()
                 } else {
@@ -847,19 +864,50 @@ impl App {
                 self.lib.overlay = None;
                 Task::none()
             }
-            Lib::AddTo(playlist_id, track) => {
+            Lib::AddToPicked(playlist_id) => match self.lib.overlay.take() {
+                Some(Overlay::AddTo(tracks)) => {
+                    self.update_library(Lib::AddTo(playlist_id, tracks))
+                }
+                other => {
+                    self.lib.overlay = other;
+                    Task::none()
+                }
+            },
+            Lib::AddTo(playlist_id, tracks) => {
                 self.lib.overlay = None;
+                if tracks.is_empty() {
+                    return Task::none();
+                }
+                // Titres likés : « ajouter » = liker ceux qui ne le sont pas encore.
+                if playlist_id == LIKED_ID {
+                    let fresh: Vec<Track> = tracks
+                        .into_iter()
+                        .filter(|t| !self.lib.is_liked(&t.video_id))
+                        .collect();
+                    let count = fresh.len();
+                    let mut tasks: Vec<Task<Message>> = fresh
+                        .into_iter()
+                        .map(|t| self.update_library(Lib::ToggleLike(t)))
+                        .collect();
+                    tasks.push(self.show_toast(format!("{count} titre(s) liké(s)")));
+                    return Task::batch(tasks);
+                }
                 let title = self.lib.playlist_title(&playlist_id);
-                let toast = self.show_toast(format!("« {} » ajouté à « {title} »", track.title));
-                let video_id = track.video_id.clone();
+                let what = match tracks.as_slice() {
+                    [one] => format!("« {} »", one.title),
+                    many => format!("{} titres", many.len()),
+                };
+                let toast = self.show_toast(format!("{what} ajouté(s) à « {title} »"));
+                let video_ids: Vec<String> = tracks.iter().map(|t| t.video_id.clone()).collect();
                 let target = playlist_id.clone();
                 // Affiché tout de suite : playlist ouverte, cache et compteur.
-                self.edit_cached(&playlist_id, |p| p.tracks.push(track.clone()));
-                self.bump_count(&playlist_id, 1);
+                let count = tracks.len() as i64;
+                self.edit_cached(&playlist_id, |p| p.tracks.extend(tracks.iter().cloned()));
+                self.bump_count(&playlist_id, count);
                 let op = self
                     .lib
                     .ready()
-                    .map(|a| async move { a.add_tracks(&target, &[video_id]).await });
+                    .map(|a| async move { a.add_tracks(&target, &video_ids).await });
                 Task::batch([toast, call(op, move |r| Lib::Added(playlist_id.clone(), r))])
             }
             Lib::Added(playlist_id, result) => match result {
@@ -879,7 +927,9 @@ impl App {
                     return Task::none();
                 }
                 let with: Vec<String> = match &self.lib.overlay {
-                    Some(Overlay::AddTo(track)) => vec![track.video_id.clone()],
+                    Some(Overlay::AddTo(tracks)) => {
+                        tracks.iter().map(|t| t.video_id.clone()).collect()
+                    }
                     _ => Vec::new(),
                 };
                 self.lib.overlay = None;
@@ -1006,18 +1056,22 @@ impl App {
                 ]),
             },
             Lib::RemoveTrack(playlist_id, video_id) => {
+                self.update_library(Lib::RemoveTracks(playlist_id, vec![video_id]))
+            }
+            Lib::RemoveTracks(playlist_id, video_ids) => {
                 let mut removed = 0;
                 self.edit_cached(&playlist_id, |p| {
                     let before = p.tracks.len();
-                    p.tracks.retain(|t| t.video_id != video_id);
+                    p.tracks.retain(|t| !video_ids.contains(&t.video_id));
                     removed = before - p.tracks.len();
                 });
                 self.bump_count(&playlist_id, -(removed as i64));
+                self.selected.retain(|v| !video_ids.contains(v));
                 let target = playlist_id.clone();
                 let op = self
                     .lib
                     .ready()
-                    .map(|a| async move { a.remove_track(&target, &video_id).await });
+                    .map(|a| async move { a.remove_tracks(&target, &video_ids).await });
                 call(op, move |r| Lib::Removed(playlist_id.clone(), r))
             }
             Lib::Removed(playlist_id, result) => match result {
@@ -1257,7 +1311,7 @@ pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
         .map(|n| format!("{n} titres"))
         .unwrap_or_else(|| "…".into());
     let accent = app.accent;
-    button(
+    let tile = button(
         column![
             container(icon(Icon::HeartFilled, 54.0, Color::WHITE))
                 .center(Length::Fixed(164.0))
@@ -1286,8 +1340,11 @@ pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
     )
     .padding(10)
     .style(style::card)
-    .on_press(Message::Navigate(Route::Playlist(LIKED_ID.to_owned())))
-    .into()
+    .on_press(Message::Navigate(Route::Playlist(LIKED_ID.to_owned())));
+    crate::views::drop_zone(
+        tile.into(),
+        crate::app::DropTarget::Playlist(LIKED_ID.to_owned()),
+    )
 }
 
 fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
@@ -1314,11 +1371,17 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
     .padding(10)
     .style(style::card)
     .on_press(Message::Navigate(Route::Playlist(p.id.clone())));
-    mouse_area(card)
+    let card: El<'a> = mouse_area(card)
         .on_right_press(crate::context::open(crate::context::Target::Playlist(
             p.clone(),
         )))
-        .into()
+        .into();
+    // On peut y déposer des morceaux (playlists du compte seulement).
+    if app.playlist_is_mine(p) {
+        crate::views::drop_zone(card, crate::app::DropTarget::Playlist(p.id.clone()))
+    } else {
+        card
+    }
 }
 
 pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
@@ -1520,7 +1583,7 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             } else {
                 None
             };
-            track_row(app, track, None, Message::Lib(Lib::PlayAt(i)), remove)
+            track_row(app, track, i, None, Message::Lib(Lib::PlayAt(i)), remove)
         })
     };
     column![
@@ -1560,7 +1623,7 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
 /// Fenêtre par-dessus la page (ajout à une playlist, confirmation).
 pub fn overlay(app: &App) -> Option<El<'_>> {
     let panel: El<'_> = match app.lib.overlay.as_ref()? {
-        Overlay::AddTo(track) => add_to_panel(app, Some(track)),
+        Overlay::AddTo(tracks) => add_to_panel(app, Some(tracks)),
         Overlay::NewPlaylist => add_to_panel(app, None),
         Overlay::ConfirmDelete { title, .. } => confirm_panel(title),
     };
@@ -1590,10 +1653,11 @@ pub fn overlay(app: &App) -> Option<El<'_>> {
     Some(iced::widget::opaque(iced::widget::stack![dim, centered]))
 }
 
-fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
-    let title = match track {
+fn add_to_panel<'a>(app: &'a App, tracks: Option<&'a [Track]>) -> El<'a> {
+    let title = match tracks {
         None => "Nouvelle playlist".to_owned(),
-        Some(track) => format!("Ajouter « {} » à…", track.title),
+        Some([one]) => format!("Ajouter « {} » à…", one.title),
+        Some(many) => format!("Ajouter {} titres à…", many.len()),
     };
     let new_row = row![
         text_input("Nom de la nouvelle playlist", &app.lib.new_name)
@@ -1614,7 +1678,7 @@ fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
     .align_y(Alignment::Center);
 
     let mut content = column![text(title).size(17).font(BOLD), new_row].spacing(14);
-    if let Some(track) = track {
+    if tracks.is_some() {
         let mut list = column![].spacing(2);
         match &app.lib.playlists {
             Some(Load::Ready(playlists)) => {
@@ -1646,7 +1710,8 @@ fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
                         .width(Length::Fill)
                         .padding(Padding::from([5, 8]))
                         .style(style::row(false, app.accent))
-                        .on_press(Message::Lib(Lib::AddTo(p.id.clone(), track.clone()))),
+                        // Seul l'identifiant voyage : les morceaux restent dans la fenêtre.
+                        .on_press(Message::Lib(Lib::AddToPicked(p.id.clone()))),
                     );
                 }
             }
@@ -1818,7 +1883,7 @@ pub fn history_page(app: &App) -> El<'_> {
                 Some(Load::Failed(e)) => error_box(e),
                 Some(Load::Ready(tracks)) if tracks.is_empty() => muted("Rien écouté récemment."),
                 Some(Load::Ready(tracks)) => column(tracks.iter().enumerate().map(|(i, t)| {
-                    track_row(app, t, None, Message::Lib(Lib::PlayHistory(i)), None)
+                    track_row(app, t, i, None, Message::Lib(Lib::PlayHistory(i)), None)
                 }))
                 .into(),
             }

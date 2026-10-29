@@ -27,6 +27,8 @@ const ITEM_H: f32 = 34.0;
 #[derive(Debug, Clone)]
 pub enum Target {
     Track(Track),
+    /// Plusieurs morceaux sélectionnés.
+    Tracks(Vec<Track>),
     Album(AlbumSummary),
     Artist(ArtistSummary),
     Playlist(PlaylistSummary),
@@ -61,6 +63,16 @@ impl App {
                 Task::none()
             }
             Ctx::Open(target) => {
+                // Clic droit sur une ligne d'une sélection multiple : le menu
+                // agit sur toute la sélection.
+                let target = match target {
+                    Target::Track(t)
+                        if self.selected.len() > 1 && self.selected.contains(&t.video_id) =>
+                    {
+                        Target::Tracks(self.selected_tracks())
+                    }
+                    other => other,
+                };
                 self.context_menu = Some((self.context_point, target));
                 Task::none()
             }
@@ -189,7 +201,8 @@ fn item_icon(label: &str) -> Icon {
         "Ajouter à une playlist" => Icon::PlaylistAdd,
         "Aller à l'album" | "Ouvrir l'album" => Icon::Disc,
         "Aller à l'artiste" | "Ouvrir l'artiste" => Icon::Person,
-        "Copier le lien" => Icon::Link,
+        "Copier le lien" | "Copier les liens" => Icon::Link,
+        "Retirer de la playlist" => Icon::Trash,
         "Ouvrir la playlist" => Icon::Library,
         "Retirer de la bibliothèque" | "Ne plus suivre" => Icon::HeartFilled,
         "Ajouter à la bibliothèque" | "Suivre" => Icon::Heart,
@@ -210,7 +223,9 @@ fn items(app: &App, target: &Target) -> Vec<(&'static str, Message)> {
             if connected {
                 out.push((
                     "Ajouter à une playlist",
-                    close_then(Message::Lib(crate::library::Lib::OpenAddTo(t.clone()))),
+                    close_then(Message::Lib(crate::library::Lib::OpenAddTo(vec![
+                        t.clone(),
+                    ]))),
                 ));
             }
             if let Some(album) = &t.album_id {
@@ -227,6 +242,42 @@ fn items(app: &App, target: &Target) -> Vec<(&'static str, Message)> {
                 )),
             ));
             out.push(("Copier le lien", Message::Context(Ctx::Copy(link_track(t)))));
+        }
+        Target::Tracks(tracks) => {
+            out.push((
+                "Lire ensuite",
+                close_then(Message::PlayNextAll(tracks.clone())),
+            ));
+            out.push((
+                "Ajouter à la file",
+                close_then(Message::EnqueueAll(tracks.clone())),
+            ));
+            if connected {
+                out.push((
+                    "Ajouter à une playlist",
+                    close_then(Message::Lib(crate::library::Lib::OpenAddTo(tracks.clone()))),
+                ));
+                let ids: Vec<String> = tracks.iter().map(|t| t.video_id.clone()).collect();
+                // Dans une playlist du compte : retirer toute la sélection.
+                if let (Route::Playlist(id), Some((_, crate::app::Load::Ready(p)))) =
+                    (&app.route, &app.lib.playlist)
+                    && (p.owned || id == ytmr_catalog::account::LIKED_ID)
+                {
+                    let message = if id == ytmr_catalog::account::LIKED_ID {
+                        Message::Batch(
+                            tracks
+                                .iter()
+                                .map(|t| Message::Lib(crate::library::Lib::ToggleLike(t.clone())))
+                                .collect(),
+                        )
+                    } else {
+                        Message::Lib(crate::library::Lib::RemoveTracks(id.clone(), ids.clone()))
+                    };
+                    out.push(("Retirer de la playlist", close_then(message)));
+                }
+            }
+            let links = tracks.iter().map(link_track).collect::<Vec<_>>().join("\n");
+            out.push(("Copier les liens", Message::Context(Ctx::Copy(links))));
         }
         Target::Album(a) => {
             out.push((
@@ -306,9 +357,20 @@ fn items(app: &App, target: &Target) -> Vec<(&'static str, Message)> {
 pub fn menu(app: &App) -> Option<El<'_>> {
     let (point, target) = app.context_menu.as_ref()?;
     let entries = items(app, target);
-    let height = entries.len() as f32 * ITEM_H + 12.0;
+    let header = match target {
+        Target::Tracks(t) => Some(format!("{} titres sélectionnés", t.len())),
+        _ => None,
+    };
+    let height = (entries.len() + usize::from(header.is_some())) as f32 * ITEM_H + 12.0;
     let accent = app.accent;
     let mut list = column![].spacing(0);
+    if let Some(header) = header {
+        list = list.push(
+            container(text(header).size(12).color(style::TEXT_FAINT))
+                .height(Length::Fixed(ITEM_H))
+                .padding(Padding::from([10, 12])),
+        );
+    }
     for (label, message) in entries {
         list = list.push(
             button(

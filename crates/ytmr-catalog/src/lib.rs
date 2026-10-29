@@ -215,13 +215,41 @@ impl Catalog {
         Ok(album_from_get(id, album))
     }
 
+    /// Page d'un artiste. Si le décodeur de ytmapi-rs la refuse (il exige par
+    /// exemple une image d'en-tête, absente chez certains artistes : « Key
+    /// /header/musicImmersiveHeaderRenderer/thumbnail/… not found »), la page
+    /// est relue en JSON brut, où tout ce qui manque est simplement laissé vide.
     pub async fn artist(&self, id: &str) -> Result<Artist, CatalogError> {
-        let artist = self
+        let strict = self
             .client()
             .await?
             .get_artist(ArtistChannelID::from_raw(id.to_owned()))
+            .await;
+        match strict {
+            Ok(artist) => Ok(artist_from_get(artist)),
+            Err(e) => {
+                tracing::debug!(error = %e, id, "page artiste relue en JSON brut");
+                self.artist_raw(id).await?.ok_or(CatalogError::Api(e))
+            }
+        }
+    }
+
+    /// Lecture tolérante de la page d'un artiste.
+    pub(crate) async fn artist_raw(&self, id: &str) -> Result<Option<Artist>, CatalogError> {
+        let mut body = serde_json::Map::new();
+        body.insert("browseId".into(), serde_json::json!(id));
+        body.insert("context".into(), home::french_context());
+        let raw = self
+            .client()
+            .await?
+            .raw_json_query(raw::RawPost {
+                path: "browse",
+                body,
+                query: Vec::new(),
+            })
             .await?;
-        Ok(artist_from_get(artist))
+        let page: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        Ok(raw::artist_page(id, &page))
     }
 
     /// « Radio » du morceau : titres similaires, comme l'autoplay de YouTube Music.
@@ -479,5 +507,30 @@ mod tests {
         let artist = catalog.artist(&artist.id).await.unwrap();
         assert!(!artist.name.is_empty());
         assert!(!artist.songs.is_empty() || !artist.albums.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod artist_raw_tests {
+    /// Réseau : la lecture brute d'une vraie page d'artiste donne l'essentiel.
+    #[tokio::test]
+    #[ignore = "réseau"]
+    async fn reads_a_real_artist_page_raw() {
+        let c = crate::Catalog::new();
+        let a = c
+            .artist_raw("UC_kRDKYrUlrbtrSiyu5Tflg")
+            .await
+            .unwrap()
+            .unwrap();
+        println!(
+            "{} / {:?} / {} titres / {} albums / {} singles / photo {}",
+            a.name,
+            a.subscribers,
+            a.songs.len(),
+            a.albums.len(),
+            a.singles.len(),
+            a.thumbnail_url.is_some()
+        );
+        assert!(!a.songs.is_empty());
     }
 }

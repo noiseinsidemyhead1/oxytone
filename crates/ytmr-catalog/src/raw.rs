@@ -191,6 +191,96 @@ pub(crate) fn search_song(item: &Value) -> Option<Track> {
     })
 }
 
+/// Page d'artiste lue sans exiger de forme précise : en-tête (nom, photo,
+/// description, abonnés), titres populaires, albums, singles et EP. Ce qui
+/// manque reste vide ; `None` seulement sans nom.
+pub(crate) fn artist_page(id: &str, page: &Value) -> Option<crate::Artist> {
+    let header = find_key(page, "musicImmersiveHeaderRenderer")
+        .or_else(|| find_key(page, "musicVisualHeaderRenderer"))
+        .or_else(|| find_key(page, "musicResponsiveHeaderRenderer"))?;
+    let name = runs_text(header.get("title"))?;
+    let thumbnail_url = thumbnail(header).or_else(|| {
+        header
+            .pointer("/foregroundThumbnail/musicThumbnailRenderer/thumbnail/thumbnails")
+            .and_then(Value::as_array)
+            .and_then(|t| t.last())
+            .and_then(|t| t.get("url"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+    let description = runs_text(header.get("description"));
+    let subscribers = header
+        .pointer("/subscriptionButton/subscribeButtonRenderer/subscriberCountText")
+        .and_then(|v| runs_text(Some(v)));
+
+    // Titres populaires : la première liste de morceaux de la page.
+    let mut shelves = Vec::new();
+    find_all(page, "musicShelfRenderer", &mut shelves);
+    let songs: Vec<Track> = shelves
+        .first()
+        .and_then(|s| s.get("contents"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.get("musicResponsiveListItemRenderer"))
+                .filter_map(search_song)
+                .map(|mut t| {
+                    if t.artist.trim().is_empty() {
+                        t.artist = name.clone();
+                    }
+                    if t.artist_id.is_none() {
+                        t.artist_id = Some(id.to_owned());
+                    }
+                    t
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Rangées d'albums : « Albums », « Singles et EP »… (titres en français).
+    let mut albums = Vec::new();
+    let mut singles = Vec::new();
+    for shelf in crate::home::parse_shelves(page) {
+        let title = shelf.title.to_lowercase();
+        let kind = if title.contains("single") || title.contains("ep") {
+            "Single"
+        } else if title.contains("album") {
+            "Album"
+        } else {
+            continue;
+        };
+        let list: Vec<crate::AlbumSummary> = shelf
+            .items
+            .into_iter()
+            .filter(|i| i.kind == crate::home::HomeKind::Album)
+            .map(|i| crate::AlbumSummary {
+                id: i.id,
+                title: i.title,
+                artist: name.clone(),
+                year: i.subtitle,
+                kind: kind.to_owned(),
+                thumbnail_url: i.thumbnail_url,
+            })
+            .collect();
+        if kind == "Album" {
+            albums.extend(list);
+        } else {
+            singles.extend(list);
+        }
+    }
+    Some(crate::Artist {
+        id: id.to_owned(),
+        name,
+        description,
+        subscribers,
+        thumbnail_url,
+        songs,
+        albums,
+        singles,
+    })
+}
+
 /// En-tête d'une page de playlist, lu sans exiger de forme précise (les
 /// playlists des autres n'ont pas toujours d'auteur en `straplineTextOne`).
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -286,6 +376,23 @@ mod tests {
         assert_eq!(h.title.as_deref(), Some("daft punk playlist"));
         assert_eq!(h.author.as_deref(), Some("Quelqu'un"));
         assert!(!h.owned);
+    }
+
+    #[test]
+    fn artist_page_without_header_image() {
+        let page = json!({"header": {"musicImmersiveHeaderRenderer": {
+            "title": {"runs": [run("Artiste sans photo", None)]}
+        }}, "contents": [{"musicShelfRenderer": {"contents": [{"musicResponsiveListItemRenderer": {
+            "playlistItemData": {"videoId": "v1"},
+            "flexColumns": [
+                {"musicResponsiveListItemFlexColumnRenderer": {"text": {"runs": [run("Titre", None)]}}}
+            ]
+        }}]}}]});
+        let artist = artist_page("UCx", &page).unwrap();
+        assert_eq!(artist.name, "Artiste sans photo");
+        assert_eq!(artist.thumbnail_url, None);
+        assert_eq!(artist.songs.len(), 1);
+        assert_eq!(artist.songs[0].artist, "Artiste sans photo");
     }
 
     #[test]

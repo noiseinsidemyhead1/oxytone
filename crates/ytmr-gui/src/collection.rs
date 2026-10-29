@@ -522,7 +522,7 @@ fn playlists_tab(app: &App) -> El<'_> {
                         "Retirer de la bibliothèque",
                     )
                 });
-                tiles.push(card(
+                let tile = card(
                     app,
                     p.thumbnail_url.as_deref(),
                     8.0,
@@ -530,7 +530,12 @@ fn playlists_tab(app: &App) -> El<'_> {
                     subtitle,
                     Message::Navigate(Route::Playlist(p.id.clone())),
                     like,
-                ));
+                );
+                tiles.push(if app.playlist_is_mine(p) {
+                    crate::views::drop_zone(tile, crate::app::DropTarget::Playlist(p.id.clone()))
+                } else {
+                    tile
+                });
             }
             cards(tiles)
         }

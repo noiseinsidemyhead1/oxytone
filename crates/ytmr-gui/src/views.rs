@@ -114,6 +114,12 @@ pub fn view(app: &App) -> El<'_> {
         },
         // Tout en haut, dans le repère de la fenêtre : il s'ouvre sous la souris.
         crate::context::menu(app).unwrap_or_else(nothing),
+        if app.show_help {
+            help_panel()
+        } else {
+            nothing()
+        },
+        drag_ghost(app).unwrap_or_else(nothing),
     ];
     // Note la position des clics droits (menu contextuel).
     crate::context::catch_points(
@@ -231,7 +237,7 @@ fn main_layout(app: &App) -> El<'_> {
     let mut middle = row![sidebar(app), resize_handle(Panel::Left), page];
     if app.show_queue {
         let side = match app.right_panel {
-            RightPanel::Queue => queue_panel(app),
+            RightPanel::Queue => drop_zone(queue_panel(app), crate::app::DropTarget::Queue),
             RightPanel::Lyrics => lyrics_side(app),
         };
         middle = middle.push(resize_handle(Panel::Right)).push(side);
@@ -425,7 +431,7 @@ pub(crate) fn account_buttons<'a>(app: &App, track: &'a Track) -> El<'a> {
             Icon::PlaylistAdd,
             16.0,
             style::TEXT_DIM,
-            Message::Lib(Lib::OpenAddTo(track.clone())),
+            Message::Lib(Lib::OpenAddTo(vec![track.clone()])),
             "Ajouter à une playlist".into(),
         ),
     ]
@@ -455,6 +461,126 @@ pub(crate) fn icon_tip<'a>(
 /// Caractères d'un titre de page (40 px) qui tiennent à côté de la pochette.
 fn title_chars(app: &App) -> usize {
     ((app.center_width() - 340.0) / 22.0).max(10.0) as usize
+}
+
+/// Morceaux affichés dans les résultats de recherche.
+pub(crate) const SEARCH_SONGS: usize = 10;
+
+/// Zone où l'on peut déposer des morceaux glissés (file, playlist).
+pub(crate) fn drop_zone<'a>(content: El<'a>, target: crate::app::DropTarget) -> El<'a> {
+    mouse_area(content)
+        .on_enter(Message::DropEnter(target.clone()))
+        .on_exit(Message::DropLeave(target))
+        .into()
+}
+
+/// Étiquette qui suit la souris pendant qu'on glisse des morceaux.
+fn drag_ghost(app: &App) -> Option<El<'_>> {
+    let drag = app.track_drag.as_ref().filter(|d| d.active)?;
+    let what = match drag.tracks.as_slice() {
+        [one] => one.title.clone(),
+        many => format!("{} titres", many.len()),
+    };
+    let to = match &app.drop_target {
+        Some(crate::app::DropTarget::Queue) => " → File d'attente".to_owned(),
+        Some(crate::app::DropTarget::Playlist(id)) if id == ytmr_catalog::account::LIKED_ID => {
+            " → Titres likés".to_owned()
+        }
+        Some(crate::app::DropTarget::Playlist(id)) => format!(" → {}", app.playlist_name(id)),
+        None => String::new(),
+    };
+    let accent = app.accent;
+    // Liseré d'accent quand le dépôt est possible à cet endroit.
+    let has_target = !to.is_empty();
+    let pill = container(
+        row![
+            icon(Icon::Music, 14.0, accent),
+            text(format!("{}{to}", ellipsize(&what, 40)))
+                .size(13)
+                .font(SEMIBOLD),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([7, 12]))
+    .style(move |t| {
+        let mut s = style::toast(t);
+        if has_target {
+            s.border.color = accent;
+            s.border.width = 1.5;
+        }
+        s
+    });
+    Some(
+        container(pill)
+            .padding(Padding {
+                top: drag.pos.y + 14.0,
+                left: drag.pos.x + 14.0,
+                ..Padding::ZERO
+            })
+            .into(),
+    )
+}
+
+/// Fenêtre d'aide (touche ?) : tous les raccourcis.
+fn help_panel<'a>() -> El<'a> {
+    const KEYS: [(&str, &str); 14] = [
+        ("Espace", "Lecture / pause"),
+        ("← / →", "Reculer / avancer de 5 s"),
+        ("Ctrl + ← / →", "Morceau précédent / suivant"),
+        ("↑ / ↓", "Volume + / − (5 %)"),
+        ("M", "Couper / remettre le son"),
+        (
+            "L",
+            "Liker / retirer le like (sélection ou morceau en cours)",
+        ),
+        ("/  ou  Ctrl + F", "Aller à la recherche"),
+        ("Clic", "Sélectionner un morceau"),
+        ("Ctrl + clic", "Ajouter / retirer de la sélection"),
+        ("Maj + clic", "Sélectionner une plage"),
+        ("Double-clic", "Lancer le morceau"),
+        ("Glisser", "Vers la file ou une playlist de la bibliothèque"),
+        ("F11", "Plein écran"),
+        ("Échap", "Fermer, désélectionner, revenir"),
+    ];
+    let mut list = column![].spacing(10);
+    for (keys, what) in KEYS {
+        list = list.push(
+            row![
+                container(text(keys).size(13).font(SEMIBOLD)).width(Length::Fixed(150.0)),
+                text(what).size(13).color(style::TEXT_DIM),
+            ]
+            .align_y(Alignment::Center),
+        );
+    }
+    let panel = container(
+        column![
+            row![
+                text("Raccourcis").size(18).font(BOLD).width(Length::Fill),
+                icon_btn(Icon::Close, 15.0, style::TEXT_DIM, Message::ToggleHelp),
+            ]
+            .align_y(Alignment::Center),
+            list,
+        ]
+        .spacing(16),
+    )
+    .padding(22)
+    .width(Length::Fixed(520.0))
+    .style(style::panel);
+    let dim = mouse_area(
+        container(Space::new())
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .style(|_| iced::widget::container::Style {
+                background: Some(style::alpha(Color::BLACK, 0.55).into()),
+                ..Default::default()
+            }),
+    )
+    .on_press(Message::ToggleHelp);
+    iced::widget::opaque(stack![
+        dim,
+        container(mouse_area(panel).on_press(Message::Noop)).center(Length::Fill)
+    ])
 }
 
 /// Texte coupé à `max` caractères avec « … » (iced ne sait pas le faire seul).
@@ -569,6 +695,8 @@ fn row_actions<'a>(app: &App, track: &'a Track, remove: Option<Message>) -> El<'
 pub(crate) fn track_row<'a>(
     app: &App,
     track: &'a Track,
+    // Rang dans la liste affichée (sélection avec Maj).
+    index: usize,
     number: Option<usize>,
     on_play: Message,
     remove: Option<Message>,
@@ -620,12 +748,12 @@ pub(crate) fn track_row<'a>(
                     style::RowState {
                         active: playing,
                         hovered,
-                        selected: app.selected.as_deref() == Some(track.video_id.as_str()),
+                        selected: app.selected.contains(&track.video_id),
                     },
                     app.accent,
                 )),
         )
-        .on_press(Message::Select(track.video_id.clone()))
+        .on_press(Message::Select(track.video_id.clone(), index))
         .on_double_click(on_play)
         .interaction(iced::mouse::Interaction::Pointer)
         .on_enter(Message::Hover(track.video_id.clone()))
@@ -1026,11 +1154,12 @@ fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
     let mut page = column![].spacing(28);
     if !r.songs.is_empty() {
         let mut songs = column![section_title("Morceaux")].spacing(4);
-        for track in r.songs.iter().take(10) {
+        for (i, track) in r.songs.iter().take(SEARCH_SONGS).enumerate() {
             // Un morceau seul : la radio prend le relais, comme sur YouTube Music.
             songs = songs.push(track_row(
                 app,
                 track,
+                i,
                 None,
                 Message::Play(vec![track.clone()], 0),
                 None,
@@ -1234,6 +1363,7 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
         list = list.push(track_row(
             app,
             track,
+            i,
             Some(i + 1),
             Message::Play(album.tracks.clone(), i),
             None,
@@ -1312,6 +1442,7 @@ fn artist_body<'a>(app: &'a App, artist: &'a Artist) -> El<'a> {
             songs = songs.push(track_row(
                 app,
                 track,
+                i,
                 None,
                 Message::Play(artist.songs.clone(), i),
                 None,

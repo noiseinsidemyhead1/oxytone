@@ -278,10 +278,15 @@ impl Account {
 
     /// Retire toutes les occurrences de `video_id` de la playlist.
     pub async fn remove_track(&self, id: &str, video_id: &str) -> Result<(), CatalogError> {
+        self.remove_tracks(id, &[video_id.to_owned()]).await
+    }
+
+    /// Retire plusieurs morceaux d'un coup (une seule lecture de la playlist).
+    pub async fn remove_tracks(&self, id: &str, video_ids: &[String]) -> Result<(), CatalogError> {
         let (set_ids, complete) = self.set_video_ids(id).await?;
         let targets: Vec<SetVideoID<'static>> = set_ids
             .into_iter()
-            .filter(|(v, _)| v == video_id)
+            .filter(|(v, _)| video_ids.contains(v))
             .map(|(_, s)| SetVideoID::from_raw(s))
             .collect();
         if targets.is_empty() {

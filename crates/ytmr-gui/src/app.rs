@@ -80,6 +80,34 @@ pub fn lyrics_text_width(panel: f32) -> f32 {
 /// Marge au-dessus de la première ligne de paroles.
 pub const LYRICS_TOP: f32 = 24.0;
 
+/// Où l'on peut déposer des morceaux glissés.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DropTarget {
+    Queue,
+    /// Playlist du compte (ou titres likés).
+    Playlist(String),
+}
+
+/// Morceaux en train d'être glissés depuis une liste.
+#[derive(Debug, Clone)]
+pub struct TrackDrag {
+    pub tracks: Vec<Track>,
+    /// Premier point vu (le glissement commence après quelques pixels).
+    origin: Option<iced::Point>,
+    pub pos: iced::Point,
+    /// Assez bougé : c'est un glissement, pas un clic.
+    pub active: bool,
+    /// Clic simple sur une ligne d'une sélection multiple : la sélection se
+    /// réduit à elle au relâchement (si on n'a pas glissé).
+    collapse_to: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DragStep {
+    Move(iced::Point),
+    Release,
+}
+
 /// Ce qu'affiche le panneau de droite : la file ou les paroles, jamais les deux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RightPanel {
@@ -167,8 +195,17 @@ pub enum Message {
     ToggleQueue,
     /// Bouton micro : panneau des paroles à la place de la file.
     ToggleLyrics,
-    /// Clic simple sur un morceau : il reste sélectionné.
-    Select(String),
+    /// Clic sur un morceau (identifiant, rang dans la liste affichée) :
+    /// sélection simple, Ctrl = ajouter / retirer, Maj = plage.
+    Select(String, usize),
+    /// Plusieurs morceaux : lire ensuite / ajouter à la file.
+    PlayNextAll(Vec<Track>),
+    EnqueueAll(Vec<Track>),
+    DragTracks(DragStep),
+    DropEnter(DropTarget),
+    DropLeave(DropTarget),
+    /// Fenêtre d'aide des raccourcis (touche ?).
+    ToggleHelp,
     /// Double-clic sur une ligne de la file.
     JumpTo(QueueId),
     /// La souris quitte une ligne de la file.
@@ -369,7 +406,14 @@ pub struct App {
     pub show_queue: bool,
     pub right_panel: RightPanel,
     /// Morceau sélectionné d'un clic (listes) ; ligne sélectionnée de la file.
-    pub selected: Option<String>,
+    pub selected: Vec<String>,
+    /// Dernier morceau cliqué (point de départ d'une plage avec Maj).
+    select_anchor: Option<usize>,
+    /// Touches de modification enfoncées (Ctrl, Maj…).
+    modifiers: keyboard::Modifiers,
+    pub track_drag: Option<TrackDrag>,
+    pub drop_target: Option<DropTarget>,
+    pub show_help: bool,
     /// Morceau sélectionné dans la file (par identifiant : il suit le morceau).
     pub queue_selected: Option<QueueId>,
     /// Aléatoire demandé : la prochaine file reçue apparaîtra en fondu.
@@ -505,7 +549,12 @@ impl App {
             dragging: None,
             queue_drag: None,
             right_panel: RightPanel::Queue,
-            selected: None,
+            selected: Vec::new(),
+            select_anchor: None,
+            modifiers: keyboard::Modifiers::default(),
+            track_drag: None,
+            drop_target: None,
+            show_help: false,
             queue_selected: None,
             shuffle_pending: false,
             queue_fade: None,
@@ -577,6 +626,18 @@ impl App {
             iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(false)),
             _ => None,
         }));
+        // Morceaux saisis dans une liste : on suit la souris jusqu'au relâchement.
+        if self.track_drag.is_some() {
+            subscriptions.push(iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DragTracks(DragStep::Move(position)))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::DragTracks(DragStep::Release)),
+                _ => None,
+            }));
+        }
         // Morceau saisi dans la file : il tombe au relâchement, où qu'il soit.
         if self.queue_drag.is_some() {
             subscriptions.push(iced::event::listen_with(|event, _, _| match event {
@@ -1615,8 +1676,23 @@ impl App {
                 self.want_lyrics()
             }
             Message::JumpTo(id) => self.send(Command::JumpTo(id)),
-            Message::Select(video_id) => {
-                self.selected = Some(video_id);
+            Message::Select(video_id, index) => self.select(video_id, index),
+            Message::PlayNextAll(tracks) => self.send(Command::PlayNext(tracks)),
+            Message::EnqueueAll(tracks) => self.send(Command::Enqueue(tracks)),
+            Message::DragTracks(step) => self.drag_tracks(step),
+            Message::DropEnter(target) => {
+                self.drop_target = Some(target);
+                Task::none()
+            }
+            Message::DropLeave(target) => {
+                // En passant d'une zone à l'autre, l'entrée arrive parfois avant la sortie.
+                if self.drop_target.as_ref() == Some(&target) {
+                    self.drop_target = None;
+                }
+                Task::none()
+            }
+            Message::ToggleHelp => {
+                self.show_help = !self.show_help;
                 Task::none()
             }
             Message::QueueUnhover(row) => {
@@ -2039,23 +2115,43 @@ impl App {
     fn on_key(&mut self, event: keyboard::Event) -> Task<Message> {
         // `listen` ne transmet que les touches ignorées par les widgets : taper
         // un espace dans la recherche n'arrive donc pas ici.
+        if let keyboard::Event::ModifiersChanged(modifiers) = event {
+            self.modifiers = modifiers;
+            return Task::none();
+        }
         let keyboard::Event::KeyPressed { key, modifiers, .. } = event else {
             return Task::none();
         };
         match key.as_ref() {
+            Key::Named(key::Named::Escape) if self.show_help => {
+                self.show_help = false;
+                Task::none()
+            }
+            Key::Character("?") => self.update(Message::ToggleHelp),
+            Key::Character("/") => operation::focus(SEARCH_INPUT),
+            Key::Character("l" | "L") if !modifiers.control() => self.like_shortcut(),
+            Key::Character("m" | "M") if !modifiers.control() => self.update(Message::ToggleMute),
+            Key::Named(key::Named::ArrowUp) => {
+                let volume = self.state.volume.saturating_add(5).min(100);
+                self.update(Message::Volume(volume))
+            }
+            Key::Named(key::Named::ArrowDown) => {
+                let volume = self.state.volume.saturating_sub(5);
+                self.update(Message::Volume(volume))
+            }
             Key::Named(key::Named::Space) => self.send(Command::TogglePause),
             Key::Named(key::Named::ArrowRight) if modifiers.control() => self.send(Command::Next),
             Key::Named(key::Named::ArrowLeft) if modifiers.control() => {
                 self.send(Command::Previous)
             }
-            Key::Named(key::Named::ArrowRight) => self.seek_by(10.0),
-            Key::Named(key::Named::ArrowLeft) => self.seek_by(-10.0),
+            Key::Named(key::Named::ArrowRight) => self.seek_by(5.0),
+            Key::Named(key::Named::ArrowLeft) => self.seek_by(-5.0),
             Key::Character("f" | "k") if modifiers.control() => operation::focus(SEARCH_INPUT),
             Key::Named(key::Named::F11) => self.update(Message::ToggleFullscreen),
             Key::Named(key::Named::Escape)
-                if self.selected.is_some() && self.context_menu.is_none() =>
+                if !self.selected.is_empty() && self.context_menu.is_none() =>
             {
-                self.selected = None;
+                self.selected.clear();
                 self.queue_selected = None;
                 Task::none()
             }
@@ -2068,6 +2164,171 @@ impl App {
             }
             _ => Task::none(),
         }
+    }
+
+    /// Morceaux de la liste affichée (pour la sélection et le glisser-déposer).
+    pub(crate) fn current_list(&self) -> Vec<&Track> {
+        match &self.route {
+            Route::Playlist(_) => match &self.lib.playlist {
+                Some((_, Load::Ready(p))) => p.tracks.iter().collect(),
+                _ => Vec::new(),
+            },
+            Route::Album(_) => match &self.album {
+                Some((_, Load::Ready(a))) => a.tracks.iter().collect(),
+                _ => Vec::new(),
+            },
+            Route::Artist(_) => match &self.artist {
+                Some((_, Load::Ready(a))) => a.songs.iter().collect(),
+                _ => Vec::new(),
+            },
+            Route::History => match &self.lib.history {
+                Some(Load::Ready(t)) => t.iter().collect(),
+                _ => Vec::new(),
+            },
+            Route::Search => match &self.search {
+                Some(Load::Ready(r)) => r.songs.iter().take(crate::views::SEARCH_SONGS).collect(),
+                _ => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// Morceaux sélectionnés, dans l'ordre de la liste affichée.
+    pub(crate) fn selected_tracks(&self) -> Vec<Track> {
+        self.current_list()
+            .into_iter()
+            .filter(|t| self.selected.contains(&t.video_id))
+            .cloned()
+            .collect()
+    }
+
+    /// Nom d'une playlist de la bibliothèque (étiquette de glisser-déposer).
+    pub(crate) fn playlist_name(&self, id: &str) -> String {
+        match &self.lib.playlists {
+            Some(Load::Ready(list)) => list
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.title.clone())
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+
+    fn select(&mut self, video_id: String, index: usize) -> Task<Message> {
+        let list: Vec<String> = self
+            .current_list()
+            .iter()
+            .map(|t| t.video_id.clone())
+            .collect();
+        let mut collapse_to = None;
+        if self.modifiers.shift()
+            && let Some(anchor) = self.select_anchor
+            && !list.is_empty()
+        {
+            let last = list.len() - 1;
+            let (a, b) = (anchor.min(index).min(last), anchor.max(index).min(last));
+            let range = list[a..=b].to_vec();
+            if self.modifiers.control() {
+                for id in range {
+                    if !self.selected.contains(&id) {
+                        self.selected.push(id);
+                    }
+                }
+            } else {
+                self.selected = range;
+            }
+        } else if self.modifiers.control() {
+            match self.selected.iter().position(|v| *v == video_id) {
+                Some(at) => {
+                    self.selected.remove(at);
+                }
+                None => self.selected.push(video_id.clone()),
+            }
+            self.select_anchor = Some(index);
+        } else {
+            // Ligne d'une sélection multiple : elle reste entière (on va peut-être
+            // la glisser) et se réduit à cette ligne si ce n'était qu'un clic.
+            if self.selected.len() > 1 && self.selected.contains(&video_id) {
+                collapse_to = Some(video_id.clone());
+            } else {
+                self.selected = vec![video_id.clone()];
+            }
+            self.select_anchor = Some(index);
+        }
+        // Prêt à glisser : la sélection si la ligne en fait partie, sinon elle seule.
+        let tracks = if self.selected.contains(&video_id) {
+            self.selected_tracks()
+        } else {
+            self.current_list()
+                .into_iter()
+                .filter(|t| t.video_id == video_id)
+                .take(1)
+                .cloned()
+                .collect()
+        };
+        self.track_drag = (!tracks.is_empty()).then_some(TrackDrag {
+            tracks,
+            origin: None,
+            pos: iced::Point::ORIGIN,
+            active: false,
+            collapse_to,
+        });
+        Task::none()
+    }
+
+    fn drag_tracks(&mut self, step: DragStep) -> Task<Message> {
+        const THRESHOLD: f32 = 8.0;
+        match step {
+            DragStep::Move(position) => {
+                if let Some(drag) = &mut self.track_drag {
+                    let origin = *drag.origin.get_or_insert(position);
+                    drag.pos = position;
+                    if !drag.active && origin.distance(position) > THRESHOLD {
+                        drag.active = true;
+                        self.drop_target = None;
+                    }
+                }
+                Task::none()
+            }
+            DragStep::Release => {
+                let Some(drag) = self.track_drag.take() else {
+                    return Task::none();
+                };
+                let target = self.drop_target.take();
+                if !drag.active {
+                    if let Some(id) = drag.collapse_to {
+                        self.selected = vec![id];
+                    }
+                    return Task::none();
+                }
+                let count = drag.tracks.len();
+                match target {
+                    Some(DropTarget::Queue) => Task::batch([
+                        self.send(Command::Enqueue(drag.tracks)),
+                        self.show_toast(format!("{count} titre(s) ajouté(s) à la file")),
+                    ]),
+                    Some(DropTarget::Playlist(id)) => {
+                        self.update(Message::Lib(crate::library::Lib::AddTo(id, drag.tracks)))
+                    }
+                    None => Task::none(),
+                }
+            }
+        }
+    }
+
+    /// L : like de la sélection, sinon du morceau en cours.
+    fn like_shortcut(&mut self) -> Task<Message> {
+        let mut tracks = self.selected_tracks();
+        if tracks.is_empty()
+            && let Some(entry) = &self.state.current
+        {
+            tracks.push(entry.track.clone());
+        }
+        let tasks: Vec<Task<Message>> = tracks
+            .into_iter()
+            .map(|t| self.update(Message::Lib(crate::library::Lib::ToggleLike(t))))
+            .collect();
+        Task::batch(tasks)
     }
 
     fn seek_by(&mut self, delta: f32) -> Task<Message> {

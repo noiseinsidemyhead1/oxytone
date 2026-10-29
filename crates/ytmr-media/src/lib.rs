@@ -101,10 +101,19 @@ pub fn cover_id(url: &str) -> String {
 }
 
 /// Une même image Google existe à toutes les tailles (`=w120-h120…`) : on
-/// ignore ce suffixe pour qu'elles partagent le même identifiant.
-fn normalize_url(url: &str) -> &str {
+/// ignore ce suffixe pour qu'elles partagent le même identifiant. Les
+/// vignettes vidéo (`i.ytimg.com/vi/…`) portent des paramètres signés
+/// (`?sqp=…&rs=…`) qui changent à chaque réponse de YouTube pour la même
+/// image : ignorés aussi (sinon toute une playlist se rechargeait à chaque
+/// mise à jour).
+pub fn normalize_url(url: &str) -> &str {
     if is_google_image(url)
         && let Some((base, _)) = url.rsplit_once('=')
+    {
+        return base;
+    }
+    if url.contains("i.ytimg.com/")
+        && let Some((base, _)) = url.split_once('?')
     {
         return base;
     }
@@ -436,6 +445,17 @@ fn dominant_color(source: &[u8]) -> Result<[u8; 3], MediaError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn signed_video_thumbnails_share_one_id() {
+        let a = "https://i.ytimg.com/vi/abc/hqdefault.jpg?sqp=AAA&rs=111";
+        let b = "https://i.ytimg.com/vi/abc/hqdefault.jpg?sqp=BBB&rs=222";
+        assert_eq!(cover_id(a), cover_id(b));
+        assert_ne!(
+            cover_id(a),
+            cover_id("https://i.ytimg.com/vi/xyz/hqdefault.jpg")
+        );
+    }
+
     use image::Rgb;
 
     use super::*;
