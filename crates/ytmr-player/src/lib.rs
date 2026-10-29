@@ -117,6 +117,10 @@ pub trait Player: Send + Sync + 'static {
         &self,
         effects: &AudioEffects,
     ) -> impl Future<Output = Result<(), PlayerError>> + Send;
+    /// Gain du fondu entre morceaux (0 à 1). Sans fondu configuré : sans effet.
+    fn set_fade(&self, _gain: f32) -> impl Future<Output = Result<(), PlayerError>> + Send {
+        async { Ok(()) }
+    }
     fn subscribe(&self) -> broadcast::Receiver<PlayerEvent>;
     /// Arrête le moteur proprement. Plus aucune commande n'est possible ensuite.
     fn shutdown(&self) -> impl Future<Output = ()> + Send;

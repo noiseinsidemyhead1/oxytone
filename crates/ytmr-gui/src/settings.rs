@@ -7,11 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use iced::widget::{Space, button, column, container, row, text, toggler, vertical_slider};
+use iced::widget::{Space, button, column, container, row, slider, text, toggler, vertical_slider};
 use iced::{Alignment, Length, Padding, Task};
 use ytmr_core::Command;
 use ytmr_player::AudioEffects;
-use ytmr_player::effects::{EQ_BANDS, EQ_MAX_DB, EQ_PRESETS};
+use ytmr_player::effects::{CROSSFADE_MAX, EQ_BANDS, EQ_MAX_DB, EQ_PRESETS};
 
 use crate::app::{App, Message};
 use crate::style;
@@ -25,6 +25,9 @@ pub enum Settings {
     Release,
     Preset([i8; 10]),
     Normalize(bool),
+    /// Durée du fondu pendant le glissement du curseur.
+    Crossfade(u8),
+    CrossfadeRelease,
     CacheSize(u64),
     ClearCache,
     Notifications(bool),
@@ -34,6 +37,8 @@ pub enum Settings {
 pub struct SettingsState {
     /// Gains affichés pendant un glissement, avant envoi au moteur.
     pub draft: Option<[i8; 10]>,
+    /// Durée du fondu affichée pendant un glissement.
+    pub crossfade_draft: Option<u8>,
     pub audio_cache_bytes: Option<u64>,
     pub audio_dir: Option<PathBuf>,
 }
@@ -74,6 +79,17 @@ impl App {
                 normalize,
                 ..self.state.effects
             }),
+            Settings::Crossfade(secs) => {
+                self.settings.crossfade_draft = Some(secs);
+                Task::none()
+            }
+            Settings::CrossfadeRelease => match self.settings.crossfade_draft.take() {
+                Some(crossfade) => self.apply_effects(AudioEffects {
+                    crossfade,
+                    ..self.state.effects
+                }),
+                None => Task::none(),
+            },
             Settings::CacheSize(bytes) => {
                 self.settings.audio_cache_bytes = Some(bytes);
                 Task::none()
@@ -221,6 +237,26 @@ pub fn settings_page(app: &App) -> El<'_> {
     .spacing(16)
     .align_y(Alignment::Center);
 
+    let crossfade = app.settings.crossfade_draft.unwrap_or(effects.crossfade);
+    let fade = row![
+        column![
+            text("Fondu enchaîné").size(15).font(SEMIBOLD),
+            muted(if crossfade == 0 {
+                "Désactivé : les morceaux s'enchaînent sans transition.".to_owned()
+            } else {
+                format!("{crossfade} s : la fin d'un morceau s'estompe et le suivant monte en douceur (enchaînements automatiques).")
+            }),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+        slider(0..=CROSSFADE_MAX, crossfade, |s| Message::Settings(Settings::Crossfade(s)))
+            .on_release(Message::Settings(Settings::CrossfadeRelease))
+            .width(Length::Fixed(180.0))
+            .style(style::progress(accent)),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center);
+
     let cache_text = match app.settings.audio_cache_bytes {
         Some(bytes) => format!(
             "{:.0} Mo utilisés. Les morceaux déjà écoutés repartent sans attendre.",
@@ -253,7 +289,7 @@ pub fn settings_page(app: &App) -> El<'_> {
                     .into()
             ),
             section_title("Son"),
-            card(normalize.into()),
+            card(column![normalize, fade].spacing(18).into()),
             section_title("Notifications"),
             card(
                 row![

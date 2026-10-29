@@ -1,4 +1,4 @@
-//! Effets audio : égaliseur et volume homogène.
+//! Effets audio : égaliseur, volume homogène et fondu entre les morceaux.
 //!
 //! En clair : les réglages de son de la page Paramètres. mpv les applique avec
 //! ses filtres (ceux de FFmpeg) ; ici on ne fait que décrire ce qu'on veut et
@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 pub const EQ_BANDS: [u32; 10] = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 /// Gain maximal d'une bande, en dB (dans les deux sens).
 pub const EQ_MAX_DB: i8 = 12;
+/// Durée maximale du fondu entre deux morceaux, en secondes.
+pub const CROSSFADE_MAX: u8 = 12;
+/// Étiquette du filtre de fondu dans la chaîne de mpv (piloté par `af-command`).
+pub const FADE_LABEL: &str = "ytmrfade";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioEffects {
@@ -17,6 +21,10 @@ pub struct AudioEffects {
     pub eq: [i8; 10],
     /// Rapproche le volume des morceaux entre eux (filtre `dynaudnorm`).
     pub normalize: bool,
+    /// Fondu en fin et en début de morceau lors d'un enchaînement automatique,
+    /// en secondes (0 = aucun).
+    #[serde(default)]
+    pub crossfade: u8,
 }
 
 impl AudioEffects {
@@ -25,6 +33,7 @@ impl AudioEffects {
         for gain in &mut self.eq {
             *gain = (*gain).clamp(-EQ_MAX_DB, EQ_MAX_DB);
         }
+        self.crossfade = self.crossfade.min(CROSSFADE_MAX);
         self
     }
 
@@ -45,11 +54,15 @@ impl AudioEffects {
         if effects.normalize {
             graph.push("dynaudnorm=f=250:g=15:p=0.9".to_owned());
         }
-        if graph.is_empty() {
-            String::new()
-        } else {
-            format!("lavfi=[{}]", graph.join(","))
+        let mut chain: Vec<String> = Vec::new();
+        if !graph.is_empty() {
+            chain.push(format!("lavfi=[{}]", graph.join(",")));
         }
+        if effects.crossfade > 0 {
+            // Gain du fondu, réglé en continu par le moteur (1 = plein volume).
+            chain.push(format!("@{FADE_LABEL}:lavfi=[volume=1]"));
+        }
+        chain.join(",")
     }
 }
 
@@ -68,6 +81,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn crossfade_adds_a_labelled_gain() {
+        let fx = AudioEffects {
+            crossfade: 5,
+            ..AudioEffects::default()
+        };
+        assert_eq!(fx.to_mpv_af(), "@ytmrfade:lavfi=[volume=1]");
+    }
+
+    #[test]
     fn flat_means_no_filter() {
         assert_eq!(AudioEffects::default().to_mpv_af(), "");
     }
@@ -78,6 +100,9 @@ mod tests {
         fx.eq[0] = 4;
         fx.eq[9] = -30;
         fx.normalize = true;
+        fx.crossfade = 40;
+        assert_eq!(fx.clamped().crossfade, CROSSFADE_MAX);
+        fx.crossfade = 0;
         assert_eq!(
             fx.to_mpv_af(),
             "lavfi=[volume=-4dB,equalizer=f=31:t=o:w=1:g=4,equalizer=f=16000:t=o:w=1:g=-12,dynaudnorm=f=250:g=15:p=0.9]"

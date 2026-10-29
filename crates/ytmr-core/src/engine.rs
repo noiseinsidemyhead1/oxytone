@@ -322,6 +322,9 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         restored_volume,
         session_file: options.session_file,
         consecutive_errors: 0,
+        auto_transition: false,
+        fade_in: false,
+        fade_gain: 1.0,
         player_alive: true,
     };
     let task = tokio::spawn(engine.run(commands_rx));
@@ -399,6 +402,12 @@ struct Engine<P, R, C> {
     restored_volume: Option<u8>,
     session_file: Option<PathBuf>,
     consecutive_errors: u32,
+    /// Le morceau précédent s'est fini tout seul : le suivant entre en fondu.
+    auto_transition: bool,
+    /// Le morceau en cours entre en fondu (enchaînement automatique).
+    fade_in: bool,
+    /// Dernier gain de fondu envoyé au lecteur.
+    fade_gain: f32,
     player_alive: bool,
 }
 
@@ -460,6 +469,17 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         tracing::debug!(?command, "commande");
         // Une action de l'utilisateur relance le compteur d'erreurs.
         self.consecutive_errors = 0;
+        // Un morceau choisi démarre net, sans fondu d'entrée.
+        if matches!(
+            command,
+            Command::PlayTracks { .. }
+                | Command::PlayShuffled(_)
+                | Command::JumpTo(_)
+                | Command::Next
+                | Command::Previous
+        ) {
+            self.auto_transition = false;
+        }
         match command {
             Command::PlayTracks { tracks, start } => {
                 let id = self
@@ -558,6 +578,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 let effects = effects.clamped();
                 self.player.set_effects(&effects).await?;
                 self.state.effects = effects;
+                // Nouvelle chaîne de filtres : le gain du fondu repart de 1.
+                self.fade_gain = 1.0;
+                self.update_fade().await;
                 Ok(())
             }
             Command::Prefetch(video_id) => {
@@ -1086,6 +1109,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             PlayerEvent::Position(position) => {
                 if self.current_entry.is_some() {
                     self.state.position = position;
+                    self.update_fade().await;
                 }
             }
             PlayerEvent::Duration(duration) => {
@@ -1107,7 +1131,40 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         }
     }
 
+    /// Gain du fondu d'après la position : descend sur les dernières secondes,
+    /// remonte sur les premières après un enchaînement automatique.
+    fn fade_target(&self) -> f32 {
+        let fade = f32::from(self.state.effects.crossfade);
+        if fade <= 0.0 {
+            return 1.0;
+        }
+        let position = self.state.position.as_secs_f32();
+        let fade_out = self.state.duration.map_or(1.0, |d| {
+            ((d.as_secs_f32() - position) / fade).clamp(0.0, 1.0)
+        });
+        let fade_in = if self.fade_in {
+            (position / fade).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        fade_out.min(fade_in)
+    }
+
+    async fn update_fade(&mut self) {
+        let target = self.fade_target();
+        let settled =
+            (target - self.fade_gain).abs() < 0.02 && (target < 1.0 || self.fade_gain == 1.0);
+        if settled {
+            return;
+        }
+        self.fade_gain = target;
+        if let Err(e) = self.player.set_fade(target).await {
+            tracing::debug!(error = %e, "fondu");
+        }
+    }
+
     async fn on_started(&mut self, entry: EntryId) {
+        self.fade_in = std::mem::take(&mut self.auto_transition);
         if let Some(pending) = self.pending.take_if(|p| p.entry == entry) {
             // Enchaînement automatique par le lecteur.
             let track = self.queue.get(pending.id).map(|e| e.track.clone());
@@ -1122,6 +1179,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         } else if self.current_entry != Some(entry) {
             return;
         }
+        self.update_fade().await;
         // Retire les entrées terminées de la playlist du lecteur.
         if let Err(e) = self.player.clear_pending().await {
             tracing::warn!(error = %e, "nettoyage de la playlist du lecteur");
@@ -1145,7 +1203,10 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         }
         match reason {
             EndReason::Stopped => return,
-            EndReason::Eof => self.consecutive_errors = 0,
+            EndReason::Eof => {
+                self.consecutive_errors = 0;
+                self.auto_transition = true;
+            }
             EndReason::Error(message) => {
                 self.consecutive_errors += 1;
                 let title = self
