@@ -472,6 +472,32 @@ pub fn progress(accent: Color) -> impl Fn(&Theme, slider::Status) -> slider::Sty
     }
 }
 
+/// Curseur vertical de l'égaliseur : rail fin, pastille ronde centrée dessus
+/// (la teinte du morceau pour la partie active).
+pub fn eq_slider(accent: Color) -> impl Fn(&Theme, slider::Status) -> slider::Style {
+    move |_, status| {
+        let active = !matches!(status, slider::Status::Active);
+        slider::Style {
+            rail: slider::Rail {
+                backgrounds: (accent.into(), alpha(Color::WHITE, 0.14).into()),
+                width: 4.0,
+                border: Border {
+                    radius: 2.0.into(),
+                    ..Border::default()
+                },
+            },
+            handle: slider::Handle {
+                shape: slider::HandleShape::Circle {
+                    radius: if active { 8.0 } else { 7.0 },
+                },
+                background: Color::WHITE.into(),
+                border_width: 2.0,
+                border_color: accent,
+            },
+        }
+    }
+}
+
 pub fn scroll(_: &Theme, status: scrollable::Status) -> scrollable::Style {
     let hovered = matches!(
         status,

@@ -372,11 +372,11 @@ pub struct App {
     pub selected: Option<String>,
     /// Morceau sélectionné dans la file (par identifiant : il suit le morceau).
     pub queue_selected: Option<QueueId>,
-    /// Ordre de la file juste avant un changement d'aléatoire (animation).
-    queue_before_shuffle: Option<Vec<QueueId>>,
-    /// Morceaux de la file en train de glisser vers leur nouvelle place.
-    pub queue_reorder: Option<crate::anim::Reorder>,
-    /// Instant de la dernière image (position des morceaux qui glissent).
+    /// Aléatoire demandé : la prochaine file reçue apparaîtra en fondu.
+    shuffle_pending: bool,
+    /// File remélangée en train de réapparaître en fondu.
+    pub queue_fade: Option<crate::anim::QueueFade>,
+    /// Instant de la dernière image (avancement du fondu de la file).
     pub frame_now: std::time::Instant,
     /// Défilement manuel des paroles : le suivi automatique reprend après.
     lyrics_manual_until: Option<std::time::Instant>,
@@ -507,8 +507,8 @@ impl App {
             right_panel: RightPanel::Queue,
             selected: None,
             queue_selected: None,
-            queue_before_shuffle: None,
-            queue_reorder: None,
+            shuffle_pending: false,
+            queue_fade: None,
             frame_now: std::time::Instant::now(),
             lyrics_manual_until: None,
             fps_meter: std::env::var_os("YTMR_FPS").map(|_| (std::time::Instant::now(), 0)),
@@ -592,7 +592,7 @@ impl App {
             || self.fps_meter.is_some()
             || self.controls_anim.is_some()
             || self.anims.is_running()
-            || self.queue_reorder.is_some()
+            || self.queue_fade.is_some()
             || self.is_loading()
             || self.accent_fade.is_running()
             || self.page_fade.is_running()
@@ -1578,10 +1578,9 @@ impl App {
                 }
             },
             Message::ToggleShuffle => {
-                // La file va être remélangée : la sélection n'a plus de sens, et
-                // l'ordre actuel sert de point de départ à l'animation.
+                // La file va être remélangée : la sélection n'a plus de sens.
                 self.queue_selected = None;
-                self.queue_before_shuffle = Some(self.queue.entries.iter().map(|e| e.id).collect());
+                self.shuffle_pending = true;
                 self.send(Command::SetShuffle(!self.state.shuffle))
             }
             Message::CycleRepeat => self.send(Command::SetRepeat(self.state.repeat.cycle())),
@@ -1790,8 +1789,8 @@ impl App {
             Message::Frame(now) => {
                 self.anims.frame(now);
                 self.frame_now = now;
-                if self.queue_reorder.as_ref().is_some_and(|r| r.is_done(now)) {
-                    self.queue_reorder = None;
+                if self.queue_fade.is_some_and(|f| f.is_done(now)) {
+                    self.queue_fade = None;
                 }
                 if let Some((since, from)) = self.controls_anim {
                     let t = (now.saturating_duration_since(since).as_secs_f32()
@@ -2005,11 +2004,10 @@ impl App {
                 ])
             }
             CoreUpdate::Queue(queue) => {
-                if let Some(before) = self.queue_before_shuffle.take() {
-                    let after: Vec<QueueId> = queue.entries.iter().map(|e| e.id).collect();
+                if std::mem::take(&mut self.shuffle_pending) {
                     let now = std::time::Instant::now();
                     self.frame_now = now;
-                    self.queue_reorder = crate::anim::Reorder::new(&before, &after, now);
+                    self.queue_fade = Some(crate::anim::QueueFade::new(now));
                 }
                 self.queue = queue;
                 // Seulement les lignes visibles : une file de 900 titres ne doit

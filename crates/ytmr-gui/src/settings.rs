@@ -164,9 +164,11 @@ fn band_label(freq: u32) -> String {
 /// pendant le mouvement). Visible éteint : rail gris liseré, pastille claire.
 fn switch<'a>(level: f32, accent: Color, message: Message) -> El<'a> {
     const W: f32 = 46.0;
-    const H: f32 = 26.0;
     const KNOB: f32 = 18.0;
     const PAD: f32 = 4.0;
+    // Marge égale tout autour : la pastille est centrée dans le rail (une
+    // marge seulement à gauche et à droite la laissait collée en haut).
+    const H: f32 = KNOB + 2.0 * PAD;
     let travel = W - KNOB - 2.0 * PAD;
     let rail = style::mix(color!(0x2c2c34), accent, level);
     let edge = style::mix(color!(0x5a5a64), accent, level);
@@ -190,7 +192,7 @@ fn switch<'a>(level: f32, accent: Color, message: Message) -> El<'a> {
     )
     .width(Length::Fixed(W))
     .height(Length::Fixed(H))
-    .padding(Padding::from([0.0, PAD]))
+    .padding(PAD)
     .style(move |_, status| button::Style {
         background: Some(
             if matches!(status, button::Status::Hovered) {
@@ -234,6 +236,8 @@ pub fn settings_page(app: &App) -> El<'_> {
                     move |g: f32| Message::Settings(Settings::Band(i, g.round() as i8)),
                 )
                 .step(1.0_f32)
+                .width(18.0)
+                .style(style::eq_slider(accent))
                 .on_release(Message::Settings(Settings::Release))
                 .height(Length::Fixed(180.0)),
                 text(band_label(freq)).size(12).color(style::TEXT_DIM),

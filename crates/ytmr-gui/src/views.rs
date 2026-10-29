@@ -1438,18 +1438,24 @@ fn queue_panel(app: &App) -> El<'_> {
                 } else {
                     iced::mouse::Interaction::Pointer
                 });
-            // Aléatoire activé / coupé : chaque morceau glisse de son ancienne
-            // place à la nouvelle.
-            let dy = app
-                .queue_reorder
-                .as_ref()
-                .map_or(0.0, |r| r.offset(entry.id, app.frame_now) * QROW_H);
-            crate::anim::shift(
+            // Aléatoire activé / coupé : la nouvelle liste apparaît en fondu, de
+            // haut en bas. Le voile a la couleur du panneau (unie) : c'est un
+            // vrai fondu. Toujours présent (vide au repos) : l'arbre ne change pas.
+            let veil = app
+                .queue_fade
+                .map_or(0.0, |f| f.veil(i.saturating_sub(range.0), app.frame_now));
+            stack![
                 container(area)
                     .height(Length::Fixed(QROW_H))
                     .align_y(Alignment::Center),
-                dy,
-            )
+                container(Space::new())
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .style(move |_| iced::widget::container::Style {
+                        background: (veil > 0.0).then(|| style::alpha(style::SURFACE, veil).into()),
+                        ..Default::default()
+                    }),
+            ]
             .into()
         })
     };
