@@ -6,14 +6,19 @@
 //! message explique pourquoi.
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+use iced::futures::SinkExt;
 
 use iced::widget::{
     Space, button, column, container, mouse_area, row, scrollable, text, text_input,
 };
 use iced::{Alignment, Color, Length, Padding, Task};
 use ytmr_catalog::CatalogError;
-use ytmr_catalog::account::{Account, LIKED_ID, Playlist, PlaylistSummary, Privacy};
+use ytmr_catalog::account::{
+    Account, LIKED_ID, Playlist, PlaylistSummary, PlaylistUpdate, Privacy,
+};
 use ytmr_core::{Command, Track};
 
 use crate::app::{App, CARD, HERO, Load, Message, Route, THUMB};
@@ -27,6 +32,9 @@ use crate::views::{
 
 pub const NEW_PLAYLIST_INPUT: &str = "nouvelle-playlist";
 pub const RENAME_INPUT: &str = "renommer-playlist";
+/// Lignes affichées d'emblée dans une playlist ; la suite s'ajoute en défilant
+/// (afficher 1 000 lignes d'un coup ralentirait chaque image).
+pub const ROWS_STEP: usize = 120;
 
 /// Poignée clonable vers le compte (le jeton n'apparaît jamais dans les logs).
 #[derive(Debug, Clone)]
@@ -58,6 +66,22 @@ pub struct LibraryState {
     pub overlay: Option<Overlay>,
     pub renaming: Option<String>,
     pub new_name: String,
+    /// Dossier du cache disque (listes et playlists déjà vues).
+    pub cache_dir: Option<PathBuf>,
+    /// Génération du chargement en cours (les réponses périmées sont ignorées).
+    load_generation: u64,
+    /// Chargement en cours : version fraîche construite page à page, affichée
+    /// à la fin seulement si une version en cache est déjà à l'écran.
+    pub streaming: Option<Streaming>,
+    /// Lignes de la playlist affichées pour l'instant.
+    pub visible_rows: usize,
+}
+
+pub struct Streaming {
+    generation: u64,
+    /// `Some` : une version en cache est affichée, celle-ci la remplacera.
+    pending: Option<Playlist>,
+    pub received: usize,
 }
 
 impl LibraryState {
@@ -92,7 +116,8 @@ pub enum Lib {
     AccountReady(Result<AccountHandle, String>),
     PlaylistsLoaded(Result<Vec<PlaylistSummary>, String>),
     LikedLoaded(Result<Playlist, String>),
-    PlaylistLoaded(String, Result<Playlist, String>),
+    PlaylistUpdate(u64, PlaylistUpdate),
+    PlaylistStreamEnded(u64, Result<(), String>),
     ToggleLike(Track),
     LikeDone(Track, bool, Result<(), String>),
     OpenAddTo(Track),
@@ -150,24 +175,196 @@ fn call<T: Send + 'static>(
 
 impl App {
     pub fn load_playlists(&mut self) -> Task<Message> {
-        if self.lib.playlists.is_none() {
-            self.lib.playlists = Some(Load::Loading);
+        if !matches!(self.lib.playlists, Some(Load::Ready(_))) {
+            self.lib.playlists = match self.lib.cache_dir.as_deref().and_then(read_list) {
+                Some(cached) => Some(Load::Ready(cached)),
+                None => Some(Load::Loading),
+            };
         }
         let op = self.lib.ready().map(|a| async move { a.playlists().await });
         call(op, Lib::PlaylistsLoaded)
     }
 
+    /// Ouvre une playlist : la version en cache s'affiche tout de suite, la
+    /// version fraîche arrive page par page.
     pub fn open_playlist(&mut self, id: String) -> Task<Message> {
-        if !matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if *cur == id) {
+        self.lib.renaming = None;
+        self.lib.visible_rows = ROWS_STEP;
+        self.lib.load_generation += 1;
+        let generation = self.lib.load_generation;
+
+        let shown = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if *cur == id);
+        let cached = if shown {
+            None
+        } else {
+            self.lib
+                .cache_dir
+                .as_deref()
+                .and_then(|dir| read_playlist(dir, &id))
+        };
+        let mut tasks = Vec::new();
+        if let Some(cached) = cached {
+            tasks.push(self.show_playlist_extras(&cached));
+            self.lib.playlist = Some((id.clone(), Load::Ready(cached)));
+        } else if !shown {
             self.lib.playlist = Some((id.clone(), Load::Loading));
         }
-        self.lib.renaming = None;
-        let wanted = id.clone();
-        let op = self
+        let has_screen_version = matches!(&self.lib.playlist, Some((_, Load::Ready(_))));
+        self.lib.streaming = Some(Streaming {
+            generation,
+            pending: has_screen_version.then(empty_playlist),
+            received: 0,
+        });
+        match self.lib.ready() {
+            Some(account) => tasks.push(stream_playlist(account, id, generation)),
+            None => tasks.push(Task::done(Message::Lib(Lib::PlaylistStreamEnded(
+                generation,
+                Err("compte YouTube non connecté".into()),
+            )))),
+        }
+        Task::batch(tasks)
+    }
+
+    /// Pochette, teinte, premières vignettes et préparation des premiers titres.
+    fn show_playlist_extras(&mut self, playlist: &Playlist) -> Task<Message> {
+        let cover_id = if playlist.id == LIKED_ID {
+            playlist.tracks.first().and_then(|t| self.track_cover(t))
+        } else {
+            self.url_cover(playlist.thumbnail_url.as_deref())
+        };
+        let mut tasks = vec![
+            self.want_cover(cover_id.clone(), HERO),
+            self.want_accent(cover_id),
+            self.want_track_covers(playlist.tracks.iter().take(self.lib.visible_rows), THUMB),
+        ];
+        for track in playlist.tracks.iter().take(3).rev() {
+            tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
+        }
+        Task::batch(tasks)
+    }
+
+    /// La page centrale a défilé : on affiche plus de lignes en approchant du bas.
+    pub fn playlist_scrolled(
+        &mut self,
+        viewport: &iced::widget::scrollable::Viewport,
+    ) -> Task<Message> {
+        if !matches!(self.route, Route::Playlist(_)) {
+            return Task::none();
+        }
+        let bottom = viewport.absolute_offset().y + viewport.bounds().height;
+        if bottom < viewport.content_bounds().height - 1500.0 {
+            return Task::none();
+        }
+        let Some((_, Load::Ready(playlist))) = &self.lib.playlist else {
+            return Task::none();
+        };
+        if self.lib.visible_rows >= playlist.tracks.len() {
+            return Task::none();
+        }
+        let from = self.lib.visible_rows;
+        self.lib.visible_rows += ROWS_STEP;
+        let tracks: Vec<Track> = playlist
+            .tracks
+            .iter()
+            .skip(from)
+            .take(ROWS_STEP)
+            .cloned()
+            .collect();
+        self.want_track_covers(&tracks, THUMB)
+    }
+
+    fn on_playlist_update(&mut self, generation: u64, update: PlaylistUpdate) -> Task<Message> {
+        let Some(streaming) = self
             .lib
-            .ready()
-            .map(|a| async move { a.playlist(&wanted).await });
-        call(op, move |r| Lib::PlaylistLoaded(id.clone(), r))
+            .streaming
+            .as_mut()
+            .filter(|s| s.generation == generation)
+        else {
+            return Task::none();
+        };
+        // Version en cache à l'écran : on construit la fraîche à côté.
+        if let Some(pending) = &mut streaming.pending {
+            match update {
+                PlaylistUpdate::Header(header) => {
+                    *pending = Playlist {
+                        tracks: std::mem::take(&mut pending.tracks),
+                        ..header
+                    }
+                }
+                PlaylistUpdate::Tracks(tracks) => {
+                    streaming.received += tracks.len();
+                    pending.tracks.extend(tracks);
+                }
+                PlaylistUpdate::Done { complete } => {
+                    let mut fresh = streaming.pending.take().unwrap_or_else(empty_playlist);
+                    fresh.complete = complete;
+                    self.lib.streaming = None;
+                    return self.finish_playlist(fresh);
+                }
+            }
+            return Task::none();
+        }
+        // Rien en cache : on affiche au fil de l'eau.
+        match update {
+            PlaylistUpdate::Header(header) => {
+                let id = header.id.clone();
+                let task = self.show_playlist_extras(&header);
+                self.lib.playlist = Some((id, Load::Ready(header)));
+                task
+            }
+            PlaylistUpdate::Tracks(tracks) => {
+                streaming.received += tracks.len();
+                let Some((_, Load::Ready(playlist))) = &mut self.lib.playlist else {
+                    return Task::none();
+                };
+                let before = playlist.tracks.len();
+                let first_page = before == 0;
+                playlist.tracks.extend(tracks);
+                let visible: Vec<Track> = playlist
+                    .tracks
+                    .iter()
+                    .skip(before)
+                    .take(self.lib.visible_rows.saturating_sub(before))
+                    .cloned()
+                    .collect();
+                let mut tasks = vec![self.want_track_covers(&visible, THUMB)];
+                if first_page && let Some((_, Load::Ready(p))) = &self.lib.playlist {
+                    let p = p.clone();
+                    tasks.push(self.show_playlist_extras(&p));
+                }
+                Task::batch(tasks)
+            }
+            PlaylistUpdate::Done { complete } => {
+                self.lib.streaming = None;
+                let Some((_, Load::Ready(playlist))) = &mut self.lib.playlist else {
+                    return Task::none();
+                };
+                playlist.complete = complete;
+                let fresh = playlist.clone();
+                self.finish_playlist(fresh)
+            }
+        }
+    }
+
+    /// Version complète reçue : affichage, cache disque, likes.
+    fn finish_playlist(&mut self, fresh: Playlist) -> Task<Message> {
+        if let Some(dir) = &self.lib.cache_dir {
+            write_playlist(dir, &fresh);
+        }
+        if fresh.id == LIKED_ID {
+            self.lib.liked = fresh.tracks.iter().map(|t| t.video_id.clone()).collect();
+            self.lib.liked_count = Some(fresh.tracks.len());
+        }
+        let toast = if fresh.complete {
+            Task::none()
+        } else {
+            self.show_toast("YouTube n'a pas rendu toute la playlist (affichage partiel)".into())
+        };
+        let covers = self.want_track_covers(fresh.tracks.iter().take(self.lib.visible_rows), THUMB);
+        if matches!(&self.lib.playlist, Some((cur, _)) if *cur == fresh.id) {
+            self.lib.playlist = Some((fresh.id.clone(), Load::Ready(fresh)));
+        }
+        Task::batch([toast, covers])
     }
 
     pub fn update_library(&mut self, message: Lib) -> Task<Message> {
@@ -192,6 +389,9 @@ impl App {
             Lib::PlaylistsLoaded(result) => {
                 match result {
                     Ok(list) => {
+                        if let Some(dir) = &self.lib.cache_dir {
+                            write_list(dir, &list);
+                        }
                         let ids: Vec<_> = list
                             .iter()
                             .map(|p| self.url_cover(p.thumbnail_url.as_deref()))
@@ -199,7 +399,11 @@ impl App {
                         self.lib.playlists = Some(Load::Ready(list));
                         return Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)));
                     }
-                    Err(e) => self.lib.playlists = Some(Load::Failed(e)),
+                    // Une liste en cache reste affichée si YouTube ne répond pas.
+                    Err(e) if !matches!(self.lib.playlists, Some(Load::Ready(_))) => {
+                        self.lib.playlists = Some(Load::Failed(e));
+                    }
+                    Err(e) => tracing::warn!("liste des playlists : {e}"),
                 }
                 Task::none()
             }
@@ -209,46 +413,35 @@ impl App {
                         self.lib.liked =
                             playlist.tracks.iter().map(|t| t.video_id.clone()).collect();
                         self.lib.liked_count = Some(playlist.tracks.len());
+                        if let Some(dir) = &self.lib.cache_dir {
+                            write_playlist(dir, &playlist);
+                        }
                     }
                     Err(e) => tracing::warn!("titres likés : {e}"),
                 }
                 Task::none()
             }
-            Lib::PlaylistLoaded(id, result) => {
-                if !matches!(&self.lib.playlist, Some((cur, _)) if *cur == id) {
+            Lib::PlaylistUpdate(generation, update) => self.on_playlist_update(generation, update),
+            Lib::PlaylistStreamEnded(generation, result) => {
+                let Err(e) = result else {
+                    return Task::none();
+                };
+                if !self
+                    .lib
+                    .streaming
+                    .as_ref()
+                    .is_some_and(|s| s.generation == generation)
+                {
                     return Task::none();
                 }
-                match result {
-                    Ok(playlist) => {
-                        let cover_id = self.url_cover(playlist.thumbnail_url.as_deref());
-                        let mut tasks = vec![
-                            self.want_cover(cover_id.clone(), HERO),
-                            self.want_accent(cover_id),
-                            self.want_track_covers(&playlist.tracks, THUMB),
-                        ];
-                        for track in playlist.tracks.iter().take(3).rev() {
-                            tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
-                        }
-                        if !playlist.complete {
-                            tasks.push(
-                                self.show_toast(
-                                    "YouTube n'a pas rendu toute la playlist (affichage partiel)"
-                                        .into(),
-                                ),
-                            );
-                        }
-                        if id == LIKED_ID {
-                            self.lib.liked =
-                                playlist.tracks.iter().map(|t| t.video_id.clone()).collect();
-                            self.lib.liked_count = Some(playlist.tracks.len());
-                        }
-                        self.lib.playlist = Some((id, Load::Ready(playlist)));
-                        Task::batch(tasks)
-                    }
-                    Err(e) => {
-                        self.lib.playlist = Some((id, Load::Failed(e)));
+                self.lib.streaming = None;
+                match &mut self.lib.playlist {
+                    // Rien à l'écran : l'erreur prend la page.
+                    Some((_, load @ Load::Loading)) => {
+                        *load = Load::Failed(e);
                         Task::none()
                     }
+                    _ => self.show_toast(format!("Mise à jour de la playlist impossible : {e}")),
                 }
             }
             Lib::ToggleLike(track) => {
@@ -455,6 +648,94 @@ impl App {
     }
 }
 
+/// Chargement page par page, transformé en messages pour l'interface.
+fn stream_playlist(account: Arc<Account>, id: String, generation: u64) -> Task<Message> {
+    Task::stream(iced::stream::channel(64, async move |mut out| {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let fetch = async {
+            let result = account.playlist_progressive(&id, tx).await;
+            result.map_err(|e| e.to_string())
+        };
+        let mut forward_out = out.clone();
+        let forward = async move {
+            while let Some(update) = rx.recv().await {
+                let message = Message::Lib(Lib::PlaylistUpdate(generation, update));
+                if forward_out.send(message).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let (result, ()) = tokio::join!(fetch, forward);
+        let _ = out
+            .send(Message::Lib(Lib::PlaylistStreamEnded(generation, result)))
+            .await;
+    }))
+}
+
+fn empty_playlist() -> Playlist {
+    Playlist {
+        id: String::new(),
+        title: String::new(),
+        author: String::new(),
+        description: None,
+        duration_text: String::new(),
+        thumbnail_url: None,
+        tracks: Vec::new(),
+        complete: false,
+    }
+}
+
+// ----- cache disque -----
+// Petits fichiers JSON (une playlist de 1 000 titres ≈ 300 Ko), lus et écrits
+// directement : quelques millisecondes.
+
+fn playlist_file(dir: &Path, id: &str) -> PathBuf {
+    let safe: String = id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    dir.join(format!("playlist-{safe}.json"))
+}
+
+fn read_playlist(dir: &Path, id: &str) -> Option<Playlist> {
+    let text = std::fs::read_to_string(playlist_file(dir, id)).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_playlist(dir: &Path, playlist: &Playlist) {
+    write_json(&playlist_file(dir, &playlist.id), playlist);
+}
+
+fn read_list(dir: &Path) -> Option<Vec<PlaylistSummary>> {
+    let text = std::fs::read_to_string(dir.join("playlists.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+fn write_list(dir: &Path, list: &[PlaylistSummary]) {
+    write_json(&dir.join("playlists.json"), &list);
+}
+
+fn write_json(path: &Path, value: &impl serde::Serialize) {
+    let result = serde_json::to_vec(value)
+        .map_err(std::io::Error::other)
+        .and_then(|json| {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let tmp = path.with_extension("tmp");
+            std::fs::write(&tmp, json)?;
+            std::fs::rename(&tmp, path)
+        });
+    if let Err(e) = result {
+        tracing::warn!(error = %e, path = %path.display(), "cache de la bibliothèque");
+    }
+}
+
+/// Titres likés en cache : les cœurs s'affichent avant même la connexion.
+pub fn cached_liked(dir: &Path) -> Option<Playlist> {
+    read_playlist(dir, LIKED_ID)
+}
+
 // ----- vues -----
 
 fn liked_tile<'a>(app: &App) -> El<'a> {
@@ -643,7 +924,14 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
                 "Supprimer la playlist".into(),
             ));
     }
-    let subtitle = column![muted(details), title_or_edit, actions].spacing(6);
+    let progress: El<'a> = match &app.lib.streaming {
+        Some(s) if s.received > 0 || playlist.tracks.is_empty() => {
+            muted(format!("Mise à jour… {} titres reçus", s.received))
+        }
+        Some(_) => muted("Mise à jour…"),
+        None => Space::new().height(Length::Fixed(0.0)).into(),
+    };
+    let subtitle = column![muted(details), progress, title_or_edit, actions].spacing(6);
 
     let cover_id = if liked {
         playlist.tracks.first().and_then(|t| app.track_cover(t))
@@ -668,7 +956,12 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     if playlist.tracks.is_empty() {
         list = list.push(muted("Cette playlist est vide."));
     }
-    for (i, track) in playlist.tracks.iter().enumerate() {
+    for (i, track) in playlist
+        .tracks
+        .iter()
+        .enumerate()
+        .take(app.lib.visible_rows)
+    {
         let remove = if liked {
             Message::Lib(Lib::ToggleLike(track.clone()))
         } else {

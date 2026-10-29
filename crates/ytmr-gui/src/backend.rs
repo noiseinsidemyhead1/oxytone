@@ -33,6 +33,8 @@ pub struct Backend {
     pub catalog: Arc<Catalog>,
     pub covers: Arc<Covers>,
     pub account: watch::Receiver<AccountState>,
+    /// Cache disque de la bibliothèque (listes de playlists, contenus).
+    pub library_cache: std::path::PathBuf,
     core_task: JoinHandle<()>,
     server: Option<(JoinHandle<std::io::Result<()>>, oneshot::Sender<()>)>,
 }
@@ -63,19 +65,12 @@ impl Backend {
         let fast_client = config.player.fast_start_client();
         let ytdl_options = config.player.ytdl_options();
 
-        let (catalog, player) = tokio::try_join!(
-            async {
-                Catalog::new_unauthenticated()
-                    .await
-                    .context("connexion à YouTube Music")
-            },
-            async {
-                MpvPlayer::spawn(&deps, config.player.volume, fast_client, &ytdl_options)
-                    .await
-                    .context("démarrage de mpv")
-            },
-        )?;
-        let catalog = Arc::new(catalog);
+        // Le catalogue se connecte à sa première utilisation : pas de réseau
+        // requis pour ouvrir l'appli.
+        let player = MpvPlayer::spawn(&deps, config.player.volume, fast_client, &ytdl_options)
+            .await
+            .context("démarrage de mpv")?;
+        let catalog = Arc::new(Catalog::new());
         let resolver = Arc::new(YtDlpResolver::new(
             &deps,
             ResolverOptions {
@@ -131,6 +126,7 @@ impl Backend {
             catalog,
             covers,
             account,
+            library_cache: paths.cache_dir.join("library"),
             core_task,
             server,
         })

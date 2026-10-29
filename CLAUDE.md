@@ -84,6 +84,8 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 - Identifiants de playlist : lecture = `VL<id>` (navigation), modifications = id nu. ytmr manipule l'id nu (`bare_id`, `browse_id`, `edit_id`). Titres likés : `LM`. Listes de podcasts `RDPN…` écartées.
 - ytmapi-rs 0.3.3 contourné en lisant le **JSON brut** : (1) pas de `setVideoId` dans ses morceaux (exigé pour retirer) → `playlistItemData.playlistSetVideoId` ; (2) son décodeur rejette une page entière si un morceau n'a pas de page artiste → décodeur tolérant `collect_tracks` ; (3) sa pagination ré-encode le jeton de continuation (`%3D` → `%253D`), donc s'arrête à la 1re page → requête maison `NextPage` (jeton décodé, `type=next`, une relance en cas d'échec). Mesuré : 1 188/1 188 titres et 908 likes (yt-dlp en voit 943, avec les indisponibles).
 - GUI : modifications optimistes (affichage immédiat, correction + toast si YouTube refuse). Boutons des lignes visibles au survol.
+- **Affichage des playlists** : les pages YouTube (100 titres) ne peuvent venir que l'une après l'autre ; `Account::playlist_progressive` envoie chaque page dès réception, la GUI l'affiche au fil de l'eau. Cache disque `cache_dir/library/` (`playlists.json`, `playlist-<id>.json`) : version en cache affichée tout de suite, version fraîche construite à côté puis substituée. Rendu limité à `ROWS_STEP` (120) lignes, +120 en approchant du bas (pochettes demandées seulement pour les lignes affichées).
+- **Démarrage sans réseau** : `Catalog::new()` ne se connecte qu'à la première utilisation (`OnceCell`, 3 essais) ; avant, une requête ratée vers music.youtube.com au lancement empêchait l'appli de s'ouvrir.
 - Pas encore : `/api/v1/like` (501) pour le CYD.
 
 ## Emplacements à l'exécution

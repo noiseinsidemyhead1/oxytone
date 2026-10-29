@@ -15,7 +15,9 @@
 
 use std::borrow::Cow;
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio::sync::mpsc::UnboundedSender;
 use ytmapi_rs::auth::{AuthToken, BrowserToken};
 use ytmapi_rs::common::{ApiOutcome, LikeStatus, PlaylistID, SetVideoID, VideoID, YoutubeID};
 use ytmapi_rs::parse::LibraryPlaylist;
@@ -52,7 +54,7 @@ fn edit_id(id: &str) -> PlaylistID<'static> {
 /// Garde-fou pour les très grandes playlists (~100 titres par page).
 const MAX_PAGES: usize = 60;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistSummary {
     pub id: String,
     pub title: String,
@@ -62,7 +64,7 @@ pub struct PlaylistSummary {
     pub thumbnail_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Playlist {
     pub id: String,
     pub title: String,
@@ -73,6 +75,17 @@ pub struct Playlist {
     pub tracks: Vec<Track>,
     /// `false` si YouTube n'a pas rendu toutes les pages.
     pub complete: bool,
+}
+
+/// Morceau de playlist arrivé au fil du chargement (voir [`Account::playlist_progressive`]).
+#[derive(Debug, Clone)]
+pub enum PlaylistUpdate {
+    /// Titre, auteur… (sans les morceaux).
+    Header(Playlist),
+    /// Une page de morceaux, à ajouter à la suite.
+    Tracks(Vec<Track>),
+    /// Fin ; `complete` vaut `false` si YouTube n'a pas rendu toutes les pages.
+    Done { complete: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,15 +134,40 @@ impl Account {
 
     /// Détails et morceaux (toutes les pages). `LIKED_ID` pour les titres likés.
     pub async fn playlist(&self, id: &str) -> Result<Playlist, CatalogError> {
+        let mut playlist = self.header(id).await?;
+        playlist.complete = self
+            .for_each_page(id, |page| collect_tracks(page, &mut playlist.tracks))
+            .await?;
+        Ok(playlist)
+    }
+
+    /// Comme [`Account::playlist`], mais envoie chaque page dès qu'elle arrive
+    /// (les pages viennent forcément l'une après l'autre : chacune donne la clé
+    /// de la suivante). Une grande playlist s'affiche ainsi dès la première.
+    pub async fn playlist_progressive(
+        &self,
+        id: &str,
+        tx: UnboundedSender<PlaylistUpdate>,
+    ) -> Result<(), CatalogError> {
+        let header = self.header(id).await?;
+        let _ = tx.send(PlaylistUpdate::Header(header));
+        let complete = self
+            .for_each_page(id, |page| {
+                let mut tracks = Vec::new();
+                collect_tracks(page, &mut tracks);
+                let _ = tx.send(PlaylistUpdate::Tracks(tracks));
+            })
+            .await?;
+        let _ = tx.send(PlaylistUpdate::Done { complete });
+        Ok(())
+    }
+
+    /// Détails d'une playlist, sans ses morceaux.
+    async fn header(&self, id: &str) -> Result<Playlist, CatalogError> {
         let details = self
             .yt
             .query(GetPlaylistDetailsQuery::new(browse_id(id)))
             .await?;
-        let (pages, complete) = self.raw_pages(id).await?;
-        let mut tracks = Vec::new();
-        for page in &pages {
-            collect_tracks(page, &mut tracks);
-        }
         Ok(Playlist {
             id: bare_id(id).to_owned(),
             title: details.title,
@@ -137,8 +175,8 @@ impl Account {
             description: details.description,
             duration_text: details.duration,
             thumbnail_url: largest_thumbnail(&details.thumbnails),
-            tracks,
-            complete,
+            tracks: Vec::new(),
+            complete: true,
         })
     }
 
@@ -226,47 +264,54 @@ impl Account {
 
     /// Paires (videoId, setVideoId) lues dans le JSON brut de la playlist.
     async fn set_video_ids(&self, id: &str) -> Result<(Vec<(String, String)>, bool), CatalogError> {
-        let (pages, complete) = self.raw_pages(id).await?;
         let mut pairs = Vec::new();
-        for page in &pages {
-            collect_set_video_ids(page, &mut pairs);
-        }
+        let complete = self
+            .for_each_page(id, |page| collect_set_video_ids(page, &mut pairs))
+            .await?;
         Ok((pairs, complete))
     }
 
-    /// Toutes les pages brutes d'une playlist. Rend aussi `false` si une page
-    /// suivante a échoué (on garde alors ce qui a déjà été lu).
-    async fn raw_pages(&self, id: &str) -> Result<(Vec<Value>, bool), CatalogError> {
+    /// Appelle `on_page` pour chaque page brute de la playlist, dans l'ordre.
+    /// Rend `false` si une page suivante a échoué (ce qui a été lu est gardé).
+    async fn for_each_page(
+        &self,
+        id: &str,
+        mut on_page: impl FnMut(&Value),
+    ) -> Result<bool, CatalogError> {
         let first = self
             .yt
             .raw_json_query(GetPlaylistTracksQuery::new(browse_id(id)))
             .await?;
-        let mut pages = vec![serde_json::from_str::<Value>(&first).unwrap_or(Value::Null)];
-        while pages.len() < MAX_PAGES {
-            let Some(token) = pages.last().and_then(continuation_token) else {
-                return Ok((pages, true));
+        let mut page: Value = serde_json::from_str(&first).unwrap_or(Value::Null);
+        on_page(&page);
+        for read in 1..MAX_PAGES {
+            let Some(token) = continuation_token(&page) else {
+                return Ok(true);
             };
             let next = NextPage {
                 browse_id: browse_id(id).get_raw().to_owned(),
                 token,
             };
             // YouTube refuse parfois une page isolée : un second essai suffit en général.
-            let page = match self.yt.raw_json_query::<NextPage>(&next).await {
+            let next_page = match self.yt.raw_json_query::<NextPage>(&next).await {
                 Ok(page) => Ok(page),
                 Err(_) => {
                     tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     self.yt.raw_json_query::<NextPage>(&next).await
                 }
             };
-            match page {
-                Ok(page) => pages.push(serde_json::from_str(&page).unwrap_or(Value::Null)),
+            match next_page {
+                Ok(text) => {
+                    page = serde_json::from_str(&text).unwrap_or(Value::Null);
+                    on_page(&page);
+                }
                 Err(e) => {
-                    tracing::warn!(error = %e, id, pages = pages.len(), "playlist incomplète");
-                    return Ok((pages, false));
+                    tracing::warn!(error = %e, id, pages = read, "playlist incomplète");
+                    return Ok(false);
                 }
             }
         }
-        Ok((pages, false))
+        Ok(false)
     }
 }
 

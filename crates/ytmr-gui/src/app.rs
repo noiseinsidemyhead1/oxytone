@@ -430,6 +430,12 @@ impl App {
                 Ok(Some(backend)) => {
                     let core = backend.core.clone();
                     let account = crate::library::wait_for_account(backend.account.clone());
+                    let cache_dir = backend.library_cache.clone();
+                    if let Some(liked) = crate::library::cached_liked(&cache_dir) {
+                        self.lib.liked = liked.tracks.iter().map(|t| t.video_id.clone()).collect();
+                        self.lib.liked_count = Some(liked.tracks.len());
+                    }
+                    self.lib.cache_dir = Some(cache_dir);
                     self.phase = Phase::Ready(backend);
                     // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
                     let initial = self.on_core(CoreUpdate::State(core.state()));
@@ -676,7 +682,11 @@ impl App {
             }
             Message::Scrolled(id, viewport) => {
                 self.scrolling.scrolled(id, &viewport);
-                Task::none()
+                if id == PAGE_SCROLL {
+                    self.playlist_scrolled(&viewport)
+                } else {
+                    Task::none()
+                }
             }
             Message::Frame(now) => self.scrolling.frame(now),
             Message::Lib(message) => self.update_library(message),

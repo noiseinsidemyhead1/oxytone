@@ -87,27 +87,37 @@ pub struct Artist {
 }
 
 /// Accès au catalogue. Garde une connexion HTTP réutilisable : à créer une fois.
+///
+/// La connexion à YouTube Music se fait à la première utilisation (et se
+/// retente en cas d'échec) : l'application s'ouvre même sans réseau.
 pub struct Catalog {
-    yt: YtMusic<NoAuthToken>,
+    yt: tokio::sync::OnceCell<YtMusic<NoAuthToken>>,
 }
 
+/// Essais de connexion, espacés de plus en plus.
+const CONNECT_ATTEMPTS: [u64; 3] = [0, 600, 1500];
+
 impl Catalog {
-    /// Accès sans compte : recherche, albums, radio. Pas de bibliothèque perso.
-    pub async fn new_unauthenticated() -> Result<Self, CatalogError> {
-        let mut headers = HeaderMap::new();
-        headers.insert(COOKIE, HeaderValue::from_static(CONSENT_COOKIE));
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()?;
-        let client = ytmapi_rs::Client::new_from_reqwest_client(http);
-        Ok(Self {
-            yt: YtMusicBuilder::new_with_client(client).build().await?,
-        })
+    /// Accès sans compte : recherche, albums, radio. Ne touche pas au réseau.
+    pub fn new() -> Self {
+        Self {
+            yt: tokio::sync::OnceCell::new(),
+        }
     }
 
+    /// Ancien nom, connexion immédiate (CLI, tests).
+    pub async fn new_unauthenticated() -> Result<Self, CatalogError> {
+        let catalog = Self::new();
+        catalog.client().await?;
+        Ok(catalog)
+    }
+
+    async fn client(&self) -> Result<&YtMusic<NoAuthToken>, CatalogError> {
+        self.yt.get_or_try_init(connect).await
+    }
     /// Recherche limitée aux morceaux (pas de vidéos, albums ni playlists).
     pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>, CatalogError> {
-        let results = self.yt.search_songs(query).await?;
+        let results = self.client().await?.search_songs(query).await?;
         tracing::debug!(query, count = results.len(), "recherche de morceaux");
         Ok(results.into_iter().map(track_from_song).collect())
     }
@@ -115,10 +125,11 @@ impl Catalog {
     /// Morceaux, albums et artistes, trois requêtes lancées en parallèle.
     /// Un échec partiel (ex. albums) n'empêche pas de rendre le reste.
     pub async fn search_all(&self, query: &str) -> Result<SearchAll, CatalogError> {
+        let yt = self.client().await?;
         let (songs, albums, artists) = tokio::join!(
-            self.yt.search_songs(query),
-            self.yt.search_albums(query),
-            self.yt.search_artists(query),
+            yt.search_songs(query),
+            yt.search_albums(query),
+            yt.search_artists(query),
         );
         let songs: Vec<Track> = songs?.into_iter().map(track_from_song).collect();
         let albums = albums
@@ -137,13 +148,18 @@ impl Catalog {
     }
 
     pub async fn album(&self, id: &str) -> Result<Album, CatalogError> {
-        let album = self.yt.get_album(AlbumID::from_raw(id.to_owned())).await?;
+        let album = self
+            .client()
+            .await?
+            .get_album(AlbumID::from_raw(id.to_owned()))
+            .await?;
         Ok(album_from_get(id, album))
     }
 
     pub async fn artist(&self, id: &str) -> Result<Artist, CatalogError> {
         let artist = self
-            .yt
+            .client()
+            .await?
             .get_artist(ArtistChannelID::from_raw(id.to_owned()))
             .await?;
         Ok(artist_from_get(artist))
@@ -153,12 +169,44 @@ impl Catalog {
     /// Le premier résultat est en général le morceau lui-même.
     pub async fn radio(&self, video_id: &str) -> Result<Vec<Track>, CatalogError> {
         let results = self
-            .yt
+            .client()
+            .await?
             .get_watch_playlist_from_video_id(VideoID::from_raw(video_id.to_owned()))
             .await?;
         tracing::debug!(video_id, count = results.len(), "radio");
         Ok(results.into_iter().map(track_from_watch).collect())
     }
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn connect() -> Result<YtMusic<NoAuthToken>, CatalogError> {
+    let mut last = None;
+    for delay in CONNECT_ATTEMPTS {
+        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, HeaderValue::from_static(CONSENT_COOKIE));
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()?;
+        let client = ytmapi_rs::Client::new_from_reqwest_client(http);
+        match YtMusicBuilder::new_with_client(client).build().await {
+            Ok(yt) => return Ok(yt),
+            Err(e) => {
+                tracing::warn!(error = %e, "connexion à YouTube Music, nouvel essai");
+                last = Some(e);
+            }
+        }
+    }
+    Err(last.map_or(
+        CatalogError::Refused("connexion impossible"),
+        CatalogError::from,
+    ))
 }
 
 impl Radio for Catalog {
