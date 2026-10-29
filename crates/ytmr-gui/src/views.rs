@@ -325,10 +325,13 @@ fn sidebar(app: &App) -> El<'_> {
         .size(14)
         .style(style::search_input);
 
-    let mut search_box = column![search].spacing(2);
-    if app.route == Route::Search && !app.suggestions.is_empty() {
+    // Suggestions : un panneau posé *par-dessus* la navigation, juste sous le
+    // champ (elles poussaient les boutons Accueil, Bibliothèque…).
+    let mut suggestions = column![].spacing(2);
+    let show_suggestions = app.route == Route::Search && !app.suggestions.is_empty();
+    if show_suggestions {
         for s in &app.suggestions {
-            search_box = search_box.push(
+            suggestions = suggestions.push(
                 button(
                     row![
                         icon(Icon::Search, 13.0, style::TEXT_FAINT),
@@ -346,19 +349,39 @@ fn sidebar(app: &App) -> El<'_> {
             );
         }
     }
+    // Hauteur fixe du champ : le panneau se place juste dessous.
+    const SEARCH_H: f32 = 40.0;
+    let below = column![
+        container(search).height(Length::Fixed(SEARCH_H)),
+        column![
+            nav("Accueil", Icon::Home, Route::Home),
+            nav("Bibliothèque", Icon::Library, Route::Library),
+            nav("Paramètres", Icon::Settings, Route::Settings),
+        ]
+        .spacing(4),
+        Space::new().height(Length::Fill),
+        library::account_widget(app),
+    ]
+    .spacing(18);
+    let overlay: El<'_> = if show_suggestions {
+        column![
+            Space::new().height(Length::Fixed(SEARCH_H + 4.0)),
+            iced::widget::opaque(
+                container(suggestions)
+                    .width(Length::Fill)
+                    .padding(6)
+                    .style(style::toast)
+            ),
+        ]
+        .into()
+    } else {
+        Space::new().into()
+    };
 
     container(
         column![
             container(logo).padding(Padding::from([6, 8])),
-            search_box,
-            column![
-                nav("Accueil", Icon::Home, Route::Home),
-                nav("Bibliothèque", Icon::Library, Route::Library),
-                nav("Paramètres", Icon::Settings, Route::Settings),
-            ]
-            .spacing(4),
-            Space::new().height(Length::Fill),
-            library::account_widget(app),
+            stack![below, overlay].height(Length::Fill),
         ]
         .spacing(18)
         .padding(16),
@@ -496,6 +519,19 @@ pub(crate) fn cover_with_play<'a>(
             .padding(8),
     ]
     .into()
+}
+
+/// Nom d'un morceau : un clic ouvre sa page (album ou single), s'il en a une.
+pub(crate) fn track_title<'a>(track: &'a Track, size: u32, color: Color) -> El<'a> {
+    let label = line(&track.title, size).font(SEMIBOLD).color(color);
+    match &track.album_id {
+        Some(album) => button(label)
+            .padding(0)
+            .style(style::link)
+            .on_press(Message::Navigate(Route::Album(album.clone())))
+            .into(),
+        None => label.into(),
+    }
 }
 
 /// Morceaux affichés dans les résultats de recherche.
@@ -757,7 +793,7 @@ pub(crate) fn track_row<'a>(
         leading,
         container(
             column![
-                line(&track.title, 14).font(SEMIBOLD).color(title_color),
+                track_title(track, 14, title_color),
                 line(subtitle, 13).color(style::TEXT_DIM),
             ]
             .spacing(2),
@@ -1662,10 +1698,17 @@ fn player_bar(app: &App) -> El<'_> {
     let now: El<'_> = match &state.current {
         Some(entry) => {
             let track = &entry.track;
+            // Nom : la page du morceau (album ou single) ; la grande vue
+            // « En cours » s'ouvre seulement depuis la pochette.
             let title = button(line(&track.title, 14).font(SEMIBOLD))
                 .padding(0)
                 .style(style::link)
-                .on_press(Message::Navigate(Route::NowPlaying));
+                .on_press_maybe(
+                    track
+                        .album_id
+                        .clone()
+                        .map(|id| Message::Navigate(Route::Album(id))),
+                );
             row![
                 button(track_cover(app, track, 56.0))
                     .padding(0)

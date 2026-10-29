@@ -19,7 +19,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use ytmapi_rs::auth::{AuthToken, BrowserToken};
-use ytmapi_rs::common::ArtistChannelID;
 use ytmapi_rs::common::{ApiOutcome, LikeStatus, PlaylistID, SetVideoID, VideoID, YoutubeID};
 use ytmapi_rs::parse::LibraryPlaylist;
 use ytmapi_rs::parse::{ParseFrom, ProcessedResult};
@@ -178,13 +177,44 @@ impl Account {
     }
 
     /// Suit (`true`) ou ne suit plus un artiste.
-    pub async fn follow_artist(&self, channel_id: &str, follow: bool) -> Result<(), CatalogError> {
-        let id = ArtistChannelID::from_raw(channel_id.to_owned());
-        if follow {
-            self.yt.subscribe_artist(id).await?;
-        } else {
-            self.yt.unsubscribe_artists([id]).await?;
+    ///
+    /// L'abonnement ne porte pas toujours sur l'identifiant de la page : le
+    /// bouton de l'en-tête vise souvent une autre chaîne (constaté le
+    /// 2026-10-29 : page `UC59RK…`, abonnement `UCiRWTc0…`). ytmapi-rs envoyait
+    /// l'identifiant de la page → YouTube répondait 400 « Error unsubscribing ».
+    /// On lit donc le bouton de la page et on envoie ce qu'il envoie.
+    pub async fn follow_artist(&self, browse_id: &str, follow: bool) -> Result<(), CatalogError> {
+        let mut body = serde_json::Map::new();
+        body.insert("browseId".into(), json!(browse_id));
+        let raw = self
+            .yt
+            .raw_json_query(crate::raw::RawPost {
+                path: "browse",
+                body,
+                query: Vec::new(),
+            })
+            .await?;
+        let page: Value = serde_json::from_str(&raw).unwrap_or(Value::Null);
+        let (channel, params) = subscription_target(&page, follow);
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "channelIds".into(),
+            json!([channel.unwrap_or_else(|| browse_id.to_owned())]),
+        );
+        if let Some(params) = params {
+            body.insert("params".into(), json!(params));
         }
+        self.yt
+            .raw_json_query(crate::raw::RawPost {
+                path: if follow {
+                    "subscription/subscribe"
+                } else {
+                    "subscription/unsubscribe"
+                },
+                body,
+                query: Vec::new(),
+            })
+            .await?;
         Ok(())
     }
 
@@ -483,6 +513,28 @@ impl PostQuery for AccountMenu {
     }
 }
 
+/// Chaîne visée par le bouton d'abonnement d'une page d'artiste, et les
+/// `params` de l'action demandée (abonnement ou désabonnement).
+fn subscription_target(page: &Value, follow: bool) -> (Option<String>, Option<String>) {
+    let Some(button) = find_key(page, "subscribeButtonRenderer") else {
+        return (None, None);
+    };
+    let channel = button
+        .get("channelId")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let endpoint = if follow {
+        find_key(button, "subscribeEndpoint")
+    } else {
+        find_key(button, "unsubscribeEndpoint")
+    };
+    let params = endpoint
+        .and_then(|e| e.get("params"))
+        .and_then(Value::as_str)
+        .map(|p| p.replace("%3D", "="));
+    (channel, params)
+}
+
 fn find_key<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
     match v {
         Value::Object(m) => m
@@ -711,6 +763,29 @@ pub fn video_ids(tracks: &[Track]) -> std::collections::HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_targets_the_button_channel() {
+        let page = json!({"header": {"subscriptionButton": {"subscribeButtonRenderer": {
+            "channelId": "UCbouton",
+            "serviceEndpoints": [
+                {"subscribeEndpoint": {"channelIds": ["UCbouton"], "params": "EgIIGxgA"}},
+                {"signalServiceEndpoint": {"actions": [{"openPopupAction": {"popup": {"confirmDialogRenderer": {
+                    "confirmButton": {"buttonRenderer": {"serviceEndpoint": {
+                        "unsubscribeEndpoint": {"channelIds": ["UCbouton"]}
+                    }}}
+                }}}}]}}
+            ]
+        }}}});
+        assert_eq!(
+            subscription_target(&page, true),
+            (Some("UCbouton".into()), Some("EgIIGxgA".into()))
+        );
+        assert_eq!(
+            subscription_target(&page, false),
+            (Some("UCbouton".into()), None)
+        );
+    }
 
     /// Lecture seule : rangées de l'accueil.
     #[tokio::test]

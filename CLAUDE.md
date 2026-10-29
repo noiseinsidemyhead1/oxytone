@@ -143,6 +143,9 @@ Mesuré (debug) : `/state` 342 o en < 1 ms ; jaquette 600 px 2,2 s la 1re fois (
 - **Raccourcis-caractères** : dans iced 0.14, `KeyPressed::key` est la touche *sans* Maj ; en AZERTY, « / » et « ? » ne se lisent que sur `modified_key`.
 - **Plein écran Windows** : une fenêtre agrandie est d'abord repassée en taille normale (sinon bornée à la zone de travail), puis étendue sur `rcMonitor` et déclarée à la barre des tâches (`ITaskbarList2::MarkFullscreenWindow`).
 - **Accueil** : bouton lecture rond au survol des cartes (`views::cover_with_play`, `card_hover`) ; album / artiste / playlist chargés puis lus (`Message::PlayItem`, playlist depuis le cache si possible).
+- **Abonnement à un artiste** : le bouton de la page vise souvent une *autre* chaîne que l'identifiant de la page (constaté : page `UC59RK…`, abonnement `UCiRWTc0…`) ; ytmapi-rs envoyait l'identifiant de la page → 400 « Error unsubscribing ». `Account::follow_artist` lit la page, prend `subscribeButtonRenderer.channelId` et les `params` de l'action, et envoie la requête lui-même (`RawPost`). Les artistes similaires de la page ont `params: "GAA="`.
+- **Suggestions de recherche** : panneau `opaque` posé par-dessus la navigation (`stack!`), juste sous le champ (hauteur fixe 40) ; plus rien ne bouge.
+- **Nom d'un morceau** (`views::track_title`) : ouvre sa page (album ou single) s'il en a une ; la grande vue « En cours » ne s'ouvre plus que par la pochette de la barre du bas.
 - Pas encore : `/api/v1/like` (501) pour le CYD.
 
 ## Emplacements à l'exécution
