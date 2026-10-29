@@ -7,15 +7,18 @@ use std::time::Duration;
 
 use iced::widget::{
     Space, button, column, container, image, mouse_area, row, scrollable, slider, stack, text,
-    text_input,
+    text_input, tooltip,
 };
 use iced::{Alignment, Color, Element, Font, Length, Padding, font};
 use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{QueuedTrack, Repeat, Status, Track};
 use ytmr_player::StreamQuality;
 
-use crate::app::{App, CARD, HERO, Load, Message, PAGE_SCROLL, Phase, Route, SEARCH_INPUT, THUMB};
+use crate::app::{
+    App, CARD, HERO, Load, Message, PAGE_SCROLL, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT, THUMB,
+};
 use crate::icons::{Icon, icon};
+use crate::smooth::wheel;
 use crate::style;
 
 type El<'a> = Element<'a, Message>;
@@ -210,6 +213,20 @@ fn icon_btn<'a>(ic: Icon, size: f32, color: Color, message: Message) -> El<'a> {
         .into()
 }
 
+/// Bouton icône avec une bulle d'aide au survol.
+fn icon_tip<'a>(ic: Icon, size: f32, color: Color, message: Message, tip: String) -> El<'a> {
+    tooltip(
+        icon_btn(ic, size, color, message),
+        container(text(tip).size(12))
+            .padding(Padding::from([6, 10]))
+            .style(style::toast),
+        tooltip::Position::Top,
+    )
+    .gap(6)
+    .delay(std::time::Duration::from_millis(400))
+    .into()
+}
+
 fn section_title(title: &str) -> El<'_> {
     text(title).size(20).font(BOLD).into()
 }
@@ -219,15 +236,28 @@ fn muted(content: impl text::IntoFragment<'static>) -> El<'static> {
 }
 
 fn scroll_page<'a>(content: impl Into<El<'a>>) -> El<'a> {
-    scrollable(container(content).padding(Padding {
+    page_scroll(container(content).padding(Padding {
         top: 0.0,
         right: 28.0,
         bottom: 32.0,
         left: 28.0,
     }))
-    .id(PAGE_SCROLL)
-    .height(Length::Fill)
-    .style(style::scroll)
+}
+
+/// Liste défilante de la page centrale, avec défilement animé à la molette.
+fn page_scroll<'a>(content: impl Into<El<'a>>) -> El<'a> {
+    smooth_scroll(content, PAGE_SCROLL)
+}
+
+fn smooth_scroll<'a>(content: impl Into<El<'a>>, id: &'static str) -> El<'a> {
+    wheel(
+        scrollable(content)
+            .id(id)
+            .on_scroll(move |viewport| Message::Scrolled(id, viewport))
+            .height(Length::Fill)
+            .style(style::scroll),
+        move |lines| Message::Wheel(id, lines),
+    )
     .into()
 }
 
@@ -282,17 +312,19 @@ fn track_row<'a>(app: &App, track: &'a Track, number: Option<usize>, on_play: Me
         text(fmt_opt(track.duration))
             .size(13)
             .color(style::TEXT_FAINT),
-        icon_btn(
+        icon_tip(
             Icon::PlayNext,
             16.0,
             style::TEXT_DIM,
-            Message::PlayNext(track.clone())
+            Message::PlayNext(track.clone()),
+            "Lire ensuite".into()
         ),
-        icon_btn(
+        icon_tip(
             Icon::Plus,
             16.0,
             style::TEXT_DIM,
-            Message::Enqueue(track.clone())
+            Message::Enqueue(track.clone()),
+            "Ajouter à la file".into()
         ),
     ]
     .spacing(14)
@@ -460,7 +492,7 @@ fn home(app: &App) -> El<'_> {
         list = list.push(track_row(app, &e.track, None, Message::JumpTo(e.id)));
     }
 
-    scrollable(column![
+    page_scroll(column![
         hero,
         container(list).padding(Padding {
             top: 8.0,
@@ -469,10 +501,6 @@ fn home(app: &App) -> El<'_> {
             left: 28.0,
         })
     ])
-    .id(PAGE_SCROLL)
-    .height(Length::Fill)
-    .style(style::scroll)
-    .into()
 }
 
 fn quality_badge(app: &App) -> El<'_> {
@@ -648,11 +676,7 @@ fn album_page(app: &App) -> El<'_> {
         Load::Failed(e) => with_back(error_box(e)),
         Load::Ready(album) => album_body(app, album),
     };
-    scrollable(body)
-        .id(PAGE_SCROLL)
-        .height(Length::Fill)
-        .style(style::scroll)
-        .into()
+    page_scroll(body)
 }
 
 fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
@@ -714,11 +738,7 @@ fn artist_page(app: &App) -> El<'_> {
         Load::Failed(e) => with_back(error_box(e)),
         Load::Ready(artist) => artist_body(app, artist),
     };
-    scrollable(body)
-        .id(PAGE_SCROLL)
-        .height(Length::Fill)
-        .style(style::scroll)
-        .into()
+    page_scroll(body)
 }
 
 fn artist_body<'a>(app: &'a App, artist: &'a Artist) -> El<'a> {
@@ -784,7 +804,13 @@ fn queue_panel(app: &App) -> El<'_> {
             .padding(Padding::from([4, 10]))
             .style(style::pill_ghost)
             .on_press(Message::ClearQueue),
-        icon_btn(Icon::Close, 16.0, style::TEXT_DIM, Message::ToggleQueue),
+        icon_tip(
+            Icon::Close,
+            16.0,
+            style::TEXT_DIM,
+            Message::ToggleQueue,
+            "Masquer la file".into()
+        ),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -814,11 +840,12 @@ fn queue_panel(app: &App) -> El<'_> {
             ]
             .spacing(1)
             .width(Length::Fill),
-            icon_btn(
+            icon_tip(
                 Icon::Close,
                 13.0,
                 style::TEXT_FAINT,
-                Message::Remove(entry.id)
+                Message::Remove(entry.id),
+                "Retirer de la file".into()
             ),
         ]
         .spacing(10)
@@ -837,12 +864,9 @@ fn queue_panel(app: &App) -> El<'_> {
     }
 
     container(
-        column![
-            header,
-            scrollable(list).height(Length::Fill).style(style::scroll),
-        ]
-        .spacing(12)
-        .padding(14),
+        column![header, smooth_scroll(list, QUEUE_SCROLL),]
+            .spacing(12)
+            .padding(14),
     )
     .width(Length::Fixed(320.0))
     .height(Length::Fill)
@@ -890,20 +914,34 @@ fn player_bar(app: &App) -> El<'_> {
         Icon::Repeat
     };
     let controls = row![
-        icon_btn(
+        icon_tip(
             Icon::Shuffle,
             17.0,
             lit(state.shuffle),
-            Message::ToggleShuffle
+            Message::ToggleShuffle,
+            format!("Lecture aléatoire : {}", on_off(state.shuffle))
         ),
-        icon_btn(Icon::Prev, 18.0, style::TEXT, Message::Previous),
+        icon_tip(
+            Icon::Prev,
+            18.0,
+            style::TEXT,
+            Message::Previous,
+            "Précédent (Ctrl+←)".into()
+        ),
         play,
-        icon_btn(Icon::Next, 18.0, style::TEXT, Message::Next),
-        icon_btn(
+        icon_tip(
+            Icon::Next,
+            18.0,
+            style::TEXT,
+            Message::Next,
+            "Suivant (Ctrl+→)".into()
+        ),
+        icon_tip(
             repeat_icon,
             17.0,
             lit(state.repeat != Repeat::Off),
-            Message::CycleRepeat
+            Message::CycleRepeat,
+            repeat_label(state.repeat).into()
         ),
     ]
     .spacing(10)
@@ -945,14 +983,31 @@ fn player_bar(app: &App) -> El<'_> {
         Icon::Volume
     };
     let right = row![
-        icon_btn(
+        icon_tip(
             Icon::Radio,
             17.0,
             lit(state.autoplay),
-            Message::ToggleAutoplay
+            Message::ToggleAutoplay,
+            format!(
+                "Radio automatique : {}
+Ajoute des titres similaires quand la file se termine",
+                on_off(state.autoplay)
+            )
         ),
-        icon_btn(Icon::Queue, 17.0, lit(app.show_queue), Message::ToggleQueue),
-        icon_btn(volume_icon, 17.0, style::TEXT_DIM, Message::ToggleMute),
+        icon_tip(
+            Icon::Queue,
+            17.0,
+            lit(app.show_queue),
+            Message::ToggleQueue,
+            "File d'attente".into()
+        ),
+        icon_tip(
+            volume_icon,
+            17.0,
+            style::TEXT_DIM,
+            Message::ToggleMute,
+            format!("Volume {} % (clic : couper)", state.volume)
+        ),
         slider(0..=100u8, state.volume, Message::Volume)
             .width(Length::Fixed(110.0))
             .height(14)
@@ -980,6 +1035,18 @@ fn player_bar(app: &App) -> El<'_> {
 }
 
 // ----- formatage -----
+
+fn on_off(on: bool) -> &'static str {
+    if on { "activée" } else { "désactivée" }
+}
+
+fn repeat_label(repeat: Repeat) -> &'static str {
+    match repeat {
+        Repeat::Off => "Répéter : non",
+        Repeat::All => "Répéter : toute la file",
+        Repeat::One => "Répéter : ce morceau",
+    }
+}
 
 pub fn fmt(d: Duration) -> String {
     let s = d.as_secs();

@@ -21,16 +21,24 @@
 //! n'est résolue qu'une fois : la seconde demande attend la première.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
 
 use crate::PlayerError;
 use crate::deps::{Dependencies, JsRuntime};
+use crate::worker::Worker;
+
+/// Avec les cookies d'un compte, le client `web_music` sans page web préalable
+/// donne le même format (Opus 774) bien plus vite : 2,8 s contre 4,8 s par
+/// morceau dans le worker, 5,3 s contre 7,2 s avec l'exécutable (2026-10-29).
+const ACCOUNT_CLIENT: &str = "web_music";
+const ACCOUNT_SKIP: &str = "webpage,configs";
 
 /// Au-delà, yt-dlp est considéré bloqué.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -60,7 +68,7 @@ pub enum StartMode {
     Quality,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamQuality {
     /// Audio seul, meilleur format disponible.
     High,
@@ -71,7 +79,7 @@ pub enum StreamQuality {
 }
 
 /// Ce qu'on donne à mpv pour jouer un morceau.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MediaSource {
     pub url: String,
     /// User-Agent exigé par l'URL signée.
@@ -112,11 +120,30 @@ pub trait Resolver: Send + Sync + 'static {
 
 type Shared = watch::Receiver<Option<Result<MediaSource, String>>>;
 
+/// Réglages du résolveur, tirés de la config.
+#[derive(Debug, Clone, Default)]
+pub struct ResolverOptions {
+    /// Client YouTube pour [`StartMode::Fast`] ; `None` = toujours la qualité.
+    pub fast_client: Option<String>,
+    /// `firefox`, ou `firefox:<profil>` : session YouTube à utiliser.
+    pub cookies_from_browser: Option<String>,
+    /// `clé=valeur` ajoutées à chaque appel de l'exécutable. S'il y en a, le
+    /// worker n'est pas utilisé (ses options ne se traduisent pas toutes).
+    pub raw_options: Vec<String>,
+    /// Fichier où garder les adresses résolues entre deux lancements.
+    pub cache_file: Option<PathBuf>,
+}
+
 pub struct YtDlpResolver {
     ytdlp: PathBuf,
     /// Arguments communs à tous les appels (moteur JS, options de la config).
     common_args: Vec<String>,
     fast_client: Option<String>,
+    cookies: Option<String>,
+    node: bool,
+    worker_allowed: bool,
+    worker: Mutex<Option<Arc<Worker>>>,
+    cache_file: Option<PathBuf>,
     cache: Mutex<HashMap<String, MediaSource>>,
     /// Résolutions en cours, partagées entre demandeurs.
     inflight: Mutex<HashMap<String, Shared>>,
@@ -125,23 +152,77 @@ pub struct YtDlpResolver {
 }
 
 impl YtDlpResolver {
-    /// `fast_client` : client YouTube pour [`StartMode::Fast`] ; `None` = toujours la qualité.
-    /// `raw_options` : `clé=valeur` de la config, ajoutées à chaque appel.
-    pub fn new(deps: &Dependencies, fast_client: Option<String>, raw_options: &[String]) -> Self {
+    pub fn new(deps: &Dependencies, options: ResolverOptions) -> Self {
+        let node = deps.js_runtime == Some(JsRuntime::Node);
         let mut common_args = Vec::new();
-        if deps.js_runtime == Some(JsRuntime::Node) {
+        if node {
             common_args.extend(["--js-runtimes".to_owned(), "node".to_owned()]);
         }
-        common_args.extend(raw_options_to_args(raw_options));
+        if let Some(browser) = &options.cookies_from_browser {
+            common_args.extend(["--cookies-from-browser".to_owned(), browser.clone()]);
+        }
+        common_args.extend(raw_options_to_args(&options.raw_options));
+        let cache = options
+            .cache_file
+            .as_deref()
+            .map(load_cache)
+            .unwrap_or_default();
         Self {
             ytdlp: deps.ytdlp.path.clone(),
             common_args,
-            fast_client,
-            cache: Mutex::default(),
+            fast_client: options.fast_client,
+            cookies: options.cookies_from_browser,
+            node,
+            worker_allowed: options.raw_options.is_empty(),
+            worker: Mutex::default(),
+            cache_file: options.cache_file,
+            cache: Mutex::new(cache),
             inflight: Mutex::default(),
             urgent: Semaphore::new(MAX_URGENT),
             background: Semaphore::new(MAX_BACKGROUND),
         }
+    }
+
+    /// Options `YoutubeDL` du worker, équivalentes aux arguments de l'exécutable.
+    pub fn worker_options(&self) -> Option<Value> {
+        if !self.worker_allowed {
+            return None;
+        }
+        let mut options = json!({
+            "quiet": true,
+            "no_warnings": true,
+            "noplaylist": true,
+            "skip_download": true,
+            "format": "bestaudio/best",
+        });
+        if self.node {
+            options["js_runtimes"] = json!({ "node": {} });
+        }
+        if let Some(browser) = &self.cookies {
+            let (name, profile) = match browser.split_once(':') {
+                Some((name, profile)) => (name, Some(profile)),
+                None => (browser.as_str(), None),
+            };
+            options["cookiesfrombrowser"] = json!([name, profile]);
+            options["extractor_args"] = json!({ "youtube": {
+                "player_client": [ACCOUNT_CLIENT],
+                "player_skip": ACCOUNT_SKIP.split(',').collect::<Vec<_>>(),
+            }});
+        }
+        Some(options)
+    }
+
+    /// Branche le worker : les résolutions « qualité » passeront par lui.
+    pub fn attach_worker(&self, worker: Worker) {
+        *lock(&self.worker) = Some(Arc::new(worker));
+    }
+
+    fn live_worker(&self) -> Option<Arc<Worker>> {
+        let mut slot = lock(&self.worker);
+        if slot.as_ref().is_some_and(|w| !w.is_alive()) {
+            *slot = None;
+        }
+        slot.clone()
     }
 
     fn remember(&self, video_id: &str, source: &MediaSource) {
@@ -156,6 +237,9 @@ impl YtDlpResolver {
             cache.remove(&oldest);
         }
         cache.insert(video_id.to_owned(), source.clone());
+        if let Some(path) = &self.cache_file {
+            save_cache(path, &cache);
+        }
     }
 
     /// Résolution effective : file d'attente, yt-dlp, attente de disponibilité.
@@ -171,7 +255,16 @@ impl YtDlpResolver {
         };
         let (source, available_at) = {
             let _slot = semaphore.acquire().await.map_err(|_| PlayerError::Closed)?;
-            self.run(video_id, mode).await?
+            match self.live_worker().filter(|_| mode == StartMode::Quality) {
+                Some(worker) => match self.run_worker(&worker, video_id).await {
+                    Ok(resolved) => resolved,
+                    Err(e) => {
+                        tracing::warn!(error = %e, video_id, "worker en échec, repli sur l'exécutable");
+                        self.run(video_id, mode, priority).await?
+                    }
+                },
+                None => self.run(video_id, mode, priority).await?,
+            }
         };
         if let Some(wait) = available_at.and_then(|t| t.duration_since(SystemTime::now()).ok()) {
             tracing::debug!(
@@ -185,15 +278,42 @@ impl YtDlpResolver {
         Ok(source)
     }
 
+    async fn run_worker(
+        &self,
+        worker: &Worker,
+        video_id: &str,
+    ) -> Result<(MediaSource, Option<SystemTime>), PlayerError> {
+        let started = std::time::Instant::now();
+        let url = format!("https://music.youtube.com/watch?v={video_id}");
+        let value = worker
+            .extract(&url)
+            .await
+            .map_err(|e| PlayerError::Resolve(format!("{video_id} : {e}")))?;
+        let info: YtDlpInfo = serde_json::from_value(value)
+            .map_err(|e| PlayerError::Resolve(format!("réponse du worker illisible : {e}")))?;
+        let resolved = info.into_source()?;
+        tracing::debug!(
+            video_id,
+            quality = ?resolved.0.quality,
+            elapsed_ms = started.elapsed().as_millis(),
+            "flux résolu (worker)"
+        );
+        Ok(resolved)
+    }
+
     /// Lance yt-dlp ; rend la source et l'instant à partir duquel elle est utilisable.
     async fn run(
         &self,
         video_id: &str,
         mode: StartMode,
+        priority: Priority,
     ) -> Result<(MediaSource, Option<SystemTime>), PlayerError> {
         let url = format!("https://music.youtube.com/watch?v={video_id}");
 
         let mut cmd = crate::process::command(&self.ytdlp);
+        if priority == Priority::Background {
+            crate::process::below_normal_priority(&mut cmd);
+        }
         cmd.args([
             "-J",
             "--no-warnings",
@@ -209,6 +329,10 @@ impl YtDlpResolver {
         if let Some(client) = client {
             cmd.arg("--extractor-args")
                 .arg(format!("youtube:player_client={client}"));
+        } else if self.cookies.is_some() {
+            cmd.arg("--extractor-args").arg(format!(
+                "youtube:player_client={ACCOUNT_CLIENT};player_skip={ACCOUNT_SKIP}"
+            ));
         }
         cmd.arg("--")
             .arg(&url)
@@ -323,6 +447,34 @@ impl Resolver for YtDlpResolver {
         ));
         result
     }
+}
+
+/// Adresses encore valables d'un lancement précédent.
+fn load_cache(path: &Path) -> HashMap<String, MediaSource> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashMap::new();
+    };
+    let mut cache: HashMap<String, MediaSource> = serde_json::from_str(&text).unwrap_or_default();
+    cache.retain(|_, s| s.is_fresh());
+    tracing::info!(entries = cache.len(), "adresses de flux reprises du disque");
+    cache
+}
+
+fn save_cache(path: &Path, cache: &HashMap<String, MediaSource>) {
+    let Ok(json) = serde_json::to_vec(cache) else {
+        return;
+    };
+    let path = path.to_path_buf();
+    // Petit fichier (< 500 Ko), écrit hors du fil courant.
+    std::thread::spawn(move || {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let tmp = path.with_extension("tmp");
+        if std::fs::write(&tmp, json).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
+    });
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {

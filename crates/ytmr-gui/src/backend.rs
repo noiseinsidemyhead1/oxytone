@@ -16,7 +16,8 @@ use ytmr_catalog::Catalog;
 use ytmr_core::engine::{self, CoreOptions};
 use ytmr_core::{AppPaths, Command, Config, CoreHandle};
 use ytmr_media::Covers;
-use ytmr_player::{Dependencies, MpvPlayer, YtDlpResolver};
+use ytmr_player::worker::{self, Worker};
+use ytmr_player::{Dependencies, MpvPlayer, ResolverOptions, YtDlpResolver};
 
 pub struct Backend {
     pub core: CoreHandle,
@@ -67,9 +68,14 @@ impl Backend {
         let catalog = Arc::new(catalog);
         let resolver = Arc::new(YtDlpResolver::new(
             &deps,
-            fast_client.map(str::to_owned),
-            &ytdl_options,
+            ResolverOptions {
+                fast_client: fast_client.map(str::to_owned),
+                cookies_from_browser: config.player.cookies_from_browser().map(str::to_owned),
+                raw_options: config.player.ytdl_raw_options.clone(),
+                cache_file: Some(paths.cache_dir.join("streams.json")),
+            },
         ));
+        start_worker(&resolver, paths.cache_dir.join("ytdlp-env"));
         let covers = Arc::new(
             Covers::new(paths.cache_dir.join("covers"))
                 .context("dossier de cache des jaquettes")?,
@@ -77,7 +83,7 @@ impl Backend {
 
         let (core, core_task) = engine::spawn(
             player,
-            resolver,
+            Arc::clone(&resolver),
             Arc::clone(&catalog),
             CoreOptions {
                 volume: config.player.volume,
@@ -133,4 +139,33 @@ impl Backend {
             }
         }
     }
+}
+
+/// Installe (au besoin) puis démarre le yt-dlp permanent, en tâche de fond :
+/// en attendant, le résolveur utilise l'exécutable.
+fn start_worker(resolver: &Arc<YtDlpResolver>, env_dir: std::path::PathBuf) {
+    let Some(options) = resolver.worker_options() else {
+        return;
+    };
+    let resolver = Arc::clone(resolver);
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let python = match worker::ensure_env(&env_dir).await {
+            Ok(python) => python,
+            Err(e) => {
+                tracing::warn!("worker yt-dlp indisponible : {e}");
+                return;
+            }
+        };
+        match Worker::spawn(&python, &options).await {
+            Ok(w) => {
+                resolver.attach_worker(w);
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "worker yt-dlp branché"
+                );
+            }
+            Err(e) => tracing::warn!("worker yt-dlp indisponible : {e}"),
+        }
+    });
 }

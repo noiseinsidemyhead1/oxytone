@@ -21,6 +21,7 @@ use ytmr_core::{
 };
 
 use crate::backend::Backend;
+use crate::smooth::Scrolling;
 use crate::style;
 
 /// Tailles demandées au cache de jaquettes (en pixels physiques, ~2× l'affichage).
@@ -37,6 +38,7 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 pub const SEARCH_INPUT: &str = "recherche";
 /// Défilement de la page centrale, remis en haut à chaque navigation.
 pub const PAGE_SCROLL: &str = "page";
+pub const QUEUE_SCROLL: &str = "file";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
@@ -119,6 +121,9 @@ pub enum Message {
     CommandDone(Result<(), String>),
     Key(keyboard::Event),
     DismissToast(u64),
+    Wheel(&'static str, f32),
+    Scrolled(&'static str, iced::widget::scrollable::Viewport),
+    Frame(std::time::Instant),
     CloseRequested,
     ShutdownDone,
 }
@@ -149,6 +154,7 @@ pub struct App {
     hovered: Option<String>,
     pub toast: Option<(u64, String)>,
     toast_seq: u64,
+    scrolling: Scrolling,
     shutting_down: bool,
 }
 
@@ -189,6 +195,7 @@ impl App {
             hovered: None,
             toast: None,
             toast_seq: 0,
+            scrolling: Scrolling::default(),
             shutting_down: false,
         };
         (app, start)
@@ -216,10 +223,15 @@ impl App {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        Subscription::batch([
+        let mut subscriptions = vec![
             window::close_requests().map(|_| Message::CloseRequested),
             keyboard::listen().map(Message::Key),
-        ])
+        ];
+        // Une image par rafraîchissement de l'écran, seulement pendant une animation.
+        if self.scrolling.is_animating() {
+            subscriptions.push(window::frames().map(Message::Frame));
+        }
+        Subscription::batch(subscriptions)
     }
 
     fn backend(&self) -> Option<&Backend> {
@@ -336,6 +348,7 @@ impl App {
         }
         let previous = std::mem::replace(&mut self.route, route.clone());
         self.history.push(previous);
+        self.scrolling.reset(PAGE_SCROLL);
         Task::batch([self.open(route), scroll_top()])
     }
 
@@ -419,6 +432,7 @@ impl App {
             Message::Back => match self.history.pop() {
                 Some(route) => {
                     self.route = route.clone();
+                    self.scrolling.reset(PAGE_SCROLL);
                     Task::batch([self.open(route), scroll_top()])
                 }
                 None => Task::none(),
@@ -641,6 +655,15 @@ impl App {
                     _ => iced::exit(),
                 }
             }
+            Message::Wheel(id, lines) => {
+                self.scrolling.wheel(id, lines);
+                Task::none()
+            }
+            Message::Scrolled(id, viewport) => {
+                self.scrolling.scrolled(id, &viewport);
+                Task::none()
+            }
+            Message::Frame(now) => self.scrolling.frame(now),
             Message::ShutdownDone => iced::exit(),
         }
     }

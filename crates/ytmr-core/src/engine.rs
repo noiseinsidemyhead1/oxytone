@@ -152,12 +152,16 @@ pub struct CoreOptions {
     pub session_file: Option<PathBuf>,
 }
 
-/// File et position sauvegardées à la fermeture, reprises au lancement suivant.
+/// File, position et réglages sauvegardés à la fermeture, repris au lancement suivant.
 #[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
 struct Session {
     tracks: Vec<Track>,
     current: Option<usize>,
     position_ms: u64,
+    volume: Option<u8>,
+    repeat: Option<Repeat>,
+    autoplay: Option<bool>,
 }
 
 impl Session {
@@ -247,16 +251,25 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         autoplay: options.autoplay,
         ..PlaybackState::default()
     };
-    // Reprise : la file revient telle qu'à la fermeture, en pause sur le même morceau.
+    // Reprise : réglages, puis file telle qu'à la fermeture, en pause sur le même morceau.
     let mut resume_at = None;
-    if let Some(session) = options.session_file.as_deref().and_then(Session::load)
-        && let Some(id) = queue.replace(session.tracks, session.current.unwrap_or(0))
-    {
-        let position = Duration::from_millis(session.position_ms);
-        state.position = position;
-        state.duration = queue.current().and_then(|e| e.track.duration);
-        resume_at = Some((id, position));
-        tracing::info!(tracks = queue.entries().len(), "session reprise");
+    let mut restored_volume = None;
+    if let Some(session) = options.session_file.as_deref().and_then(Session::load) {
+        if let Some(volume) = session.volume.filter(|v| *v <= 100) {
+            state.volume = volume;
+            restored_volume = Some(volume);
+        }
+        if let Some(autoplay) = session.autoplay {
+            state.autoplay = autoplay;
+        }
+        queue.set_repeat(session.repeat.unwrap_or_default());
+        if let Some(id) = queue.replace(session.tracks, session.current.unwrap_or(0)) {
+            let position = Duration::from_millis(session.position_ms);
+            state.position = position;
+            state.duration = queue.current().and_then(|e| e.track.duration);
+            resume_at = Some((id, position));
+            tracing::info!(tracks = queue.entries().len(), "session reprise");
+        }
     }
     let (commands_tx, commands_rx) = mpsc::channel(64);
     let (state_tx, state_rx) = watch::channel(state.clone());
@@ -287,6 +300,7 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         warming: HashSet::new(),
         warm_wanted: VecDeque::new(),
         resume_at,
+        restored_volume,
         session_file: options.session_file,
         consecutive_errors: 0,
         player_alive: true,
@@ -358,6 +372,8 @@ struct Engine<P, R, C> {
     warm_wanted: VecDeque<String>,
     /// Position à rejoindre au premier démarrage du morceau repris.
     resume_at: Option<(QueueId, Duration)>,
+    /// Volume de la session précédente, à transmettre au lecteur au démarrage.
+    restored_volume: Option<u8>,
     session_file: Option<PathBuf>,
     consecutive_errors: u32,
     player_alive: bool,
@@ -365,7 +381,12 @@ struct Engine<P, R, C> {
 
 impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     async fn run(mut self, mut commands: mpsc::Receiver<Request>) {
-        // Session reprise : publier la file et préparer les premiers morceaux.
+        // Session reprise : volume, file, et préparation des premiers morceaux.
+        if let Some(volume) = self.restored_volume.take()
+            && let Err(e) = self.player.set_volume(volume).await
+        {
+            tracing::warn!(error = %e, "volume de la session précédente");
+        }
         self.queue_dirty = self.queue.current().is_some();
         self.refresh_lookahead();
         self.publish();
@@ -589,6 +610,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             current: self.queue.current_index().map(|c| c - start),
             position_ms: u64::try_from(self.state.position.as_millis()).unwrap_or(0),
             tracks,
+            volume: Some(self.state.volume),
+            repeat: Some(self.queue.repeat()),
+            autoplay: Some(self.state.autoplay),
         }
         .save(path);
     }
@@ -1589,6 +1613,8 @@ mod tests {
             core.state().position == Duration::from_secs(42)
         })
         .await;
+        core.send(Command::SetVolume(33)).await.unwrap();
+        core.send(Command::SetRepeat(Repeat::All)).await.unwrap();
         core.send(Command::Shutdown).await.unwrap();
         assert!(file.exists());
 
@@ -1605,6 +1631,8 @@ mod tests {
         assert_eq!(current_title(&core).as_deref(), Some("t1"));
         assert_eq!(core.state().status, Status::Idle);
         assert_eq!(core.state().position, Duration::from_secs(42));
+        assert_eq!(core.state().volume, 33, "volume gardé");
+        assert_eq!(core.state().repeat, Repeat::All, "repeat gardé");
 
         // « Lecture » relance le morceau et rejoint la position.
         core.send(Command::TogglePause).await.unwrap();

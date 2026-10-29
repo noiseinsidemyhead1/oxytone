@@ -13,7 +13,7 @@ use tokio::sync::broadcast::error::RecvError;
 use ytmr_catalog::Catalog;
 use ytmr_core::engine::{self, CoreOptions};
 use ytmr_core::{AppPaths, Command as Cmd, Config, CoreEvent, CoreHandle, Status, Track};
-use ytmr_player::{Dependencies, MpvPlayer, StreamQuality, YtDlpResolver};
+use ytmr_player::{Dependencies, MpvPlayer, ResolverOptions, StreamQuality, YtDlpResolver};
 
 #[derive(Parser)]
 #[command(version, about = "Client YouTube Music en ligne de commande")]
@@ -131,8 +131,12 @@ async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result
     let catalog = Arc::new(catalog);
     let resolver = Arc::new(YtDlpResolver::new(
         &deps,
-        fast_client.map(str::to_owned),
-        &ytdl_options,
+        ResolverOptions {
+            fast_client: fast_client.map(str::to_owned),
+            cookies_from_browser: config.player.cookies_from_browser().map(str::to_owned),
+            raw_options: config.player.ytdl_raw_options.clone(),
+            cache_file: None,
+        },
     ));
 
     let mut tracks = catalog.search_songs(query).await?;

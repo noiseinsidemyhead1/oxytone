@@ -8,6 +8,7 @@ pub mod deps;
 mod mpv;
 mod process;
 pub mod resolve;
+pub mod worker;
 
 use std::time::Duration;
 
@@ -16,7 +17,9 @@ use tokio::sync::broadcast;
 
 pub use deps::Dependencies;
 pub use mpv::MpvPlayer;
-pub use resolve::{MediaSource, Priority, Resolver, StartMode, StreamQuality, YtDlpResolver};
+pub use resolve::{
+    MediaSource, Priority, Resolver, ResolverOptions, StartMode, StreamQuality, YtDlpResolver,
+};
 
 #[derive(Debug, Error)]
 pub enum PlayerError {

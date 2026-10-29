@@ -8,6 +8,8 @@
 //! mémorise l'ordre d'origine pour le restaurer quand on le désactive.
 //! Ce module ne fait aucune entrée/sortie : il est entièrement testé à part.
 
+use serde::{Deserialize, Serialize};
+
 use crate::Track;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -19,7 +21,7 @@ pub struct QueuedTrack {
     pub track: Track,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Repeat {
     #[default]
     Off,
