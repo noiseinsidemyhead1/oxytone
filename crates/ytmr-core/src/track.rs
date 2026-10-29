@@ -36,6 +36,60 @@ impl Track {
             .clone()
             .unwrap_or_else(|| format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", self.video_id))
     }
+
+    /// Même chanson, même sous un autre identifiant (clip / version audio,
+    /// « (Official Audio) », « (feat. …) ») : titre sans parenthèses et
+    /// artiste principal comparés en ignorant casse, accents et ponctuation.
+    pub fn same_song(&self, other: &Track) -> bool {
+        if self.video_id == other.video_id {
+            return true;
+        }
+        let (a, b) = (song_key(&self.title), song_key(&other.title));
+        !a.is_empty() && a == b && main_artist_key(&self.artist) == main_artist_key(&other.artist)
+    }
+}
+
+/// Titre réduit à l'essentiel : sans « (…) », « […] » ni « - Remastered ».
+fn song_key(title: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in title.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let base = out.split(" - ").next().unwrap_or_default().to_owned();
+    fold(&base)
+}
+
+fn main_artist_key(artist: &str) -> String {
+    let first = artist
+        .split([',', '&'])
+        .next()
+        .unwrap_or_default()
+        .split(" feat")
+        .next()
+        .unwrap_or_default();
+    fold(first)
+}
+
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'â' | 'ä' | 'á' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'î' | 'ï' | 'í' => 'i',
+            'ô' | 'ö' | 'ó' => 'o',
+            'ù' | 'û' | 'ü' | 'ú' => 'u',
+            'ç' => 'c',
+            c => c,
+        })
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
 
 /// Lit une durée au format YouTube (`"3:45"`, `"1:02:03"`).
@@ -56,6 +110,33 @@ pub fn parse_duration(text: &str) -> Option<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn song(id: &str, title: &str, artist: &str) -> Track {
+        Track {
+            video_id: id.into(),
+            title: title.into(),
+            artist: artist.into(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration: None,
+            thumbnail_url: None,
+        }
+    }
+
+    #[test]
+    fn recognizes_the_same_song_under_another_id() {
+        let audio = song("a", "Get Lucky (feat. Pharrell Williams)", "Daft Punk");
+        let clip = song(
+            "b",
+            "Get Lucky (Official Video)",
+            "Daft Punk, Pharrell Williams",
+        );
+        let other = song("c", "Lose Yourself to Dance", "Daft Punk");
+        assert!(audio.same_song(&clip));
+        assert!(!audio.same_song(&other));
+        assert!(!audio.same_song(&song("d", "Get Lucky", "Quelqu'un d'autre")));
+    }
 
     #[test]
     fn parses_youtube_durations() {

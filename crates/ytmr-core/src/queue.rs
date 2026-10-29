@@ -180,8 +180,8 @@ impl Queue {
         // fois dans le contexte (ajouté de nouveau, radio) ou ne pas y avoir de
         // place connue ; il revenait alors en tête d'une file vide passée en
         // aléatoire.
-        if let Some(current) = self.current().map(|e| e.track.video_id.clone()) {
-            order.retain(|&o| self.context[o].video_id != current);
+        if let Some(current) = self.current().map(|e| e.track.clone()) {
+            order.retain(|&o| !self.context[o].same_song(&current));
         }
         if self.shuffle {
             self.rng.shuffle(&mut order);
@@ -595,6 +595,24 @@ mod tests {
         empty.set_shuffle(true);
         empty.set_shuffle(false);
         assert!(empty.visible().is_empty());
+    }
+
+    #[test]
+    fn shuffle_never_requeues_the_current_song_under_another_id() {
+        // Le morceau en cours (version audio) et sa version clip dans la liste.
+        let mut q = queue();
+        let mut clip = track(0);
+        clip.video_id = "clip0000000".into();
+        clip.title = "titre 0 (Official Video)".into();
+        q.replace(vec![track(0), track(1), clip], 0);
+        q.set_shuffle(true);
+        let shown = visible(&q);
+        assert_eq!(
+            shown.len(),
+            2,
+            "le clip du morceau en cours est écarté : {shown:?}"
+        );
+        assert!(shown.contains(&"1".to_owned()));
     }
 
     #[test]

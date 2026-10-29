@@ -1023,9 +1023,18 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 match result {
                     Ok(tracks) => {
                         let mut fresh: Vec<Track> = Vec::new();
+                        // YouTube met souvent le morceau de départ en tête de sa
+                        // radio, parfois sous un autre identifiant (clip / audio).
+                        let current = self.queue.current().map(|e| e.track.clone());
                         for track in tracks {
                             let duplicate = self.queue.contains_video(&track.video_id)
-                                || fresh.iter().any(|t| t.video_id == track.video_id);
+                                || current.as_ref().is_some_and(|c| c.same_song(&track))
+                                || self
+                                    .queue
+                                    .visible()
+                                    .iter()
+                                    .any(|e| e.track.same_song(&track))
+                                || fresh.iter().any(|t| t.same_song(&track));
                             if !duplicate && fresh.len() < RADIO_MAX_ADD {
                                 fresh.push(track);
                             }
