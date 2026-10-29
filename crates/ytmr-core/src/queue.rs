@@ -1,12 +1,22 @@
-//! File d'attente : ordre de lecture, shuffle et repeat.
+//! File d'attente : historique, morceau en cours, suite, shuffle et repeat.
 //!
-//! En clair : la liste des morceaux à jouer et un curseur sur celui en cours.
+//! En clair : trois morceaux de liste bout à bout.
+//! - l'**historique** : ce qui a vraiment été joué (pour « précédent ») ;
+//!   il n'est pas montré dans la file ;
+//! - le **morceau en cours** ;
+//! - la **suite** : ce qui va être joué, dans l'ordre.
+//!
+//! À côté, le **contexte** garde la liste d'origine (la playlist lancée, plus
+//! les ajouts). Lancer un morceau au milieu d'une playlist ne marque rien comme
+//! « déjà joué » : la suite contient tout le reste de la playlist (la fin, puis
+//! le début). Activer ou couper l'aléatoire reconstruit la suite à partir du
+//! contexte entier : on peut toujours réécouter toute la playlist.
+//!
 //! Chaque entrée reçoit un identifiant unique ([`QueueId`]), pour qu'on puisse
 //! retirer ou déplacer « ce morceau-là » même si le même titre apparaît deux fois.
-//!
-//! Le shuffle mélange réellement la suite de la liste (comme YouTube Music) et
-//! mémorise l'ordre d'origine pour le restaurer quand on le désactive.
 //! Ce module ne fait aucune entrée/sortie : il est entièrement testé à part.
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +35,7 @@ pub struct QueuedTrack {
 pub enum Repeat {
     #[default]
     Off,
-    /// Reprend au début après le dernier morceau.
+    /// Reprend toute la liste après le dernier morceau.
     All,
     /// Rejoue le morceau courant en boucle (seulement en enchaînement automatique).
     One,
@@ -51,11 +61,20 @@ pub enum Removed {
     Current,
 }
 
+/// Historique gardé pour « précédent ».
+const MAX_HISTORY: usize = 200;
+
 pub struct Queue {
+    /// Historique, puis morceau en cours, puis suite.
     entries: Vec<QueuedTrack>,
     current: Option<usize>,
-    /// Ordre d'origine, mémorisé tant que le shuffle est actif.
-    unshuffled: Option<Vec<QueueId>>,
+    /// Sans morceau en cours : début de la suite dans `entries`.
+    resume: usize,
+    /// Liste d'origine (playlist lancée + ajouts), dans son ordre.
+    context: Vec<Track>,
+    /// Entrée → position dans `context`.
+    origin: HashMap<QueueId, usize>,
+    shuffle: bool,
     repeat: Repeat,
     next_id: u64,
     rng: fastrand::Rng,
@@ -72,13 +91,24 @@ impl Queue {
         Self {
             entries: Vec::new(),
             current: None,
-            unshuffled: None,
+            resume: 0,
+            context: Vec::new(),
+            origin: HashMap::new(),
+            shuffle: false,
             repeat: Repeat::Off,
             next_id: 1,
             rng,
         }
     }
 
+    // ----- lecture -----
+
+    /// Morceau en cours puis suite : ce que la file affiche (sans l'historique).
+    pub fn visible(&self) -> &[QueuedTrack] {
+        &self.entries[self.current.unwrap_or(self.resume).min(self.entries.len())..]
+    }
+
+    /// Historique, courant et suite (pour la session).
     pub fn entries(&self) -> &[QueuedTrack] {
         &self.entries
     }
@@ -99,245 +129,370 @@ impl Queue {
         self.repeat
     }
 
-    pub fn set_repeat(&mut self, repeat: Repeat) {
-        self.repeat = repeat;
-    }
-
     pub fn shuffle(&self) -> bool {
-        self.unshuffled.is_some()
+        self.shuffle
     }
 
     pub fn contains_video(&self, video_id: &str) -> bool {
         self.entries.iter().any(|e| e.track.video_id == video_id)
+            || self.context.iter().any(|t| t.video_id == video_id)
     }
 
-    /// Morceaux après le courant, dans l'ordre de lecture (tous si rien n'est en cours).
+    fn upcoming_start(&self) -> usize {
+        self.current
+            .map_or(self.resume, |i| i + 1)
+            .min(self.entries.len())
+    }
+
+    /// Morceaux après le courant, dans l'ordre de lecture.
     pub fn upcoming(&self) -> &[QueuedTrack] {
-        match self.current {
-            Some(i) => &self.entries[i + 1..],
-            None => &self.entries,
-        }
+        &self.entries[self.upcoming_start()..]
     }
 
-    /// Morceaux restant après le courant (tous si rien n'est en cours).
     pub fn upcoming_len(&self) -> usize {
-        match self.current {
-            Some(i) => self.entries.len() - i - 1,
-            None => self.entries.len(),
+        self.entries.len() - self.upcoming_start()
+    }
+
+    // ----- construction -----
+
+    fn fresh(&mut self, track: Track, origin: Option<usize>) -> QueuedTrack {
+        let id = QueueId(self.next_id);
+        self.next_id += 1;
+        if let Some(o) = origin {
+            self.origin.insert(id, o);
+        }
+        QueuedTrack { id, track }
+    }
+
+    fn current_origin(&self) -> Option<usize> {
+        self.current().and_then(|e| self.origin.get(&e.id).copied())
+    }
+
+    /// Positions du contexte à jouer après `from` : la fin de la liste puis
+    /// son début (ordre d'origine), ou tout le reste mélangé.
+    fn order_after(&mut self, from: Option<usize>) -> Vec<usize> {
+        let len = self.context.len();
+        let mut order: Vec<usize> = match from {
+            Some(f) => (f + 1..len).chain(0..f.min(len)).collect(),
+            None => (0..len).collect(),
+        };
+        if self.shuffle {
+            self.rng.shuffle(&mut order);
+        }
+        order
+    }
+
+    fn push_from_context(&mut self, order: Vec<usize>) {
+        for o in order {
+            let entry = self.fresh(self.context[o].clone(), Some(o));
+            self.entries.push(entry);
         }
     }
 
-    /// Vide tout et met `tracks` à la place ; `start` devient le morceau courant.
+    /// Remplace la suite par le reste du contexte (dans l'ordre courant).
+    fn rebuild_upcoming(&mut self) {
+        let start = self.upcoming_start();
+        let removed: Vec<QueueId> = self.entries.drain(start..).map(|e| e.id).collect();
+        for id in removed {
+            self.origin.remove(&id);
+        }
+        let order = self.order_after(self.current_origin());
+        self.push_from_context(order);
+    }
+
+    /// Repeat::All : la liste repart quand la suite est vide.
+    fn top_up(&mut self) {
+        if self.repeat == Repeat::All && self.upcoming_len() == 0 && !self.context.is_empty() {
+            let from = self.current_origin();
+            let mut order = self.order_after(from);
+            if let Some(f) = from {
+                // Le tour complet inclut le morceau en cours, à la fin.
+                order.push(f);
+            }
+            self.push_from_context(order);
+        }
+    }
+
+    /// Garde l'historique sous `MAX_HISTORY`.
+    fn trim_history(&mut self) {
+        let history = self.current.unwrap_or(self.resume);
+        if history > MAX_HISTORY {
+            let drop = history - MAX_HISTORY;
+            let removed: Vec<QueueId> = self.entries.drain(..drop).map(|e| e.id).collect();
+            for id in removed {
+                self.origin.remove(&id);
+            }
+            self.current = self.current.map(|c| c - drop);
+            self.resume -= drop.min(self.resume);
+        }
+    }
+
+    /// Nouvelle liste ; `tracks[start]` devient le morceau en cours. Rien n'est
+    /// considéré comme joué : la suite contient tous les autres titres.
     pub fn replace(&mut self, tracks: Vec<Track>, start: usize) -> Option<QueueId> {
         self.entries.clear();
+        self.origin.clear();
         self.current = None;
-        let shuffle = self.shuffle();
-        self.unshuffled = None;
-        self.append(tracks);
-        if self.entries.is_empty() {
+        self.resume = 0;
+        self.context = tracks;
+        if self.context.is_empty() {
             return None;
         }
-        self.current = Some(start.min(self.entries.len() - 1));
-        if shuffle {
-            self.set_shuffle(true);
-        }
-        self.current().map(|e| e.id)
-    }
-
-    /// Remplace la file par `tracks` mélangés, en mode aléatoire, et part du
-    /// premier. Désactiver l'aléatoire rend l'ordre d'origine (courant gardé).
-    pub fn replace_shuffled(&mut self, tracks: Vec<Track>) -> Option<QueueId> {
-        self.entries.clear();
-        self.current = None;
-        self.unshuffled = None;
-        let ids = self.append(tracks);
-        if self.entries.is_empty() {
-            return None;
-        }
-        self.unshuffled = Some(ids);
-        self.rng.shuffle(&mut self.entries);
+        let start = start.min(self.context.len() - 1);
+        let entry = self.fresh(self.context[start].clone(), Some(start));
+        let id = entry.id;
+        self.entries.push(entry);
         self.current = Some(0);
+        self.rebuild_upcoming();
+        self.top_up();
+        Some(id)
+    }
+
+    /// Comme [`Queue::replace`], aléatoire activé et départ tiré au hasard.
+    pub fn replace_shuffled(&mut self, tracks: Vec<Track>) -> Option<QueueId> {
+        self.shuffle = true;
+        let start = if tracks.is_empty() {
+            0
+        } else {
+            self.rng.usize(..tracks.len())
+        };
+        self.replace(tracks, start)
+    }
+
+    /// Session reprise : `tracks[..current]` est l'historique, le reste la suite
+    /// telle quelle (ordre gardé, même mélangé).
+    pub fn restore(
+        &mut self,
+        tracks: Vec<Track>,
+        current: usize,
+        shuffle: bool,
+    ) -> Option<QueueId> {
+        self.entries.clear();
+        self.origin.clear();
+        self.shuffle = shuffle;
+        self.current = None;
+        self.resume = 0;
+        self.context = tracks.clone();
+        if tracks.is_empty() {
+            return None;
+        }
+        let current = current.min(tracks.len() - 1);
+        for (i, track) in tracks.into_iter().enumerate() {
+            let entry = self.fresh(track, Some(i));
+            self.entries.push(entry);
+        }
+        self.current = Some(current);
+        self.top_up();
         self.current().map(|e| e.id)
     }
 
-    /// Ajoute à la fin de la file.
-    pub fn append(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
-        let at = self.entries.len();
-        self.insert_at(at, tracks)
+    pub fn set_repeat(&mut self, repeat: Repeat) {
+        self.repeat = repeat;
+        self.top_up();
     }
 
-    /// Ajout de la radio : en mode aléatoire, les nouveaux titres sont répartis
-    /// au hasard dans la suite (sauf le tout prochain, déjà préchargé) au lieu
-    /// de s'empiler à la fin dans l'ordre de la radio.
-    pub fn append_mixed(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
-        let count = tracks.len();
-        let ids = self.append(tracks);
-        if self.unshuffled.is_none() {
-            return ids;
-        }
-        let first_free = self.current.map_or(0, |i| i + 2);
-        for _ in 0..count {
-            let Some(entry) = self.entries.pop() else {
-                break;
-            };
+    /// Active ou coupe l'aléatoire : la suite est reconstruite avec **toute** la
+    /// liste (sauf le morceau en cours), mélangée ou dans l'ordre d'origine.
+    /// L'historique ne bouge pas.
+    pub fn set_shuffle(&mut self, on: bool) {
+        self.shuffle = on;
+        self.rebuild_upcoming();
+        self.top_up();
+    }
+
+    // ----- ajouts -----
+
+    /// Ajoute à la fin (au hasard dans la suite en mode aléatoire).
+    pub fn append(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
+        let mut ids = Vec::with_capacity(tracks.len());
+        for track in tracks {
+            self.context.push(track.clone());
+            let entry = self.fresh(track, Some(self.context.len() - 1));
+            ids.push(entry.id);
             let len = self.entries.len();
-            let at = if first_free >= len {
-                len
-            } else {
+            // Le tout prochain (déjà préchargé) ne bouge pas.
+            let first_free = (self.upcoming_start() + 1).min(len);
+            let at = if self.shuffle && first_free < len {
                 self.rng.usize(first_free..=len)
+            } else {
+                len
             };
             self.entries.insert(at, entry);
         }
         ids
     }
 
-    /// Insère juste après le morceau courant (« lire ensuite »).
-    pub fn insert_next(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
-        let at = self.current.map_or(0, |i| i + 1);
-        self.insert_at(at, tracks)
+    /// Ajout de la radio (même règle que [`Queue::append`]).
+    pub fn append_mixed(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
+        self.append(tracks)
     }
 
-    fn insert_at(&mut self, at: usize, tracks: Vec<Track>) -> Vec<QueueId> {
-        let new: Vec<QueuedTrack> = tracks
-            .into_iter()
-            .map(|track| {
-                let id = QueueId(self.next_id);
-                self.next_id += 1;
-                QueuedTrack { id, track }
-            })
-            .collect();
-        let ids: Vec<QueueId> = new.iter().map(|e| e.id).collect();
-        if let Some(order) = &mut self.unshuffled {
-            order.extend(&ids);
+    /// Insère juste après le morceau courant (« lire ensuite »).
+    pub fn insert_next(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
+        let ctx_at = self.current_origin().map_or(self.context.len(), |o| o + 1);
+        let count = tracks.len();
+        // Les positions du contexte après l'insertion se décalent.
+        for o in self.origin.values_mut() {
+            if *o >= ctx_at {
+                *o += count;
+            }
         }
-        if let Some(cur) = self.current
-            && at <= cur
-        {
-            self.current = Some(cur + new.len());
+        let at = self.upcoming_start();
+        let mut ids = Vec::with_capacity(count);
+        for (k, track) in tracks.into_iter().enumerate() {
+            self.context.insert(ctx_at + k, track.clone());
+            let entry = self.fresh(track, Some(ctx_at + k));
+            ids.push(entry.id);
+            self.entries.insert(at + k, entry);
         }
-        self.entries.splice(at..at, new);
         ids
     }
 
+    // ----- retraits et déplacements -----
+
+    /// Retire une entrée ; elle disparaît aussi de la liste d'origine (elle ne
+    /// reviendra pas en changeant de mode).
     pub fn remove(&mut self, id: QueueId) -> Removed {
         let Some(index) = self.index_of(id) else {
             return Removed::NotFound;
         };
         self.entries.remove(index);
-        if let Some(order) = &mut self.unshuffled {
-            order.retain(|&o| o != id);
+        if let Some(o) = self.origin.remove(&id) {
+            self.context.remove(o);
+            self.origin.retain(|_, x| *x != o);
+            for x in self.origin.values_mut() {
+                if *x > o {
+                    *x -= 1;
+                }
+            }
         }
         match self.current {
             Some(cur) if cur == index => {
                 self.current = None;
+                self.resume = index;
                 Removed::Current
             }
             Some(cur) if index < cur => {
                 self.current = Some(cur - 1);
                 Removed::Upcoming
             }
+            None if index < self.resume => {
+                self.resume -= 1;
+                Removed::Upcoming
+            }
             _ => Removed::Upcoming,
         }
     }
 
-    /// Déplace une entrée à la position `to` (bornée à la longueur de la file).
+    /// Déplace une entrée à la position `to` de la file visible (0 = morceau en
+    /// cours). Le morceau en cours reste en cours.
     pub fn move_to(&mut self, id: QueueId, to: usize) -> bool {
         let Some(from) = self.index_of(id) else {
             return false;
         };
+        let base = self.current.unwrap_or(self.resume);
+        if from < base {
+            return false; // historique : invisible, immobile
+        }
         let current_id = self.current().map(|e| e.id);
         let entry = self.entries.remove(from);
-        let to = to.min(self.entries.len());
+        let to = (base + to).clamp(base, self.entries.len());
         self.entries.insert(to, entry);
         self.current = current_id.and_then(|cid| self.index_of(cid));
         true
     }
 
-    /// Retire tout ce qui suit le morceau courant.
+    /// Vide la suite : seul le morceau en cours reste (et l'historique).
     pub fn clear_upcoming(&mut self) {
-        let keep = self.current.map_or(0, |i| i + 1);
-        let removed: Vec<QueueId> = self.entries.drain(keep..).map(|e| e.id).collect();
-        if let Some(order) = &mut self.unshuffled {
-            order.retain(|o| !removed.contains(o));
+        let start = self.upcoming_start();
+        self.entries.truncate(start);
+        // Changer de mode ne doit pas faire revenir la liste vidée.
+        let current = self.current().map(|e| (e.id, e.track.clone()));
+        self.context.clear();
+        self.origin.clear();
+        if let Some((id, track)) = current {
+            self.context.push(track);
+            self.origin.insert(id, 0);
         }
     }
 
+    // ----- déplacements du curseur -----
+
+    /// Fait de `id` le morceau en cours.
+    /// - En avant : le courant passe dans l'historique, les morceaux sautés
+    ///   quittent la suite (ils restent dans la liste d'origine).
+    /// - En arrière (précédent) : les morceaux d'après repassent dans la suite.
     pub fn set_current(&mut self, id: QueueId) -> bool {
-        match self.index_of(id) {
-            Some(i) => {
-                self.current = Some(i);
-                true
+        let Some(target) = self.index_of(id) else {
+            return false;
+        };
+        let start = self.upcoming_start();
+        if target >= start {
+            let skipped: Vec<QueueId> = self.entries.drain(start..target).map(|e| e.id).collect();
+            for id in skipped {
+                self.origin.remove(&id);
             }
-            None => false,
+            self.current = Some(start);
+        } else {
+            self.current = Some(target);
         }
+        self.trim_history();
+        self.top_up();
+        true
     }
 
     /// Ce qui sera joué à la fin naturelle du morceau courant (sans rien changer).
     pub fn peek_auto_next(&self) -> Option<&QueuedTrack> {
-        self.auto_next_index().map(|i| &self.entries[i])
-    }
-
-    fn auto_next_index(&self) -> Option<usize> {
         let cur = self.current?;
         if self.repeat == Repeat::One {
-            return Some(cur);
+            return Some(&self.entries[cur]);
         }
-        self.following(cur)
+        self.entries.get(cur + 1)
     }
 
-    /// Entrée après `index` ; ne boucle qu'en Repeat::All.
-    fn following(&self, index: usize) -> Option<usize> {
-        if index + 1 < self.entries.len() {
-            Some(index + 1)
-        } else if self.repeat == Repeat::All && !self.entries.is_empty() {
-            Some(0)
-        } else {
-            None
-        }
-    }
-
-    /// Fin naturelle du morceau : avance le curseur et rend le nouveau courant.
+    /// Fin naturelle du morceau : avance et rend le nouveau courant.
     pub fn advance_auto(&mut self) -> Option<QueueId> {
-        let next = self.auto_next_index()?;
-        self.current = Some(next);
-        Some(self.entries[next].id)
+        let id = self.peek_auto_next()?.id;
+        self.set_current(id);
+        Some(id)
     }
 
-    /// Bouton « suivant » : ignore Repeat::One, boucle seulement en Repeat::All.
+    /// Bouton « suivant » : ignore Repeat::One.
     pub fn next_manual(&self) -> Option<QueueId> {
-        let next = match self.current {
-            Some(cur) => self.following(cur)?,
-            None => 0,
-        };
-        self.entries.get(next).map(|e| e.id)
+        self.entries.get(self.upcoming_start()).map(|e| e.id)
     }
 
-    /// Bouton « précédent » (le core décide avant s'il faut plutôt revenir au début).
+    /// Bouton « précédent » : dernier morceau vraiment joué.
     pub fn previous(&self) -> Option<QueueId> {
-        let cur = self.current?;
-        let prev = match cur.checked_sub(1) {
-            Some(p) => p,
-            None if self.repeat == Repeat::All => self.entries.len().checked_sub(1)?,
-            None => return None,
-        };
-        self.entries.get(prev).map(|e| e.id)
+        let before = self.current.unwrap_or(self.resume).checked_sub(1)?;
+        self.entries.get(before).map(|e| e.id)
     }
 
-    /// Active : mélange tout ce qui suit le morceau courant. Désactive : remet
-    /// l'ordre d'origine (les ajouts faits entre-temps restent à la fin).
-    pub fn set_shuffle(&mut self, on: bool) {
-        if on {
-            if self.unshuffled.is_none() {
-                self.unshuffled = Some(self.entries.iter().map(|e| e.id).collect());
-            }
-            let start = self.current.map_or(0, |i| i + 1);
-            self.rng.shuffle(&mut self.entries[start..]);
-        } else if let Some(order) = self.unshuffled.take() {
-            let current_id = self.current().map(|e| e.id);
-            let rank = |id: QueueId| order.iter().position(|&o| o == id).unwrap_or(usize::MAX);
-            self.entries.sort_by_key(|e| rank(e.id));
-            self.current = current_id.and_then(|cid| self.index_of(cid));
+    /// « Précédent » : le dernier morceau joué ; sans historique (lancé au
+    /// milieu d'une playlist), le titre d'avant dans la liste d'origine, qui
+    /// quitte alors la fin de la suite.
+    pub fn prepare_previous(&mut self) -> Option<QueueId> {
+        if let Some(id) = self.previous() {
+            return Some(id);
         }
+        let cur = self.current?;
+        if self.shuffle {
+            return None;
+        }
+        let before = self.current_origin()?.checked_sub(1)?;
+        let duplicate = self.entries[cur + 1..]
+            .iter()
+            .position(|e| self.origin.get(&e.id) == Some(&before))
+            .map(|i| cur + 1 + i);
+        if let Some(i) = duplicate {
+            let e = self.entries.remove(i);
+            self.origin.remove(&e.id);
+        }
+        let entry = self.fresh(self.context[before].clone(), Some(before));
+        let id = entry.id;
+        self.entries.insert(cur, entry);
+        self.current = Some(cur + 1);
+        Some(id)
     }
 
     fn index_of(&self, id: QueueId) -> Option<usize> {
@@ -366,73 +521,99 @@ mod tests {
         range.map(track).collect()
     }
 
+    fn queue() -> Queue {
+        Queue::with_rng(fastrand::Rng::with_seed(7))
+    }
+
+    fn names(list: &[QueuedTrack]) -> Vec<String> {
+        list.iter()
+            .map(|e| e.track.title.trim_start_matches("titre ").to_owned())
+            .collect()
+    }
+
+    fn visible(q: &Queue) -> Vec<String> {
+        names(q.visible())
+    }
+
+    fn current(q: &Queue) -> Option<String> {
+        q.current()
+            .map(|e| e.track.title.trim_start_matches("titre ").to_owned())
+    }
+
     #[test]
-    fn shuffled_play_queues_the_whole_list() {
-        let mut q = Queue::with_rng(fastrand::Rng::with_seed(9));
-        q.replace_shuffled(tracks(0..50));
-        assert!(q.shuffle());
-        assert_eq!(q.current_index(), Some(0));
+    fn starting_mid_playlist_plays_everything_else_after() {
+        let mut q = queue();
+        q.replace(tracks(0..5), 2);
+        // Rien n'est « déjà joué » : la fin de la playlist, puis son début.
+        assert_eq!(visible(&q), ["2", "3", "4", "0", "1"]);
+        assert_eq!(q.previous(), None, "aucun historique au départ");
+    }
+
+    #[test]
+    fn played_tracks_leave_the_queue_but_previous_comes_back() {
+        let mut q = queue();
+        q.replace(tracks(0..4), 0);
+        q.advance_auto();
+        q.advance_auto();
+        assert_eq!(visible(&q), ["2", "3"]);
+        let prev = q.previous().unwrap();
+        q.set_current(prev);
+        assert_eq!(current(&q).as_deref(), Some("1"));
+        assert_eq!(visible(&q), ["1", "2", "3"]);
+    }
+
+    #[test]
+    fn previous_without_history_goes_to_the_track_before() {
+        let mut q = queue();
+        q.replace(tracks(0..4), 2);
+        let prev = q.prepare_previous().unwrap();
+        q.set_current(prev);
+        assert_eq!(visible(&q), ["1", "2", "3", "0"]);
+    }
+
+    #[test]
+    fn jumping_ahead_skips_without_greying() {
+        let mut q = queue();
+        q.replace(tracks(0..6), 0);
+        let target = q.visible()[3].id; // titre 3
+        q.set_current(target);
+        assert_eq!(visible(&q), ["3", "4", "5"]);
+        // Les morceaux sautés reviennent si on reconstruit la suite.
+        q.set_shuffle(false);
+        assert_eq!(visible(&q), ["3", "4", "5", "0", "1", "2"]);
+    }
+
+    #[test]
+    fn shuffle_on_and_off_rebuilds_the_whole_list() {
+        let mut q = queue();
+        q.replace(tracks(0..30), 25);
+        q.advance_auto(); // 26
+        q.set_shuffle(true);
         assert_eq!(
             q.upcoming_len(),
-            49,
-            "toute la playlist suit, pas un seul titre"
+            29,
+            "toute la playlist sauf le morceau en cours"
         );
-        let order: Vec<_> = q.entries().iter().map(|e| e.track.title.clone()).collect();
-        let sorted: Vec<_> = (0..50).map(|n| format!("titre {n}")).collect();
-        assert_ne!(order, sorted);
-        let current = q.current().map(|e| e.id);
+        let order = visible(&q);
+        let natural: Vec<String> = (27..30).chain(0..26).map(|n| n.to_string()).collect();
+        assert_ne!(order[1..], natural[..]);
         q.set_shuffle(false);
-        assert_eq!(q.current().map(|e| e.id), current);
-        let titles: Vec<_> = q.entries().iter().map(|e| e.track.title.clone()).collect();
-        assert_eq!(titles, sorted);
-    }
-
-    #[test]
-    fn radio_tracks_are_mixed_in_when_shuffled() {
-        let mut q = Queue::with_rng(fastrand::Rng::with_seed(3));
-        q.replace(tracks(0..4), 0);
+        let mut expected = vec!["26".to_owned()];
+        expected.extend(natural);
+        assert_eq!(visible(&q), expected);
+        // Réactiver : de nouveau toute la liste, pas seulement la fin.
         q.set_shuffle(true);
-        let next = q.upcoming()[0].id;
-        q.append_mixed(tracks(10..30));
-        assert_eq!(q.entries().len(), 24);
-        assert_eq!(
-            q.upcoming()[0].id,
-            next,
-            "le prochain (préchargé) ne bouge pas"
-        );
-        let tail: Vec<_> = q.entries()[4..]
-            .iter()
-            .map(|e| e.track.title.clone())
-            .collect();
-        let in_order: Vec<_> = (10..30).map(|n| format!("titre {n}")).collect();
-        assert_ne!(tail, in_order, "les titres de la radio sont mélangés");
-        q.set_shuffle(false);
-        let titles: Vec<_> = q.entries().iter().map(|e| e.track.title.clone()).collect();
-        let all: Vec<_> = (0..4).chain(10..30).map(|n| format!("titre {n}")).collect();
-        assert_eq!(titles, all, "sans aléatoire, l'ordre d'origine revient");
-    }
-
-    fn titles(q: &Queue) -> Vec<String> {
-        q.entries().iter().map(|e| e.track.title.clone()).collect()
-    }
-
-    fn current_title(q: &Queue) -> Option<String> {
-        q.current().map(|e| e.track.title.clone())
-    }
-
-    fn queue() -> Queue {
-        Queue::with_rng(fastrand::Rng::with_seed(42))
+        assert_eq!(q.upcoming_len(), 29);
+        assert_eq!(current(&q).as_deref(), Some("26"));
+        assert!(q.previous().is_some(), "l'historique reste");
     }
 
     #[test]
-    fn replace_sets_current_and_clamps_start() {
+    fn shuffled_play_queues_the_whole_list() {
         let mut q = queue();
-        q.replace(tracks(0..3), 1);
-        assert_eq!(current_title(&q).as_deref(), Some("titre 1"));
-        q.replace(tracks(0..3), 99);
-        assert_eq!(current_title(&q).as_deref(), Some("titre 2"));
-        assert_eq!(q.replace(vec![], 0), None);
-        assert!(q.current().is_none());
+        q.replace_shuffled(tracks(0..50));
+        assert!(q.shuffle());
+        assert_eq!(q.upcoming_len(), 49);
     }
 
     #[test]
@@ -440,16 +621,13 @@ mod tests {
         let mut q = queue();
         q.replace(tracks(0..2), 0);
         assert!(q.advance_auto().is_some());
-        assert_eq!(current_title(&q).as_deref(), Some("titre 1"));
-        assert_eq!(q.advance_auto(), None, "fin de file sans repeat");
-
+        assert_eq!(q.advance_auto(), None, "fin de liste sans repeat");
         q.set_repeat(Repeat::All);
-        q.advance_auto();
-        assert_eq!(current_title(&q).as_deref(), Some("titre 0"));
-
+        assert!(q.advance_auto().is_some());
+        assert_eq!(current(&q).as_deref(), Some("0"), "la liste repart");
         q.set_repeat(Repeat::One);
         q.advance_auto();
-        assert_eq!(current_title(&q).as_deref(), Some("titre 0"));
+        assert_eq!(current(&q).as_deref(), Some("0"));
     }
 
     #[test]
@@ -459,23 +637,6 @@ mod tests {
         q.set_repeat(Repeat::One);
         let next = q.next_manual().unwrap();
         assert_eq!(q.get(next).unwrap().track.title, "titre 1");
-
-        q.set_current(next);
-        assert_eq!(q.next_manual(), None, "pas de boucle en Repeat::One");
-        q.set_repeat(Repeat::All);
-        assert_eq!(
-            q.get(q.next_manual().unwrap()).unwrap().track.title,
-            "titre 0"
-        );
-    }
-
-    #[test]
-    fn previous_wraps_only_with_repeat_all() {
-        let mut q = queue();
-        q.replace(tracks(0..3), 0);
-        assert_eq!(q.previous(), None);
-        q.set_repeat(Repeat::All);
-        assert_eq!(q.get(q.previous().unwrap()).unwrap().track.title, "titre 2");
     }
 
     #[test]
@@ -483,87 +644,69 @@ mod tests {
         let mut q = queue();
         q.replace(tracks(0..3), 1);
         q.insert_next(vec![track(9)]);
-        assert_eq!(titles(&q), ["titre 0", "titre 1", "titre 9", "titre 2"]);
-        assert_eq!(current_title(&q).as_deref(), Some("titre 1"));
-        assert_eq!(q.peek_auto_next().unwrap().track.title, "titre 9");
+        assert_eq!(visible(&q), ["1", "9", "2", "0"]);
+        // Et il est dans la liste d'origine, juste après le courant.
+        q.set_shuffle(false);
+        assert_eq!(visible(&q), ["1", "9", "2", "0"]);
     }
 
     #[test]
-    fn remove_keeps_cursor_on_the_same_track() {
+    fn removed_tracks_do_not_come_back() {
         let mut q = queue();
-        let first = q.append(tracks(0..4));
-        q.set_current(first[2]);
-
-        assert_eq!(q.remove(first[0]), Removed::Upcoming);
-        assert_eq!(current_title(&q).as_deref(), Some("titre 2"));
-        assert_eq!(q.remove(first[2]), Removed::Current);
+        q.replace(tracks(0..4), 0);
+        let two = q.visible()[2].id;
+        assert_eq!(q.remove(two), Removed::Upcoming);
+        q.set_shuffle(false);
+        assert_eq!(visible(&q), ["0", "1", "3"]);
+        let cur = q.current().unwrap().id;
+        assert_eq!(q.remove(cur), Removed::Current);
         assert!(q.current().is_none());
+        assert_eq!(names(q.upcoming()), ["1", "3"]);
         assert_eq!(q.remove(QueueId(999)), Removed::NotFound);
     }
 
     #[test]
-    fn move_keeps_cursor_on_the_same_track() {
+    fn move_is_relative_to_the_visible_queue() {
         let mut q = queue();
-        let ids = q.append(tracks(0..4));
-        q.set_current(ids[1]);
-        assert!(q.move_to(ids[3], 0));
-        assert_eq!(titles(&q), ["titre 3", "titre 0", "titre 1", "titre 2"]);
-        assert_eq!(current_title(&q).as_deref(), Some("titre 1"));
-        assert!(q.move_to(ids[0], 99));
-        assert_eq!(titles(&q).last().map(String::as_str), Some("titre 0"));
+        q.replace(tracks(0..4), 0);
+        let three = q.visible()[3].id;
+        assert!(q.move_to(three, 1));
+        assert_eq!(visible(&q), ["0", "3", "1", "2"]);
+        assert_eq!(current(&q).as_deref(), Some("0"));
     }
 
     #[test]
-    fn clear_upcoming_keeps_history_and_current() {
+    fn clear_upcoming_keeps_current_and_does_not_refill() {
         let mut q = queue();
-        q.replace(tracks(0..5), 2);
+        q.replace(tracks(0..5), 1);
         q.clear_upcoming();
-        assert_eq!(titles(&q), ["titre 0", "titre 1", "titre 2"]);
-        assert_eq!(q.upcoming_len(), 0);
+        assert_eq!(visible(&q), ["1"]);
+        q.set_shuffle(true);
+        assert_eq!(visible(&q), ["1"]);
     }
 
     #[test]
-    fn shuffle_mixes_only_upcoming_and_restores_order() {
+    fn radio_tracks_are_mixed_in_when_shuffled() {
         let mut q = queue();
-        q.replace(tracks(0..20), 5);
-        let before = titles(&q);
-
+        q.replace(tracks(0..4), 0);
         q.set_shuffle(true);
-        let shuffled = titles(&q);
-        assert_eq!(shuffled[..6], before[..6], "historique et courant intacts");
-        assert_ne!(shuffled[6..], before[6..]);
-        assert_eq!(current_title(&q).as_deref(), Some("titre 5"));
-
-        // Un ajout pendant le shuffle reste à la fin une fois désactivé.
-        q.append(vec![track(99)]);
-        q.advance_auto();
-        let playing = current_title(&q);
-        q.set_shuffle(false);
-        let mut expected = before.clone();
-        expected.push("titre 99".into());
-        assert_eq!(titles(&q), expected);
+        let next = q.upcoming()[0].id;
+        q.append_mixed(tracks(10..30));
+        assert_eq!(q.upcoming_len(), 23);
         assert_eq!(
-            current_title(&q),
-            playing,
-            "le morceau en cours ne change pas"
+            q.upcoming()[0].id,
+            next,
+            "le prochain (préchargé) ne bouge pas"
         );
     }
 
     #[test]
-    fn replace_keeps_shuffle_mode() {
+    fn restore_keeps_history_and_order() {
         let mut q = queue();
-        q.set_shuffle(true);
-        q.replace(tracks(0..20), 0);
-        assert!(q.shuffle());
-        assert_eq!(current_title(&q).as_deref(), Some("titre 0"));
-        assert_ne!(
-            titles(&q),
-            titles(&{
-                let mut plain = queue();
-                plain.replace(tracks(0..20), 0);
-                plain
-            })
-        );
+        q.restore(tracks(0..5), 2, false);
+        assert_eq!(current(&q).as_deref(), Some("2"));
+        assert_eq!(visible(&q), ["2", "3", "4"]);
+        assert!(q.previous().is_some());
     }
 
     #[test]

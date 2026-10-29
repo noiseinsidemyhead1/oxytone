@@ -170,6 +170,8 @@ struct Session {
     autoplay: Option<bool>,
     #[serde(default)]
     effects: Option<AudioEffects>,
+    #[serde(default)]
+    shuffle: Option<bool>,
 }
 
 impl Session {
@@ -274,7 +276,11 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
             state.effects = effects.clamped();
         }
         queue.set_repeat(session.repeat.unwrap_or_default());
-        if let Some(id) = queue.replace(session.tracks, session.current.unwrap_or(0)) {
+        if let Some(id) = queue.restore(
+            session.tracks,
+            session.current.unwrap_or(0),
+            session.shuffle.unwrap_or(false),
+        ) {
             let position = Duration::from_millis(session.position_ms);
             state.position = position;
             state.duration = queue.current().and_then(|e| e.track.duration);
@@ -513,7 +519,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 if self.current_entry.is_some() && self.state.position > RESTART_THRESHOLD {
                     return self.seek(Duration::ZERO).await;
                 }
-                match self.queue.previous() {
+                match self.queue.prepare_previous() {
                     Some(id) => self.start(id).await,
                     None => self.seek(Duration::ZERO).await,
                 }
@@ -655,6 +661,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             repeat: Some(self.queue.repeat()),
             autoplay: Some(self.state.autoplay),
             effects: Some(self.state.effects),
+            shuffle: Some(self.queue.shuffle()),
         }
         .save(path);
     }
@@ -1196,8 +1203,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         if self.queue_dirty {
             self.queue_dirty = false;
             self.queue_tx.send_replace(Arc::new(QueueSnapshot {
-                entries: self.queue.entries().to_vec(),
-                current: self.queue.current_index(),
+                // L'historique ne s'affiche pas : le morceau en cours, puis la suite.
+                entries: self.queue.visible().to_vec(),
+                current: self.queue.current().map(|_| 0),
             }));
             let _ = self.events.send(CoreEvent::QueueChanged);
         }
