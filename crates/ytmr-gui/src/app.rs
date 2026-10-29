@@ -165,6 +165,7 @@ pub enum Message {
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
     Coll(crate::collection::Coll),
+    Window(crate::chrome::Win),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
     CloseRequested,
@@ -259,6 +260,8 @@ pub struct App {
     search_pending: Option<(u64, String, SearchAll)>,
     search_inflight: bool,
     pub fullscreen: bool,
+    /// Fenêtre agrandie (pas de poignées de redimensionnement).
+    pub maximized: bool,
     /// Vue « En cours » : contrôles visibles (après un mouvement de souris).
     pub controls_visible: bool,
     activity_seq: u64,
@@ -336,6 +339,7 @@ impl App {
             search_pending: None,
             search_inflight: false,
             fullscreen: false,
+            maximized: false,
             controls_visible: false,
             activity_seq: 0,
             cover_failed: std::collections::HashSet::new(),
@@ -1313,7 +1317,7 @@ impl App {
             }
             Message::WindowResized(width) => {
                 self.window_width = width;
-                Task::none()
+                self.refresh_maximized()
             }
             Message::Frame(now) => {
                 if self.is_loading() {
@@ -1348,6 +1352,7 @@ impl App {
             Message::Lib(message) => self.update_library(message),
             Message::Settings(message) => self.update_settings(message),
             Message::Coll(message) => self.update_collection(message),
+            Message::Window(action) => self.update_window(action),
             Message::Noop => Task::none(),
             Message::ShutdownDone => iced::exit(),
         }

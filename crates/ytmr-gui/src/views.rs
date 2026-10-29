@@ -91,7 +91,20 @@ pub fn view(app: &App) -> El<'_> {
         Some((_, message)) => stack![content, toast(message)].into(),
         None => content,
     };
-    container(with_toast)
+    // Barre de titre maison, cachée en plein écran et dans la vue « En cours »
+    // tant que la souris ne bouge pas.
+    let immersive = app.fullscreen || (app.route == Route::NowPlaying && !app.controls_visible);
+    let framed: El<'_> = if immersive {
+        with_toast
+    } else {
+        column![crate::chrome::title_bar(app), with_toast].into()
+    };
+    let framed: El<'_> = if app.maximized || app.fullscreen {
+        framed
+    } else {
+        stack![framed, crate::chrome::resize_edges()].into()
+    };
+    container(framed)
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style::window_bg)

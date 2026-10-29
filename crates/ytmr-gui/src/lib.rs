@@ -8,6 +8,7 @@
 
 mod app;
 mod backend;
+mod chrome;
 mod collection;
 mod icons;
 mod library;
@@ -39,6 +40,8 @@ pub fn run(config: Config, paths: AppPaths) -> iced::Result {
         icon: app_icon(),
         // Fermer la fenêtre doit d'abord arrêter mpv proprement.
         exit_on_close_request: false,
+        // Barre de titre dessinée par ytmr (voir `chrome`).
+        decorations: false,
         ..window::Settings::default()
     })
     .antialiasing(true)
