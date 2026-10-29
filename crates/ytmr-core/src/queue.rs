@@ -144,6 +144,22 @@ impl Queue {
         self.current().map(|e| e.id)
     }
 
+    /// Remplace la file par `tracks` mélangés, en mode aléatoire, et part du
+    /// premier. Désactiver l'aléatoire rend l'ordre d'origine (courant gardé).
+    pub fn replace_shuffled(&mut self, tracks: Vec<Track>) -> Option<QueueId> {
+        self.entries.clear();
+        self.current = None;
+        self.unshuffled = None;
+        let ids = self.append(tracks);
+        if self.entries.is_empty() {
+            return None;
+        }
+        self.unshuffled = Some(ids);
+        self.rng.shuffle(&mut self.entries);
+        self.current = Some(0);
+        self.current().map(|e| e.id)
+    }
+
     /// Ajoute à la fin de la file.
     pub fn append(&mut self, tracks: Vec<Track>) -> Vec<QueueId> {
         let at = self.entries.len();
@@ -348,6 +364,27 @@ mod tests {
 
     fn tracks(range: std::ops::Range<u32>) -> Vec<Track> {
         range.map(track).collect()
+    }
+
+    #[test]
+    fn shuffled_play_queues_the_whole_list() {
+        let mut q = Queue::with_rng(fastrand::Rng::with_seed(9));
+        q.replace_shuffled(tracks(0..50));
+        assert!(q.shuffle());
+        assert_eq!(q.current_index(), Some(0));
+        assert_eq!(
+            q.upcoming_len(),
+            49,
+            "toute la playlist suit, pas un seul titre"
+        );
+        let order: Vec<_> = q.entries().iter().map(|e| e.track.title.clone()).collect();
+        let sorted: Vec<_> = (0..50).map(|n| format!("titre {n}")).collect();
+        assert_ne!(order, sorted);
+        let current = q.current().map(|e| e.id);
+        q.set_shuffle(false);
+        assert_eq!(q.current().map(|e| e.id), current);
+        let titles: Vec<_> = q.entries().iter().map(|e| e.track.title.clone()).collect();
+        assert_eq!(titles, sorted);
     }
 
     #[test]

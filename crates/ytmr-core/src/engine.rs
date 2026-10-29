@@ -105,6 +105,8 @@ pub enum Command {
         tracks: Vec<Track>,
         start: usize,
     },
+    /// Remplace la file par `tracks` dans un ordre aléatoire (aléatoire activé).
+    PlayShuffled(Vec<Track>),
     /// Ajoute à la fin (lance la lecture si rien n'est en cours).
     Enqueue(Vec<Track>),
     /// Insère après le morceau courant.
@@ -457,6 +459,14 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 let id = self
                     .queue
                     .replace(tracks, start)
+                    .ok_or(CoreError::NothingToPlay)?;
+                self.queue_dirty = true;
+                self.start(id).await
+            }
+            Command::PlayShuffled(tracks) => {
+                let id = self
+                    .queue
+                    .replace_shuffled(tracks)
                     .ok_or(CoreError::NothingToPlay)?;
                 self.queue_dirty = true;
                 self.start(id).await

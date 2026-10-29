@@ -12,7 +12,6 @@ use iced::widget::{
 use iced::{Alignment, Color, Element, Font, Length, Padding, font};
 use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
-use ytmr_player::StreamQuality;
 
 use crate::app::{
     App, CARD, HERO, Load, Message, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT,
@@ -173,7 +172,12 @@ fn main_layout(app: &App) -> El<'_> {
         .height(Length::Fill);
     // Grande vue « En cours » : plein écran, aucune barre latérale.
     if app.route == Route::NowPlaying {
-        return column![page, player_bar(app)].into();
+        // Plein écran épuré : les contrôles n'apparaissent qu'au mouvement de la souris.
+        return if app.controls_visible {
+            column![page, player_bar(app)].into()
+        } else {
+            page.into()
+        };
     }
     let mut middle = row![sidebar(app), resize_handle(Panel::Left), page];
     if app.show_queue {
@@ -487,11 +491,7 @@ pub(crate) fn track_row<'a>(
         .current
         .as_ref()
         .is_some_and(|e| e.track.video_id == track.video_id);
-    let title_color = if playing {
-        app.page_accent
-    } else {
-        style::TEXT
-    };
+    let title_color = if playing { app.accent } else { style::TEXT };
     let leading: El<'a> = match number {
         Some(n) => container(text(n.to_string()).size(14).color(style::TEXT_FAINT))
             .width(Length::Fixed(28.0))
@@ -527,7 +527,7 @@ pub(crate) fn track_row<'a>(
             button(row_content)
                 .width(Length::Fill)
                 .padding(Padding::from([6, 10]))
-                .style(style::row(playing, app.page_accent))
+                .style(style::row(playing, app.accent))
                 .on_press(on_play),
         )
         .on_enter(Message::Hover(track.video_id.clone()))
@@ -658,11 +658,15 @@ fn now_playing(app: &App) -> El<'_> {
     };
     let track = &entry.track;
     let id = app.track_cover(track);
-    let big =
-        container(cover(app.cover(id.as_deref(), HERO), 380.0, 12.0)).style(style::cover_frame);
+    // Un clic sur la pochette ramène à la page d'avant (comme Échap).
+    let big = button(
+        container(cover(app.cover(id.as_deref(), HERO), 420.0, 12.0)).style(style::cover_frame),
+    )
+    .padding(0)
+    .style(style::link)
+    .on_press(Message::Back);
     let mut info = column![
-        text("EN COURS").size(12).font(BOLD).color(app.accent),
-        text(&track.title).size(40).font(BOLD),
+        text(&track.title).size(42).font(BOLD),
         text(&track.artist).size(19).color(style::TEXT_DIM),
     ]
     .spacing(8);
@@ -674,28 +678,6 @@ fn now_playing(app: &App) -> El<'_> {
                 .on_press(Message::Navigate(Route::Album(album_id.clone()))),
         );
     }
-    info = info.push(quality_badge(app));
-    info = info.push(
-        row![
-            button(text("Revenir").size(13).font(SEMIBOLD))
-                .padding(Padding::from([8, 16]))
-                .style(style::pill_ghost)
-                .on_press(Message::Back),
-            button(
-                text(if app.fullscreen {
-                    "Quitter le plein écran (F11)"
-                } else {
-                    "Plein écran (F11)"
-                })
-                .size(13)
-                .font(SEMIBOLD)
-            )
-            .padding(Padding::from([8, 16]))
-            .style(style::pill_ghost)
-            .on_press(Message::ToggleFullscreen),
-        ]
-        .spacing(10),
-    );
     container(
         row![big, info.width(Length::Fill)]
             .spacing(40)
@@ -737,26 +719,6 @@ fn local_hour() -> u64 {
         1
     };
     (secs / 3600 + offset) % 24
-}
-
-fn quality_badge(app: &App) -> El<'_> {
-    let (label, color) = match (app.state.status, app.state.quality) {
-        (Status::Loading, _) => ("Chargement…", style::TEXT_FAINT),
-        (_, Some(StreamQuality::High)) => ("Haute qualité", app.accent),
-        (_, Some(StreamQuality::Low)) => ("Qualité réduite", style::TEXT_DIM),
-        _ => ("", style::TEXT_FAINT),
-    };
-    container(text(label).size(12).font(SEMIBOLD).color(color))
-        .padding(Padding::from([3, 10]))
-        .style(move |_| iced::widget::container::Style {
-            border: iced::Border {
-                color: style::alpha(color, 0.5),
-                width: if label.is_empty() { 0.0 } else { 1.0 },
-                radius: 999.0.into(),
-            },
-            ..Default::default()
-        })
-        .into()
 }
 
 fn search_page(app: &App) -> El<'_> {
@@ -865,8 +827,9 @@ pub(crate) fn page_header<'a>(
     play: Option<(Message, Message)>,
 ) -> El<'a> {
     let (play, shuffle) = play.unzip();
-    // Une seule teinte par page : celle de sa pochette, jamais celle du morceau en cours.
-    let accent = app.page_accent;
+    // Boutons et titres suivent le morceau en cours ; seul le dégradé du haut
+    // garde la teinte de la page (fixe, sans mélange).
+    let accent = app.accent;
     let art = container(cover(app.cover(cover_id.as_deref(), HERO), 220.0, radius))
         .style(style::cover_frame_round(radius));
     let actions = row![
@@ -922,7 +885,7 @@ pub(crate) fn page_header<'a>(
         header
     ])
     .width(Length::Fill)
-    .style(style::hero(accent))
+    .style(style::hero(app.page_accent))
     .into()
 }
 

@@ -460,9 +460,30 @@ impl App {
         } else {
             self.show_toast("YouTube n'a pas rendu toute la playlist (affichage partiel)".into())
         };
-        let covers = Task::none();
-        if matches!(&self.lib.playlist, Some((cur, _)) if *cur == fresh.id) {
+        let mut fresh = fresh;
+        let mut covers = Task::none();
+        if let Some((cur, shown)) = &self.lib.playlist
+            && *cur == fresh.id
+        {
+            // YouTube ne rend pas toujours la pochette dans la page : on garde l'ancienne.
+            if fresh.thumbnail_url.is_none()
+                && let Load::Ready(old) = shown
+            {
+                fresh.thumbnail_url = old.thumbnail_url.clone();
+            }
+            // L'adresse a pu changer : la nouvelle pochette doit être demandée,
+            // sinon l'en-tête reste vide à la fin de la mise à jour.
+            let cover_id = if fresh.id == LIKED_ID {
+                fresh.tracks.first().and_then(|t| self.track_cover(t))
+            } else {
+                self.url_cover(fresh.thumbnail_url.as_deref())
+            };
+            covers = Task::batch([
+                self.want_cover(cover_id.clone(), HERO),
+                self.want_accent(cover_id),
+            ]);
             self.lib.playlist = Some((fresh.id.clone(), Load::Ready(fresh)));
+            self.update_page_accent();
         }
         Task::batch([toast, covers, self.request_visible_covers()])
     }
@@ -540,14 +561,8 @@ impl App {
                 Ok(tracks) => {
                     self.lib.history_stale = false;
                     self.lib.history_at = Some(Instant::now());
-                    let task = self.want_track_covers(tracks.iter().take(16), CARD);
-                    let rest: Vec<String> = tracks
-                        .iter()
-                        .skip(16)
-                        .take(40)
-                        .filter_map(|t| self.track_cover(t))
-                        .collect();
-                    let task = Task::batch([task, self.backlog_covers(rest, CARD)]);
+                    // Toute la rangée (40 cartes), jamais libérée : elle reste affichée.
+                    let task = self.want_track_covers(tracks.iter().take(40), CARD);
                     self.lib.history = Some(Load::Ready(tracks));
                     task
                 }

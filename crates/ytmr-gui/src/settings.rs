@@ -153,7 +153,7 @@ fn band_label(freq: u32) -> String {
 pub fn settings_page(app: &App) -> El<'_> {
     let effects = app.state.effects;
     let eq = app.settings.draft.unwrap_or(effects.eq);
-    let accent = app.page_accent;
+    let accent = app.accent;
 
     let bands = row(EQ_BANDS
         .iter()

@@ -205,7 +205,8 @@ pub fn toast(_: &Theme) -> container::Style {
 pub fn row(active: bool, accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| {
         let background = match status {
-            button::Status::Hovered | button::Status::Pressed => Some(SURFACE_HOVER.into()),
+            // Survol teinté par le morceau en cours, comme le reste de l'interface.
+            button::Status::Hovered | button::Status::Pressed => Some(alpha(accent, 0.16).into()),
             _ if active => Some(alpha(accent, 0.12).into()),
             _ => None,
         };
@@ -225,8 +226,8 @@ pub fn row(active: bool, accent: Color) -> impl Fn(&Theme, button::Status) -> bu
 pub fn nav(active: bool, accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_, status| button::Style {
         background: match status {
-            _ if active => Some(SURFACE_HOVER.into()),
-            button::Status::Hovered | button::Status::Pressed => Some(SURFACE_HI.into()),
+            _ if active => Some(alpha(accent, 0.14).into()),
+            button::Status::Hovered | button::Status::Pressed => Some(alpha(accent, 0.08).into()),
             _ => None,
         },
         text_color: if active { accent } else { TEXT_DIM },

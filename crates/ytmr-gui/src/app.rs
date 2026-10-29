@@ -33,7 +33,10 @@ const COVER_BUDGET: u64 = 64 << 20;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
 /// Attente maximale des pochettes avant d'afficher des résultats de recherche.
-const SEARCH_COVERS_WAIT: Duration = Duration::from_millis(700);
+/// (Garde-fou : une pochette qui ne répond pas ne bloque pas la recherche.)
+const SEARCH_COVERS_WAIT: Duration = Duration::from_secs(6);
+/// Contrôles de la vue « En cours » visibles après le dernier mouvement de souris.
+const CONTROLS_SHOWN: Duration = Duration::from_millis(2500);
 /// Survol prolongé avant de préparer un morceau (évite de lancer yt-dlp en
 /// passant simplement la souris sur une liste).
 const HOVER_PREFETCH_DELAY: Duration = Duration::from_millis(250);
@@ -155,6 +158,9 @@ pub enum Message {
     ArtistFound(Result<Option<String>, String>),
     /// Handle natif de la fenêtre, pour l'overlay média du système.
     NativeWindow(Option<usize>),
+    /// La souris bouge dans la vue « En cours » : afficher les contrôles un moment.
+    Activity,
+    HideControls(u64),
     MediaControls(Result<(), String>),
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
@@ -234,6 +240,10 @@ pub struct App {
     /// en premier quand la mémoire réservée aux images est pleine.
     cover_used: HashMap<(String, u32), u64>,
     cover_tick: u64,
+    /// Pochettes libérables : vignettes des listes virtualisées et du
+    /// préchargement (redemandées au défilement). Les autres (profil, cartes,
+    /// grandes pochettes) restent tant que l'appli tourne.
+    cover_evictable: std::collections::HashSet<(String, u32)>,
     accents: HashMap<String, Color>,
     /// Teinte du morceau en cours (barre du bas, file), en fondu.
     pub accent: Color,
@@ -248,6 +258,11 @@ pub struct App {
     search_pending: Option<(u64, String, SearchAll)>,
     search_inflight: bool,
     pub fullscreen: bool,
+    /// Vue « En cours » : contrôles visibles (après un mouvement de souris).
+    pub controls_visible: bool,
+    activity_seq: u64,
+    /// Pochettes impossibles à charger : ne plus les attendre.
+    cover_failed: std::collections::HashSet<(String, u32)>,
     pub show_queue: bool,
     pub seek_preview: Option<f32>,
     muted_volume: Option<u8>,
@@ -309,6 +324,7 @@ impl App {
             covers: HashMap::new(),
             cover_used: HashMap::new(),
             cover_tick: 0,
+            cover_evictable: std::collections::HashSet::new(),
             accents: HashMap::new(),
             accent: style::DEFAULT_ACCENT,
             accent_fade: Fade::new(style::DEFAULT_ACCENT),
@@ -318,6 +334,9 @@ impl App {
             search_pending: None,
             search_inflight: false,
             fullscreen: false,
+            controls_visible: false,
+            activity_seq: 0,
+            cover_failed: std::collections::HashSet::new(),
             show_queue: true,
             seek_preview: None,
             muted_volume: None,
@@ -391,6 +410,14 @@ impl App {
                 _ => None,
             }));
         }
+        if self.route == Route::NowPlaying {
+            subscriptions.push(iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { .. }) => {
+                    Some(Message::Activity)
+                }
+                _ => None,
+            }));
+        }
         // Une image par rafraîchissement de l'écran, seulement pendant une animation.
         if self.scrolling.is_animating()
             || self.is_loading()
@@ -456,6 +483,7 @@ impl App {
         };
         let key = (id.clone(), size);
         self.touch_cover(&key);
+        self.cover_evictable.remove(&key);
         if self.covers.contains_key(&key) {
             return Task::none();
         }
@@ -530,7 +558,26 @@ impl App {
                     .map(|e| e.track.clone()),
             );
         }
-        self.want_track_covers(&tracks, THUMB)
+        // Lignes de listes virtualisées : libérables, elles seront redemandées.
+        let ids: Vec<Option<String>> = tracks.iter().map(|t| self.track_cover(t)).collect();
+        let pinned: Vec<bool> = ids
+            .iter()
+            .map(|id| {
+                id.as_ref().is_some_and(|id| {
+                    let key = (id.clone(), THUMB);
+                    self.covers.contains_key(&key) && !self.cover_evictable.contains(&key)
+                })
+            })
+            .collect();
+        let task = Task::batch(ids.iter().cloned().map(|id| self.want_cover(id, THUMB)));
+        for (id, pinned) in ids.into_iter().zip(pinned) {
+            if let Some(id) = id
+                && !pinned
+            {
+                self.cover_evictable.insert((id, THUMB));
+            }
+        }
+        task
     }
 
     fn touch_cover(&mut self, key: &(String, u32)) {
@@ -554,10 +601,11 @@ impl App {
         }
         let keep: Vec<Option<String>> = vec![self.current_cover(), self.page_cover()];
         let mut loaded: Vec<((String, u32), u64)> = self
-            .covers
+            .cover_evictable
             .iter()
-            .filter(|(key, h)| h.is_some() && !keep.contains(&Some(key.0.clone())))
-            .map(|(key, _)| (key.clone(), self.cover_used.get(key).copied().unwrap_or(0)))
+            .filter(|key| matches!(self.covers.get(*key), Some(Some(_))))
+            .filter(|key| !keep.contains(&Some(key.0.clone())))
+            .map(|key| (key.clone(), self.cover_used.get(key).copied().unwrap_or(0)))
             .collect();
         loaded.sort_by_key(|(_, tick)| *tick);
         let mut used = used;
@@ -568,6 +616,7 @@ impl App {
             used -= bytes(key.1);
             self.covers.remove(&key);
             self.cover_used.remove(&key);
+            self.cover_evictable.remove(&key);
         }
     }
 
@@ -987,7 +1036,10 @@ impl App {
                         self.covers.insert((id, size), Some(handle));
                         self.trim_covers();
                     }
-                    Err(e) => tracing::debug!(error = %e, "jaquette indisponible"),
+                    Err(e) => {
+                        tracing::debug!(error = %e, "jaquette indisponible");
+                        self.cover_failed.insert((id, size));
+                    }
                 }
                 if self.search_pending.is_some() {
                     self.try_reveal_search(false);
@@ -1059,6 +1111,20 @@ impl App {
                     Message::MediaControls,
                 )
             }
+            Message::Activity => {
+                self.controls_visible = true;
+                self.activity_seq += 1;
+                let seq = self.activity_seq;
+                Task::perform(tokio::time::sleep(CONTROLS_SHOWN), move |()| {
+                    Message::HideControls(seq)
+                })
+            }
+            Message::HideControls(seq) => {
+                if seq == self.activity_seq {
+                    self.controls_visible = false;
+                }
+                Task::none()
+            }
             Message::MediaControls(result) => {
                 match result {
                     Ok(()) => tracing::info!("touches média et overlay du système branchés"),
@@ -1091,11 +1157,8 @@ impl App {
                 if tracks.is_empty() {
                     return Task::none();
                 }
-                let start = fastrand::usize(..tracks.len());
-                Task::batch([
-                    self.send(Command::SetShuffle(true)),
-                    self.send(Command::PlayTracks { tracks, start }),
-                ])
+                // Le moteur mélange toute la liste et part du premier tiré.
+                self.send(Command::PlayShuffled(tracks))
             }
             Message::PlayNext(track) => {
                 let toast = self.show_toast(format!("« {} » sera lu ensuite", track.title));
@@ -1269,6 +1332,7 @@ impl App {
                 if let Ok(handle) = result {
                     let key = (id, size);
                     self.touch_cover(&key);
+                    self.cover_evictable.insert(key.clone());
                     self.covers.insert(key, Some(handle));
                     self.trim_covers();
                 }
@@ -1299,7 +1363,10 @@ impl App {
             return;
         };
         let loaded = |id: Option<String>, size: u32| {
-            id.is_none_or(|id| matches!(self.covers.get(&(id, size)), Some(Some(_))))
+            id.is_none_or(|id| {
+                let key = (id, size);
+                matches!(self.covers.get(&key), Some(Some(_))) || self.cover_failed.contains(&key)
+            })
         };
         let ready = results
             .songs
