@@ -222,13 +222,25 @@ pub fn row(active: bool, accent: Color) -> impl Fn(&Theme, button::Status) -> bu
     }
 }
 
+/// État d'une ligne de liste.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RowState {
+    /// Morceau en cours.
+    pub active: bool,
+    pub hovered: bool,
+    /// Cliqué une fois : reste en évidence (survol renforcé, liseré).
+    pub selected: bool,
+}
+
 /// Ligne sans bouton (double-clic pour lancer) : même rendu que [`row`],
-/// le survol étant suivi par l'application.
-pub fn row_box(active: bool, hovered: bool, accent: Color) -> impl Fn(&Theme) -> container::Style {
+/// le survol et la sélection étant suivis par l'application.
+pub fn row_box(state: RowState, accent: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: if hovered {
+        background: if state.selected {
+            Some(alpha(accent, if state.hovered { 0.30 } else { 0.26 }).into())
+        } else if state.hovered {
             Some(alpha(accent, 0.16).into())
-        } else if active {
+        } else if state.active {
             Some(alpha(accent, 0.12).into())
         } else {
             None
@@ -236,7 +248,8 @@ pub fn row_box(active: bool, hovered: bool, accent: Color) -> impl Fn(&Theme) ->
         text_color: Some(TEXT),
         border: Border {
             radius: 8.0.into(),
-            ..Border::default()
+            width: if state.selected { 1.0 } else { 0.0 },
+            color: alpha(accent, 0.55),
         },
         ..container::Style::default()
     }

@@ -51,8 +51,32 @@ pub const SEARCH_INPUT: &str = "recherche";
 pub const PAGE_SCROLL: &str = "page";
 pub const QUEUE_SCROLL: &str = "file";
 pub const LYRICS_SCROLL: &str = "paroles";
-/// Hauteur d'une ligne de paroles (fixe : on sait où défiler).
-pub const LYRIC_LINE_H: f32 = 56.0;
+/// Taille du texte des paroles et hauteur d'une ligne de texte.
+pub const LYRIC_SIZE: f32 = 20.0;
+const LYRIC_TEXT_H: f32 = 27.0;
+/// Espace entre deux lignes de paroles.
+const LYRIC_GAP: f32 = 16.0;
+
+/// Hauteur de chaque ligne de paroles dans un panneau de `width` px : une
+/// ligne longue passe sur plusieurs lignes de texte. Estimation volontairement
+/// large (0,62 × la taille par caractère, gras) : un peu d'air plutôt qu'un
+/// chevauchement. Sert à l'affichage et au défilement (même calcul).
+pub fn lyric_heights(texts: impl Iterator<Item = usize>, width: f32) -> Vec<f32> {
+    let per_line = ((width / (LYRIC_SIZE * 0.62)).floor() as usize).max(8);
+    texts
+        .map(|chars| {
+            let rows = chars.max(1).div_ceil(per_line).min(5) as f32;
+            rows * LYRIC_TEXT_H + LYRIC_GAP
+        })
+        .collect()
+}
+
+/// Largeur utile du texte dans le panneau des paroles.
+pub fn lyrics_text_width(panel: f32) -> f32 {
+    panel - 40.0
+}
+/// Marge au-dessus de la première ligne de paroles.
+pub const LYRICS_TOP: f32 = 24.0;
 
 /// Ce qu'affiche le panneau de droite : la file ou les paroles, jamais les deux.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,6 +166,8 @@ pub enum Message {
     ToggleQueue,
     /// Bouton micro : panneau des paroles à la place de la file.
     ToggleLyrics,
+    /// Clic simple sur un morceau : il reste sélectionné.
+    Select(String),
     /// Double-clic sur une ligne de la file.
     JumpTo(QueueId),
     /// La souris quitte une ligne de la file.
@@ -335,6 +361,11 @@ pub struct App {
     cover_failed: std::collections::HashSet<(String, u32)>,
     pub show_queue: bool,
     pub right_panel: RightPanel,
+    /// Morceau sélectionné d'un clic (listes) ; ligne sélectionnée de la file.
+    pub selected: Option<String>,
+    pub queue_selected: Option<usize>,
+    /// Défilement manuel des paroles : le suivi automatique reprend après.
+    lyrics_manual_until: Option<std::time::Instant>,
     /// Mesure des images par seconde (`YTMR_FPS`) : début de la seconde, images.
     fps_meter: Option<(std::time::Instant, u32)>,
     /// Ligne de paroles suivie (pour ne glisser qu'au changement de ligne).
@@ -453,6 +484,9 @@ impl App {
             dragging: None,
             queue_drag: None,
             right_panel: RightPanel::Queue,
+            selected: None,
+            queue_selected: None,
+            lyrics_manual_until: None,
             fps_meter: std::env::var_os("YTMR_FPS").map(|_| (std::time::Instant::now(), 0)),
             lyrics_line: None,
             lyrics_view: View::default(),
@@ -554,6 +588,7 @@ impl App {
     fn queue_drag_step(&mut self, step: QueueDrag) -> Task<Message> {
         match step {
             QueueDrag::Press(i) => {
+                self.queue_selected = Some(i);
                 self.queue_drag = Some(QueueDragState {
                     from: i,
                     over: i,
@@ -612,13 +647,25 @@ impl App {
             return;
         };
         let line = lyrics.line_at(self.state.position + Duration::from_millis(200));
-        if line == self.lyrics_line {
+        let manual = self
+            .lyrics_manual_until
+            .is_some_and(|t| std::time::Instant::now() < t);
+        if line == self.lyrics_line || manual {
             return;
         }
         self.lyrics_line = line;
-        // La ligne chantée se place au tiers de la hauteur du panneau.
-        let index = line.unwrap_or(0) as f32;
-        let target = index * LYRIC_LINE_H - self.lyrics_view.height * 0.3;
+        // La ligne chantée (son milieu) se place aux deux cinquièmes du panneau.
+        let ytmr_catalog::lyrics::LyricsBody::Synced(lines) = &lyrics.body else {
+            return;
+        };
+        let heights = lyric_heights(
+            lines.iter().map(|l| l.text.chars().count()),
+            lyrics_text_width(self.queue_width),
+        );
+        let index = line.unwrap_or(0).min(heights.len().saturating_sub(1));
+        let above: f32 = heights[..index].iter().sum();
+        let middle = heights.get(index).copied().unwrap_or(0.0) / 2.0;
+        let target = LYRICS_TOP + above + middle - self.lyrics_view.height * 0.4;
         self.scrolling.glide_to(LYRICS_SCROLL, target);
     }
 
@@ -1489,6 +1536,10 @@ impl App {
                 self.want_lyrics()
             }
             Message::JumpTo(id) => self.send(Command::JumpTo(id)),
+            Message::Select(video_id) => {
+                self.selected = Some(video_id);
+                Task::none()
+            }
             Message::QueueUnhover(row) => {
                 // Seulement si c'est bien la ligne survolée : en remontant, la
                 // nouvelle ligne est survolée avant que l'ancienne soit quittée.
@@ -1550,6 +1601,11 @@ impl App {
                 }
             }
             Message::Wheel(id, lines) => {
+                if id == LYRICS_SCROLL {
+                    // On lit plus loin : le suivi reprend 4 s après le dernier cran.
+                    self.lyrics_manual_until =
+                        Some(std::time::Instant::now() + Duration::from_secs(4));
+                }
                 self.scrolling.wheel(id, lines);
                 Task::none()
             }
@@ -1895,6 +1951,13 @@ impl App {
             Key::Named(key::Named::ArrowLeft) => self.seek_by(-10.0),
             Key::Character("f" | "k") if modifiers.control() => operation::focus(SEARCH_INPUT),
             Key::Named(key::Named::F11) => self.update(Message::ToggleFullscreen),
+            Key::Named(key::Named::Escape)
+                if self.selected.is_some() && self.context_menu.is_none() =>
+            {
+                self.selected = None;
+                self.queue_selected = None;
+                Task::none()
+            }
             Key::Named(key::Named::Escape) if self.context_menu.is_some() => {
                 self.context_menu = None;
                 Task::none()

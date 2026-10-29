@@ -34,6 +34,8 @@ use crate::views::{
 
 pub const NEW_PLAYLIST_INPUT: &str = "nouvelle-playlist";
 pub const RENAME_INPUT: &str = "renommer-playlist";
+/// Liste des playlists de la fenêtre « Ajouter à… ».
+pub const ADD_TO_SCROLL: &str = "ajout-playlist";
 
 /// Durées pendant lesquelles une donnée en cache est jugée à jour : au-delà
 /// seulement, on la redemande à YouTube (ou sur demande, bouton ↻).
@@ -1628,9 +1630,10 @@ fn add_to_panel<'a>(app: &'a App, track: Option<&'a Track>) -> El<'a> {
             _ => list = list.push(muted("Chargement…")),
         }
         content = content.push(section_title("Mes playlists")).push(
-            scrollable(list)
-                .height(Length::Fixed(300.0))
-                .style(style::scroll),
+            // Défilement animé (molette), comme les autres listes : la liste
+            // native sautait de 60 px par cran.
+            container(crate::views::smooth_scroll(list, ADD_TO_SCROLL))
+                .height(Length::Fixed(300.0)),
         );
     }
     content.into()

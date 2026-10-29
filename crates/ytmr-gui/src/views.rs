@@ -14,8 +14,8 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, LYRIC_LINE_H, LYRICS_SCROLL, Load, Message, PAGE_SCROLL, Panel, Phase,
-    QUEUE_SCROLL, QueueDrag, RightPanel, Route, SEARCH_INPUT, THUMB, View,
+    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, PAGE_SCROLL, Panel,
+    Phase, QUEUE_SCROLL, QueueDrag, RightPanel, Route, SEARCH_INPUT, THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -461,7 +461,7 @@ pub(crate) fn page_scroll<'a>(content: impl Into<El<'a>>) -> El<'a> {
     smooth_scroll(content, PAGE_SCROLL)
 }
 
-fn smooth_scroll<'a>(content: impl Into<El<'a>>, id: &'static str) -> El<'a> {
+pub(crate) fn smooth_scroll<'a>(content: impl Into<El<'a>>, id: &'static str) -> El<'a> {
     wheel(
         scrollable(content)
             .id(id)
@@ -589,8 +589,16 @@ pub(crate) fn track_row<'a>(
             container(row_content)
                 .width(Length::Fill)
                 .padding(Padding::from([6, 10]))
-                .style(style::row_box(playing, hovered, app.accent)),
+                .style(style::row_box(
+                    style::RowState {
+                        active: playing,
+                        hovered,
+                        selected: app.selected.as_deref() == Some(track.video_id.as_str()),
+                    },
+                    app.accent,
+                )),
         )
+        .on_press(Message::Select(track.video_id.clone()))
         .on_double_click(on_play)
         .interaction(iced::mouse::Interaction::Pointer)
         .on_enter(Message::Hover(track.video_id.clone()))
@@ -766,51 +774,58 @@ fn now_playing(app: &App) -> El<'_> {
     .into()
 }
 
-/// Panneau des paroles, à la place de la file d'attente. Synchronisées : la
-/// ligne chantée glisse doucement au tiers du panneau (clic = aller à ce moment).
+/// Panneau des paroles, à la place de la file d'attente.
+///
+/// Fond teinté par la pochette, grands caractères blancs. Synchronisées : la
+/// ligne chantée est pleine, les suivantes estompées, les passées plus encore ;
+/// elle glisse en douceur aux deux cinquièmes du panneau. Au survol, une ligne
+/// s'éclaircit seulement (pas de cadre) ; un clic y amène la lecture. Défiler
+/// à la molette suspend le suivi quelques secondes.
 fn lyrics_side(app: &App) -> El<'_> {
     use ytmr_catalog::lyrics::LyricsBody;
+    let accent = app.accent;
     let current = app.state.current.as_ref();
-    let source = current
-        .and_then(|e| match app.lyrics.get(&e.track.video_id) {
-            Some(Load::Ready(Some(l))) => Some(format!("Source : {}", l.source)),
-            _ => None,
-        })
-        .unwrap_or_default();
     let header = row![
-        column![
-            text("Paroles").size(16).font(BOLD),
-            text(source).size(11).color(style::TEXT_FAINT),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
+        text("Paroles").size(15).font(BOLD).width(Length::Fill),
         icon_tip(
             Icon::Close,
-            16.0,
-            style::TEXT_DIM,
+            15.0,
+            style::alpha(Color::WHITE, 0.7),
             Message::ToggleLyrics,
             "Fermer".into()
         ),
     ]
-    .spacing(8)
     .align_y(Alignment::Center);
 
-    let body: El<'_> = match current.map(|e| app.lyrics.get(&e.track.video_id)) {
-        None => muted("Rien en lecture."),
-        Some(None | Some(Load::Loading)) => muted("Recherche des paroles…"),
-        Some(Some(Load::Failed(_)) | Some(Load::Ready(None))) => {
-            muted("Paroles indisponibles pour ce titre.")
-        }
-        Some(Some(Load::Ready(Some(lyrics)))) => match &lyrics.body {
+    let lyrics = current.and_then(|e| match app.lyrics.get(&e.track.video_id) {
+        Some(Load::Ready(Some(l))) => Some(l),
+        _ => None,
+    });
+    let message = |m: &'static str| -> El<'_> {
+        container(text(m).size(15).color(style::alpha(Color::WHITE, 0.6)))
+            .center(Length::Fill)
+            .into()
+    };
+    let body: El<'_> = match (current, lyrics) {
+        (None, _) => message("Rien en lecture."),
+        (Some(e), None) => match app.lyrics.get(&e.track.video_id) {
+            None | Some(Load::Loading) => message("Recherche des paroles…"),
+            _ => message("Paroles indisponibles pour ce titre."),
+        },
+        (Some(_), Some(lyrics)) => match &lyrics.body {
             LyricsBody::Synced(lines) => {
                 let sung = lyrics.line_at(app.state.position + Duration::from_millis(200));
-                let accent = app.accent;
-                let mut list = column![];
-                for (i, line) in lines.iter().enumerate() {
-                    let color = match sung {
-                        Some(c) if c == i => style::TEXT,
-                        Some(c) if i < c => style::TEXT_FAINT,
-                        _ => style::alpha(style::TEXT_DIM, 0.8),
+                let mut list = column![Space::new().height(Length::Fixed(LYRICS_TOP))];
+                let heights = crate::app::lyric_heights(
+                    lines.iter().map(|l| l.text.chars().count()),
+                    crate::app::lyrics_text_width(app.queue_width),
+                );
+                for ((i, line), height) in lines.iter().enumerate().zip(heights) {
+                    // Opacité de repos : pleine (chantée), 0,5 (à venir), 0,3 (passée).
+                    let rest = match sung {
+                        Some(c) if c == i => 1.0,
+                        Some(c) if i < c => 0.3,
+                        _ => 0.5,
                     };
                     let words = if line.text.is_empty() {
                         "♪"
@@ -819,38 +834,76 @@ fn lyrics_side(app: &App) -> El<'_> {
                     };
                     list = list.push(
                         button(
-                            container(text(words).size(17).font(BOLD).color(color))
-                                .height(Length::Fixed(LYRIC_LINE_H))
-                                .align_y(Alignment::Center)
-                                .clip(true),
+                            container(text(words).size(LYRIC_SIZE).font(BOLD))
+                                .height(Length::Fixed(height))
+                                .align_y(Alignment::Center),
                         )
                         .width(Length::Fill)
-                        .padding(0)
-                        .style(move |theme, status| {
-                            let mut s = style::link(theme, status);
-                            if matches!(status, button::Status::Hovered) {
-                                s.background = Some(style::alpha(accent, 0.08).into());
-                            }
-                            s
+                        .padding(Padding::from([0, 2]))
+                        .style(move |_, status| button::Style {
+                            background: None,
+                            text_color: style::alpha(
+                                Color::WHITE,
+                                match status {
+                                    button::Status::Hovered | button::Status::Pressed => {
+                                        f32::max(rest, 0.85)
+                                    }
+                                    _ => rest,
+                                },
+                            ),
+                            ..button::Style::default()
                         })
                         .on_press(Message::SeekTo(line.at)),
                     );
                 }
-                // Marge du bas : la dernière ligne peut monter jusqu'au tiers.
+                // Marge du bas : la dernière ligne peut remonter comme les autres.
                 list = list.push(Space::new().height(Length::Fixed(app.lyrics_view.height)));
                 smooth_scroll(list, LYRICS_SCROLL)
             }
-            LyricsBody::Plain(body) => {
-                smooth_scroll(text(body).size(16).color(style::TEXT_DIM), LYRICS_SCROLL)
-            }
+            LyricsBody::Plain(body) => smooth_scroll(
+                container(
+                    text(body)
+                        .size(19)
+                        .font(SEMIBOLD)
+                        .line_height(1.6)
+                        .color(style::alpha(Color::WHITE, 0.85)),
+                )
+                .padding(Padding {
+                    top: LYRICS_TOP,
+                    bottom: 40.0,
+                    ..Padding::ZERO
+                }),
+                LYRICS_SCROLL,
+            ),
         },
     };
+    let footer = text(
+        lyrics
+            .map(|l| format!("Paroles : {}", l.source))
+            .unwrap_or_default(),
+    )
+    .size(11)
+    .color(style::alpha(Color::WHITE, 0.45));
 
-    container(column![header, body].spacing(12).padding(14))
-        .width(Length::Fixed(app.queue_width))
-        .height(Length::Fill)
-        .style(style::sidebar)
-        .into()
+    container(column![header, body, footer].spacing(10).padding(Padding {
+        top: 16.0,
+        right: 16.0,
+        bottom: 12.0,
+        left: 20.0,
+    }))
+    .width(Length::Fixed(app.queue_width))
+    .height(Length::Fill)
+    .style(move |_| iced::widget::container::Style {
+        // Teinte de la pochette, assombrie vers le bas pour la lisibilité.
+        background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+            iced::gradient::Linear::new(std::f32::consts::PI)
+                .add_stop(0.0, style::shade(accent, 0.30))
+                .add_stop(1.0, style::shade(accent, 0.12)),
+        ))),
+        text_color: Some(Color::WHITE),
+        ..Default::default()
+    })
+    .into()
 }
 
 /// « Bonjour, <prénom> » selon l'heure locale.
@@ -1309,30 +1362,18 @@ fn queue_panel(app: &App) -> El<'_> {
             // Pas de bouton ici : il garderait le clic pour lui. Un clic bref
             // lance le morceau, un clic maintenu le déplace (voir `QueueDrag`).
             let held = drag.is_some_and(|d| d.from == i && d.moved);
-            let hovered = drag.is_none() && app.queue_hover == Some(i);
-            let background = if held {
-                Some(style::alpha(accent, 0.24))
-            } else if hovered {
-                Some(style::alpha(accent, 0.16))
-            } else if current {
-                Some(style::alpha(accent, 0.12))
-            } else {
-                None
+            let row_state = style::RowState {
+                active: current,
+                hovered: drag.is_none() && app.queue_hover == Some(i),
+                // Saisie pour un déplacement : rendue comme sélectionnée.
+                selected: held || app.queue_selected == Some(i),
             };
             let body = container(content)
                 .width(Length::Fill)
                 .height(Length::Fill)
                 .align_y(Alignment::Center)
                 .padding(Padding::from([5, 8]))
-                .style(move |_| iced::widget::container::Style {
-                    background: background.map(Into::into),
-                    text_color: Some(style::TEXT),
-                    border: iced::Border {
-                        radius: 8.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                });
+                .style(style::row_box(row_state, accent));
             // Trait d'insertion là où le morceau va tomber.
             let marker: El<'_> = match drag {
                 Some(d) if d.moved && d.over == i && d.from != i => container(

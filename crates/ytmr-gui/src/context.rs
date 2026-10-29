@@ -76,11 +76,23 @@ impl App {
                     return Task::none();
                 };
                 let seed = track.video_id.clone();
-                Task::batch([
+                // Radio du morceau en cours : il continue (le relancer le faisait
+                // repartir du début). Sinon, il démarre.
+                let playing = self
+                    .state
+                    .current
+                    .as_ref()
+                    .is_some_and(|e| e.track.video_id == seed);
+                let start = if playing {
+                    Task::none()
+                } else {
                     self.send(Command::PlayTracks {
                         tracks: vec![track],
                         start: 0,
-                    }),
+                    })
+                };
+                Task::batch([
+                    start,
                     Task::perform(
                         async move {
                             let result = catalog.radio(&seed).await.map_err(|e| e.to_string());
@@ -93,20 +105,39 @@ impl App {
             Ctx::RadioTracks(seed, result) => match result {
                 Ok(tracks) => {
                     // L'utilisateur a peut-être lancé autre chose entre-temps.
+                    let seed_title = self
+                        .state
+                        .current
+                        .as_ref()
+                        .map(|e| format!("{}|{}", fold(&e.track.title), fold(&e.track.artist)));
                     let still = self
                         .state
                         .current
                         .as_ref()
                         .is_some_and(|e| e.track.video_id == seed);
-                    let tracks: Vec<Track> =
-                        tracks.into_iter().filter(|t| t.video_id != seed).collect();
+                    // Ni le titre de départ (YouTube le met en tête, parfois sous un
+                    // autre identifiant), ni le morceau en cours : la suite, elle,
+                    // est vidée juste avant.
+                    let tracks: Vec<Track> = tracks
+                        .into_iter()
+                        .filter(|t| t.video_id != seed && !same_song(t, seed_title.as_deref()))
+                        .filter(|t| {
+                            !self
+                                .queue
+                                .entries
+                                .iter()
+                                .take(1)
+                                .any(|e| e.track.video_id == t.video_id)
+                        })
+                        .collect();
                     if !still || tracks.is_empty() {
                         return Task::none();
                     }
-                    Task::batch([
-                        self.send(Command::Enqueue(tracks)),
-                        self.show_toast("Radio lancée".into()),
-                    ])
+                    // La radio remplace la suite : vider puis ajouter, dans cet ordre.
+                    let fill = self
+                        .send(Command::ClearUpcoming)
+                        .chain(self.send(Command::Enqueue(tracks)));
+                    Task::batch([fill, self.show_toast("Radio lancée".into())])
                 }
                 Err(e) => self.show_toast(format!("Radio indisponible : {e}")),
             },
@@ -475,4 +506,16 @@ impl<'a, Message: 'a, Theme: 'a, Renderer: renderer::Renderer + 'a>
     fn from(widget: PointCatcher<'a, Message, Theme, Renderer>) -> Self {
         Element::new(widget)
     }
+}
+
+/// Même chanson sous un autre identifiant (clip / version audio).
+fn same_song(track: &Track, seed: Option<&str>) -> bool {
+    seed.is_some_and(|s| format!("{}|{}", fold(&track.title), fold(&track.artist)) == s)
+}
+
+fn fold(text: &str) -> String {
+    text.chars()
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_alphanumeric())
+        .collect()
 }
