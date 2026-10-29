@@ -164,6 +164,7 @@ pub enum Message {
     MediaControls(Result<(), String>),
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
+    Coll(crate::collection::Coll),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
     CloseRequested,
@@ -272,6 +273,7 @@ pub struct App {
     scrolling: Scrolling,
     pub lib: crate::library::LibraryState,
     pub settings: crate::settings::SettingsState,
+    pub coll: crate::collection::CollectionState,
     pub page_view: View,
     pub queue_view: View,
     covers_seq: u64,
@@ -346,6 +348,7 @@ impl App {
             scrolling: Scrolling::default(),
             lib: crate::library::LibraryState::default(),
             settings: crate::settings::SettingsState::default(),
+            coll: crate::collection::CollectionState::default(),
             page_view: View::default(),
             queue_view: View::default(),
             covers_seq: 0,
@@ -834,7 +837,11 @@ impl App {
                 )
             }
             Route::Search => operation::focus(SEARCH_INPUT),
-            Route::Library => Task::batch([self.load_playlists(), self.want_list_covers()]),
+            Route::Library => Task::batch([
+                self.load_playlists(),
+                self.load_collection(),
+                self.collection_covers(),
+            ]),
             Route::Playlist(id) => self.open_playlist(id),
             Route::Home => self.refresh_home(),
             Route::NowPlaying => Task::none(),
@@ -1340,6 +1347,7 @@ impl App {
             }
             Message::Lib(message) => self.update_library(message),
             Message::Settings(message) => self.update_settings(message),
+            Message::Coll(message) => self.update_collection(message),
             Message::Noop => Task::none(),
             Message::ShutdownDone => iced::exit(),
         }

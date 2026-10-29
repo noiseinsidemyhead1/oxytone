@@ -161,7 +161,7 @@ fn main_layout(app: &App) -> El<'_> {
         Route::Search => search_page(app),
         Route::Album(_) => album_page(app),
         Route::Artist(_) => artist_page(app),
-        Route::Library => library::library_page(app),
+        Route::Library => crate::collection::library_page(app),
         Route::Playlist(_) => library::playlist_page(app),
         Route::Settings => crate::settings::settings_page(app),
     };
@@ -816,6 +816,14 @@ fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
     page.into()
 }
 
+/// Boutons sous le titre d'une page.
+pub(crate) struct Actions<'a> {
+    /// (lecture, aléatoire) ; `None` pour une liste vide.
+    pub play: Option<(Message, Message)>,
+    /// Like, suivre…
+    pub extra: Option<El<'a>>,
+}
+
 pub(crate) fn page_header<'a>(
     app: &App,
     cover_id: Option<String>,
@@ -823,10 +831,9 @@ pub(crate) fn page_header<'a>(
     kicker: String,
     title: &'a str,
     subtitle: El<'a>,
-    // (lecture, aléatoire) ; `None` pour une liste vide.
-    play: Option<(Message, Message)>,
+    actions: Actions<'a>,
 ) -> El<'a> {
-    let (play, shuffle) = play.unzip();
+    let (play, shuffle) = actions.play.unzip();
     // Boutons et titres suivent le morceau en cours ; seul le dégradé du haut
     // garde la teinte de la page (fixe, sans mélange).
     let accent = app.accent;
@@ -856,7 +863,9 @@ pub(crate) fn page_header<'a>(
         .style(style::pill_ghost)
         .on_press_maybe(shuffle),
     ]
-    .spacing(12);
+    .spacing(12)
+    .align_y(Alignment::Center)
+    .push(actions.extra.unwrap_or_else(|| Space::new().into()));
     let header = container(
         row![
             art,
@@ -928,7 +937,34 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
         album.kind.to_uppercase(),
         &album.title,
         subtitle.into(),
-        (!album.tracks.is_empty()).then_some((Message::PlayAlbum(false), Message::PlayAlbum(true))),
+        Actions {
+            play: (!album.tracks.is_empty())
+                .then_some((Message::PlayAlbum(false), Message::PlayAlbum(true))),
+            extra: Some({
+                let saved = app.album_saved(&album.id);
+                crate::collection::heart(
+                    app,
+                    saved,
+                    Message::Coll(crate::collection::Coll::SaveAlbum(
+                        AlbumSummary {
+                            id: album.id.clone(),
+                            title: album.title.clone(),
+                            artist: album.artist.clone(),
+                            year: album.year.clone(),
+                            kind: album.kind.clone(),
+                            thumbnail_url: album.thumbnail_url.clone(),
+                        },
+                        album.audio_playlist_id.clone(),
+                        !saved,
+                    )),
+                    if saved {
+                        "Retirer de la bibliothèque"
+                    } else {
+                        "Ajouter à la bibliothèque"
+                    },
+                )
+            }),
+        },
     );
     let mut list = column![].spacing(2);
     for (i, track) in album.tracks.iter().enumerate() {
@@ -974,8 +1010,37 @@ fn artist_body<'a>(app: &'a App, artist: &'a Artist) -> El<'a> {
         "ARTISTE".to_owned(),
         &artist.name,
         subtitle,
-        (!artist.songs.is_empty())
-            .then_some((Message::PlayArtist(false), Message::PlayArtist(true))),
+        Actions {
+            play: (!artist.songs.is_empty())
+                .then_some((Message::PlayArtist(false), Message::PlayArtist(true))),
+            extra: Some({
+                let followed = app.artist_followed(&artist.id);
+                let accent = app.accent;
+                button(
+                    text(if followed { "Abonné" } else { "Suivre" })
+                        .size(14)
+                        .font(SEMIBOLD),
+                )
+                .padding(Padding::from([10, 20]))
+                .style(move |theme, status| {
+                    if followed {
+                        style::pill_ghost(theme, status)
+                    } else {
+                        style::pill(accent)(theme, status)
+                    }
+                })
+                .on_press(Message::Coll(crate::collection::Coll::FollowArtist(
+                    ArtistSummary {
+                        id: artist.id.clone(),
+                        name: artist.name.clone(),
+                        subscribers: artist.subscribers.clone(),
+                        thumbnail_url: artist.thumbnail_url.clone(),
+                    },
+                    !followed,
+                )))
+                .into()
+            }),
+        },
     );
     let mut page = column![].spacing(28);
     if !artist.songs.is_empty() {

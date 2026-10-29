@@ -27,8 +27,8 @@ use crate::backend::AccountState;
 use crate::icons::{Icon, icon};
 use crate::style;
 use crate::views::{
-    BOLD, El, SEMIBOLD, cards, cover, error_box, icon_tip, loading, muted, page_header,
-    page_scroll, section_title, track_row,
+    BOLD, El, SEMIBOLD, cover, error_box, icon_tip, loading, muted, page_header, page_scroll,
+    section_title, track_row,
 };
 
 pub const NEW_PLAYLIST_INPUT: &str = "nouvelle-playlist";
@@ -516,7 +516,13 @@ impl App {
                         Lib::LikedLoaded,
                     )
                 };
-                let mut tasks = vec![self.load_playlists(), liked, profile, self.load_history()];
+                let mut tasks = vec![
+                    self.load_playlists(),
+                    liked,
+                    profile,
+                    self.load_history(),
+                    self.load_collection(),
+                ];
                 if let Route::Playlist(id) = self.route.clone() {
                     tasks.push(self.open_playlist(id));
                 }
@@ -1085,7 +1091,7 @@ pub fn fold(text: &str) -> String {
 }
 
 /// Le fichier existe et a été écrit il y a moins de `ttl`.
-fn is_fresh(path: &Path, ttl: Duration) -> bool {
+pub(crate) fn is_fresh(path: &Path, ttl: Duration) -> bool {
     std::fs::metadata(path)
         .and_then(|m| m.modified())
         .ok()
@@ -1111,7 +1117,7 @@ fn write_list(dir: &Path, list: &[PlaylistSummary]) {
     write_json(&dir.join("playlists.json"), &list);
 }
 
-fn write_json(path: &Path, value: &impl serde::Serialize) {
+pub(crate) fn write_json(path: &Path, value: &impl serde::Serialize) {
     let result = serde_json::to_vec(value)
         .map_err(std::io::Error::other)
         .and_then(|json| {
@@ -1148,7 +1154,7 @@ pub fn cached_liked(dir: &Path) -> Option<Playlist> {
 
 // ----- vues -----
 
-fn liked_tile<'a>(app: &App) -> El<'a> {
+pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
     let count = app
         .lib
         .liked_count
@@ -1215,7 +1221,7 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
     .into()
 }
 
-fn not_connected<'a>(app: &App) -> Option<El<'a>> {
+pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
     let message = match &app.lib.account {
         AccountView::Ready(_) => return None,
         AccountView::Connecting => "Connexion à ton compte YouTube…".to_owned(),
@@ -1231,44 +1237,6 @@ fn not_connected<'a>(app: &App) -> Option<El<'a>> {
             .padding(Padding::from([40, 0]))
             .into(),
     )
-}
-
-pub fn library_page(app: &App) -> El<'_> {
-    let header = row![
-        text("Bibliothèque").size(30).font(BOLD).width(Length::Fill),
-        button(
-            row![
-                icon(Icon::Plus, 16.0, style::BG),
-                text("Nouvelle playlist").size(14).font(SEMIBOLD)
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .padding(Padding::from([9, 18]))
-        .style(style::pill(app.accent))
-        .on_press_maybe(app.lib.ready().map(|_| Message::Lib(Lib::OpenNew))),
-    ]
-    .align_y(Alignment::Center);
-
-    let body: El<'_> = if let Some(info) = not_connected(app) {
-        info
-    } else {
-        match &app.lib.playlists {
-            None | Some(Load::Loading) => loading("Chargement de tes playlists…"),
-            Some(Load::Failed(e)) => error_box(e),
-            Some(Load::Ready(list)) => {
-                let mut tiles = vec![liked_tile(app)];
-                tiles.extend(list.iter().map(|p| playlist_card(app, p)));
-                cards(tiles)
-            }
-        }
-    };
-    page_scroll(column![header, body].spacing(20).padding(Padding {
-        top: 28.0,
-        right: 28.0,
-        bottom: 32.0,
-        left: 28.0,
-    }))
 }
 
 pub fn playlist_page(app: &App) -> El<'_> {
@@ -1366,10 +1334,35 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         },
         &playlist.title,
         subtitle.into(),
-        (!playlist.tracks.is_empty()).then_some((
-            Message::Lib(Lib::PlayAt(0)),
-            Message::Lib(Lib::PlayShuffled),
-        )),
+        crate::views::Actions {
+            play: (!playlist.tracks.is_empty()).then_some((
+                Message::Lib(Lib::PlayAt(0)),
+                Message::Lib(Lib::PlayShuffled),
+            )),
+            // Playlist d'un autre : on peut l'enregistrer dans sa bibliothèque.
+            extra: (!liked && !playlist.owned).then(|| {
+                let saved = app.playlist_saved(id);
+                crate::collection::heart(
+                    app,
+                    saved,
+                    Message::Coll(crate::collection::Coll::SavePlaylist(
+                        PlaylistSummary {
+                            id: playlist.id.clone(),
+                            title: playlist.title.clone(),
+                            tracks_text: format!("{} titres", playlist.tracks.len()),
+                            author: playlist.author.clone(),
+                            thumbnail_url: playlist.thumbnail_url.clone(),
+                        },
+                        !saved,
+                    )),
+                    if saved {
+                        "Retirer de la bibliothèque"
+                    } else {
+                        "Ajouter à la bibliothèque"
+                    },
+                )
+            }),
+        },
     );
 
     // Seules les lignes visibles sont construites, et le clic ne transporte

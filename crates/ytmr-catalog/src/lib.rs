@@ -37,7 +37,7 @@ pub enum CatalogError {
 /// pas son `ytcfg`.
 const CONSENT_COOKIE: &str = "SOCS=CAI";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AlbumSummary {
     pub id: String,
     pub title: String,
@@ -48,7 +48,7 @@ pub struct AlbumSummary {
     pub thumbnail_url: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArtistSummary {
     pub id: String,
     pub name: String,
@@ -73,6 +73,9 @@ pub struct Album {
     pub kind: String,
     /// Durée totale telle qu'affichée par YouTube (« 1 heure et 2 minutes »).
     pub duration_text: String,
+    /// Playlist audio de l'album (`OLAK5uy…`) : c'est elle qu'on enregistre
+    /// dans la bibliothèque pour « liker » l'album.
+    pub audio_playlist_id: Option<String>,
     pub thumbnail_url: Option<String>,
     pub tracks: Vec<Track>,
 }
@@ -300,7 +303,7 @@ fn album_kind(kind: &AlbumType) -> String {
     .to_owned()
 }
 
-fn album_from_search(a: SearchResultAlbum) -> AlbumSummary {
+pub(crate) fn album_from_search(a: SearchResultAlbum) -> AlbumSummary {
     AlbumSummary {
         id: a.album_id.get_raw().to_owned(),
         title: a.title,
@@ -333,6 +336,7 @@ fn artist_from_search(a: SearchResultArtist) -> ArtistSummary {
 
 fn album_from_get(id: &str, a: GetAlbum) -> Album {
     let mut album = Album {
+        audio_playlist_id: a.audio_playlist_id.as_ref().map(|p| p.get_raw().to_owned()),
         id: id.to_owned(),
         title: a.title,
         artist: join_artists(&a.artists),

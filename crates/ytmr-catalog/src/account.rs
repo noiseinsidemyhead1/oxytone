@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 use ytmapi_rs::auth::{AuthToken, BrowserToken};
+use ytmapi_rs::common::ArtistChannelID;
 use ytmapi_rs::common::{ApiOutcome, LikeStatus, PlaylistID, SetVideoID, VideoID, YoutubeID};
 use ytmapi_rs::parse::LibraryPlaylist;
 use ytmapi_rs::parse::{ParseFrom, ProcessedResult};
@@ -31,7 +32,7 @@ use ytmapi_rs::{YtMusic, YtMusicBuilder};
 use ytmr_core::Track;
 use ytmr_core::track::parse_duration;
 
-use crate::{CatalogError, largest_thumbnail};
+use crate::{AlbumSummary, ArtistSummary, CatalogError, largest_thumbnail};
 
 /// Playlist des titres likés.
 pub const LIKED_ID: &str = "LM";
@@ -141,6 +142,49 @@ impl Account {
             .map(summary)
             .filter(|p| p.id != LIKED_ID && !p.id.starts_with(PODCAST_PREFIX))
             .collect())
+    }
+
+    /// Albums et EP enregistrés dans la bibliothèque (du plus récent au plus ancien).
+    pub async fn library_albums(&self) -> Result<Vec<AlbumSummary>, CatalogError> {
+        let albums = self.yt.get_library_albums().await?;
+        Ok(albums.into_iter().map(crate::album_from_search).collect())
+    }
+
+    /// Artistes suivis.
+    pub async fn library_artists(&self) -> Result<Vec<ArtistSummary>, CatalogError> {
+        let artists = self.yt.get_library_artist_subscriptions().await?;
+        Ok(artists
+            .into_iter()
+            .map(|a| ArtistSummary {
+                id: a.channel_id.get_raw().to_owned(),
+                name: a.name,
+                subscribers: Some(a.subscribers).filter(|s| !s.trim().is_empty()),
+                thumbnail_url: largest_thumbnail(&a.thumbnails),
+            })
+            .collect())
+    }
+
+    /// Enregistre (`true`) ou retire de la bibliothèque une playlist, ou un
+    /// album par sa playlist audio (`OLAK5uy…`). C'est le « like » de YouTube Music.
+    pub async fn save_playlist(&self, id: &str, saved: bool) -> Result<(), CatalogError> {
+        let status = if saved {
+            LikeStatus::Liked
+        } else {
+            LikeStatus::Indifferent
+        };
+        self.yt.rate_playlist(edit_id(id), status).await?;
+        Ok(())
+    }
+
+    /// Suit (`true`) ou ne suit plus un artiste.
+    pub async fn follow_artist(&self, channel_id: &str, follow: bool) -> Result<(), CatalogError> {
+        let id = ArtistChannelID::from_raw(channel_id.to_owned());
+        if follow {
+            self.yt.subscribe_artist(id).await?;
+        } else {
+            self.yt.unsubscribe_artists([id]).await?;
+        }
+        Ok(())
     }
 
     /// Détails et morceaux (toutes les pages). `LIKED_ID` pour les titres likés.
@@ -641,6 +685,36 @@ pub fn video_ids(tracks: &[Track]) -> std::collections::HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lecture seule : albums enregistrés et artistes suivis.
+    #[tokio::test]
+    #[ignore = "nécessite YTMR_TEST_COOKIE"]
+    async fn reads_saved_albums_and_artists() {
+        let cookie = std::env::var("YTMR_TEST_COOKIE").unwrap();
+        let account = Account::connect(&cookie).await.unwrap();
+        let albums = account.library_albums().await;
+        println!(
+            "albums : {:?}",
+            albums
+                .as_ref()
+                .map(|a| a
+                    .iter()
+                    .take(3)
+                    .map(|x| x.title.clone())
+                    .collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        );
+        println!("nb albums : {:?}", albums.as_ref().map(Vec::len).ok());
+        let artists = account.library_artists().await;
+        println!(
+            "artistes : {:?}",
+            artists
+                .as_ref()
+                .map(|a| a.iter().take(3).map(|x| x.name.clone()).collect::<Vec<_>>())
+                .map_err(|e| e.to_string())
+        );
+        println!("nb artistes : {:?}", artists.as_ref().map(Vec::len).ok());
+    }
 
     /// Lecture seule : une playlist publique d'un autre compte et une des siennes.
     #[tokio::test]

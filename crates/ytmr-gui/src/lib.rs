@@ -8,6 +8,7 @@
 
 mod app;
 mod backend;
+mod collection;
 mod icons;
 mod library;
 mod settings;
