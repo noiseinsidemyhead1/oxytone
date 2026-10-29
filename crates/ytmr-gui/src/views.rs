@@ -11,11 +11,12 @@ use iced::widget::{
 };
 use iced::{Alignment, Color, Element, Font, Length, Padding, font};
 use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
-use ytmr_core::{QueuedTrack, Repeat, Status, Track};
+use ytmr_core::{Repeat, Status, Track};
 use ytmr_player::StreamQuality;
 
 use crate::app::{
-    App, CARD, HERO, Load, Message, PAGE_SCROLL, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT, THUMB,
+    App, CARD, HERO, Load, Message, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, Route, SEARCH_INPUT,
+    THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -23,6 +24,49 @@ use crate::smooth::wheel;
 use crate::style;
 
 pub(crate) type El<'a> = Element<'a, Message>;
+
+/// Hauteur fixe d'une ligne de morceau (vignette 44 + marges) : indispensable
+/// pour savoir, sans tout mettre en page, quelles lignes sont visibles.
+pub(crate) const ROW_H: f32 = 58.0;
+/// Hauteur fixe d'une ligne de la file d'attente.
+pub(crate) const QROW_H: f32 = 50.0;
+/// En-tête d'une page de playlist (hauteur fixe, contenu rogné au besoin).
+pub(crate) const PLAYLIST_HEADER_H: f32 = 316.0;
+/// Haut de la liste des morceaux dans la page de playlist.
+pub(crate) const PLAYLIST_LIST_TOP: f32 = PLAYLIST_HEADER_H + 8.0;
+/// Lignes construites en plus, au-dessus et en dessous de la zone visible.
+const OVERSCAN: usize = 6;
+
+/// Lignes `[first, last)` visibles dans une liste dont le haut est à `top`.
+pub(crate) fn visible_range(view: View, top: f32, row_h: f32, len: usize) -> (usize, usize) {
+    let start = ((view.offset - top) / row_h).floor().max(0.0) as usize;
+    let count = (view.height / row_h).ceil() as usize + 1;
+    let first = start.saturating_sub(OVERSCAN).min(len);
+    let last = (start + count + OVERSCAN).min(len).max(first);
+    (first, last)
+}
+
+/// Liste dont seules les lignes `range` existent ; le reste n'est que de l'espace.
+pub(crate) fn virtual_list<'a>(
+    len: usize,
+    row_h: f32,
+    (first, last): (usize, usize),
+    row: impl Fn(usize) -> El<'a>,
+) -> El<'a> {
+    let mut list = column![Space::new().height(Length::Fixed(first as f32 * row_h))];
+    for i in first..last {
+        list = list.push(row(i));
+    }
+    list.push(Space::new().height(Length::Fixed((len - last) as f32 * row_h)))
+        .into()
+}
+
+/// Texte sur une seule ligne, coupé s'il dépasse (lignes de hauteur fixe).
+fn line<'a>(content: impl text::IntoFragment<'a>, size: u32) -> iced::widget::Text<'a> {
+    text(content)
+        .size(size)
+        .wrapping(iced::widget::text::Wrapping::None)
+}
 
 pub(crate) const BOLD: Font = Font {
     weight: font::Weight::Bold,
@@ -112,6 +156,7 @@ fn toast(message: &str) -> El<'_> {
 fn main_layout(app: &App) -> El<'_> {
     let page: El<'_> = match &app.route {
         Route::Home => home(app),
+        Route::NowPlaying => now_playing(app),
         Route::Search => search_page(app),
         Route::Album(_) => album_page(app),
         Route::Artist(_) => artist_page(app),
@@ -120,12 +165,31 @@ fn main_layout(app: &App) -> El<'_> {
     };
     let mut middle = row![
         sidebar(app),
+        resize_handle(Panel::Left),
         container(page).width(Length::Fill).height(Length::Fill)
     ];
     if app.show_queue {
-        middle = middle.push(queue_panel(app));
+        middle = middle
+            .push(resize_handle(Panel::Right))
+            .push(queue_panel(app));
     }
     column![middle.height(Length::Fill), player_bar(app)].into()
+}
+
+/// Poignée de redimensionnement entre deux colonnes (glisser à la souris).
+fn resize_handle<'a>(panel: Panel) -> El<'a> {
+    mouse_area(
+        container(Space::new())
+            .width(Length::Fixed(5.0))
+            .height(Length::Fill)
+            .style(|_| iced::widget::container::Style {
+                background: Some(style::LINE.into()),
+                ..Default::default()
+            }),
+    )
+    .interaction(iced::mouse::Interaction::ResizingHorizontally)
+    .on_press(Message::DragStart(panel))
+    .into()
 }
 
 // ----- barre latérale -----
@@ -174,14 +238,11 @@ fn sidebar(app: &App) -> El<'_> {
             .spacing(4),
             Space::new().height(Length::Fill),
             library::account_widget(app),
-            text("Espace : lecture/pause · ← → : ±10 s · Ctrl+F : rechercher")
-                .size(11)
-                .color(style::TEXT_FAINT),
         ]
         .spacing(18)
         .padding(16),
     )
-    .width(Length::Fixed(232.0))
+    .width(Length::Fixed(app.left_width))
     .height(Length::Fill)
     .style(style::sidebar)
     .into()
@@ -400,17 +461,17 @@ pub(crate) fn track_row<'a>(
         Some(album) if number.is_none() => format!("{} · {album}", track.artist),
         _ => track.artist.clone(),
     };
-    let line = row![
+    let row_content = row![
         leading,
-        column![
-            text(&track.title)
-                .size(14)
-                .font(SEMIBOLD)
-                .color(title_color),
-            text(subtitle).size(13).color(style::TEXT_DIM),
-        ]
-        .spacing(2)
-        .width(Length::Fill),
+        container(
+            column![
+                line(&track.title, 14).font(SEMIBOLD).color(title_color),
+                line(subtitle, 13).color(style::TEXT_DIM),
+            ]
+            .spacing(2),
+        )
+        .width(Length::Fill)
+        .clip(true),
         text(fmt_opt(track.duration))
             .size(13)
             .color(style::TEXT_FAINT),
@@ -419,15 +480,19 @@ pub(crate) fn track_row<'a>(
     .spacing(14)
     .align_y(Alignment::Center);
 
-    mouse_area(
-        button(line)
-            .width(Length::Fill)
-            .padding(Padding::from([6, 10]))
-            .style(style::row(playing, app.accent))
-            .on_press(on_play),
+    container(
+        mouse_area(
+            button(row_content)
+                .width(Length::Fill)
+                .padding(Padding::from([6, 10]))
+                .style(style::row(playing, app.accent))
+                .on_press(on_play),
+        )
+        .on_enter(Message::Hover(track.video_id.clone()))
+        .on_exit(Message::Unhover),
     )
-    .on_enter(Message::Hover(track.video_id.clone()))
-    .on_exit(Message::Unhover)
+    .height(Length::Fixed(ROW_H))
+    .align_y(Alignment::Center)
     .into()
 }
 
@@ -506,55 +571,57 @@ pub(crate) fn error_box(message: &str) -> El<'_> {
 // ----- pages -----
 
 fn home(app: &App) -> El<'_> {
-    let sections = library::home_sections(app);
+    let greeting = column![
+        text(greeting(app)).size(34).font(BOLD),
+        muted("Reprends là où tu t'étais arrêté, ou cherche quelque chose."),
+    ]
+    .spacing(8);
+    match library::home_sections(app) {
+        Some(sections) => page_scroll(column![greeting, sections].spacing(28).padding(Padding {
+            top: 40.0,
+            right: 28.0,
+            bottom: 32.0,
+            left: 28.0,
+        })),
+        None => container(
+            column![
+                text("Que veux-tu écouter ?").size(34).font(BOLD),
+                muted("Tape un titre, un artiste ou un album dans la recherche à gauche."),
+                button(
+                    row![
+                        icon(Icon::Search, 16.0, style::BG),
+                        text("Rechercher").size(14).font(SEMIBOLD)
+                    ]
+                    .spacing(8)
+                    .align_y(Alignment::Center),
+                )
+                .padding(Padding::from([10, 20]))
+                .style(style::pill(app.accent))
+                .on_press(Message::Navigate(Route::Search)),
+            ]
+            .spacing(16)
+            .align_x(Alignment::Center),
+        )
+        .center(Length::Fill)
+        .into(),
+    }
+}
+
+/// Grande vue du morceau en cours (ouverte depuis la barre du bas).
+fn now_playing(app: &App) -> El<'_> {
     let Some(entry) = &app.state.current else {
-        // Rien en lecture : salutation, puis ce que le compte propose.
-        let greeting = column![
-            text(greeting(app)).size(34).font(BOLD),
-            muted("Reprends là où tu t'étais arrêté, ou cherche quelque chose."),
-        ]
-        .spacing(8);
-        return match sections {
-            Some(sections) => {
-                page_scroll(column![greeting, sections].spacing(28).padding(Padding {
-                    top: 40.0,
-                    right: 28.0,
-                    bottom: 32.0,
-                    left: 28.0,
-                }))
-            }
-            None => container(
-                column![
-                    text("Que veux-tu écouter ?").size(34).font(BOLD),
-                    muted("Tape un titre, un artiste ou un album dans la recherche à gauche."),
-                    button(
-                        row![
-                            icon(Icon::Search, 16.0, style::BG),
-                            text("Rechercher").size(14).font(SEMIBOLD)
-                        ]
-                        .spacing(8)
-                        .align_y(Alignment::Center),
-                    )
-                    .padding(Padding::from([10, 20]))
-                    .style(style::pill(app.accent))
-                    .on_press(Message::Navigate(Route::Search)),
-                ]
-                .spacing(16)
-                .align_x(Alignment::Center),
-            )
+        return container(muted("Rien en lecture."))
             .center(Length::Fill)
-            .into(),
-        };
+            .into();
     };
     let track = &entry.track;
     let id = app.track_cover(track);
     let big =
-        container(cover(app.cover(id.as_deref(), HERO), 300.0, 10.0)).style(style::cover_frame);
-
+        container(cover(app.cover(id.as_deref(), HERO), 380.0, 12.0)).style(style::cover_frame);
     let mut info = column![
         text("EN COURS").size(12).font(BOLD).color(app.accent),
-        text(&track.title).size(38).font(BOLD),
-        text(&track.artist).size(18).color(style::TEXT_DIM),
+        text(&track.title).size(40).font(BOLD),
+        text(&track.artist).size(19).color(style::TEXT_DIM),
     ]
     .spacing(8);
     if let (Some(album), Some(album_id)) = (&track.album, &track.album_id) {
@@ -566,51 +633,17 @@ fn home(app: &App) -> El<'_> {
         );
     }
     info = info.push(quality_badge(app));
-
-    let hero = container(
+    container(
         row![big, info.width(Length::Fill)]
-            .spacing(36)
-            .align_y(Alignment::End)
-            .padding(Padding {
-                top: 48.0,
-                right: 28.0,
-                bottom: 28.0,
-                left: 28.0,
-            }),
+            .spacing(40)
+            .align_y(Alignment::Center)
+            .padding(48),
     )
     .width(Length::Fill)
-    .style(style::hero(app.accent));
-
-    let upcoming: Vec<&QueuedTrack> = app
-        .queue
-        .current
-        .map(|c| app.queue.entries.iter().skip(c + 1).take(10).collect())
-        .unwrap_or_default();
-    let mut list = column![section_title("À suivre")].spacing(6);
-    if upcoming.is_empty() {
-        list = list.push(muted(if app.state.autoplay {
-            "La radio va compléter la file automatiquement."
-        } else {
-            "Rien après ce morceau."
-        }));
-    }
-    for e in upcoming {
-        list = list.push(track_row(app, &e.track, None, Message::JumpTo(e.id), None));
-    }
-
-    let mut below = column![list].spacing(28);
-    if let Some(sections) = sections {
-        below = below.push(sections);
-    }
-    page_scroll(column![
-        hero,
-        container(below).padding(Padding {
-            top: 8.0,
-            right: 28.0,
-            bottom: 32.0,
-            left: 28.0,
-        })
-    ])
+    .height(Length::Fill)
+    .center_y(Length::Fill)
+    .style(style::hero(app.accent))
+    .into()
 }
 
 /// « Bonjour, <prénom> » selon l'heure locale.
@@ -958,60 +991,68 @@ fn queue_panel(app: &App) -> El<'_> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let mut list = column![].spacing(2);
-    if app.queue.entries.is_empty() {
-        list = list.push(muted("La file est vide."));
-    }
-    for (i, entry) in app.queue.entries.iter().enumerate() {
-        let current = app.queue.current == Some(i);
-        let past = app.queue.current.is_some_and(|c| i < c);
-        let title_color = if current {
-            app.accent
-        } else if past {
-            style::TEXT_FAINT
-        } else {
-            style::TEXT
-        };
-        let line = row![
-            track_cover(app, &entry.track, 36.0),
-            column![
-                text(&entry.track.title)
-                    .size(13)
-                    .font(SEMIBOLD)
-                    .color(title_color),
-                text(&entry.track.artist).size(12).color(style::TEXT_DIM),
+    let entries = &app.queue.entries;
+    let range = visible_range(app.queue_view, 0.0, QROW_H, entries.len());
+    let list: El<'_> = if entries.is_empty() {
+        muted("La file est vide.")
+    } else {
+        virtual_list(entries.len(), QROW_H, range, |i| {
+            let entry = &entries[i];
+            let current = app.queue.current == Some(i);
+            let past = app.queue.current.is_some_and(|c| i < c);
+            let title_color = if current {
+                app.accent
+            } else if past {
+                style::TEXT_FAINT
+            } else {
+                style::TEXT
+            };
+            let content = row![
+                track_cover(app, &entry.track, 36.0),
+                container(
+                    column![
+                        line(&entry.track.title, 13)
+                            .font(SEMIBOLD)
+                            .color(title_color),
+                        line(&entry.track.artist, 12).color(style::TEXT_DIM),
+                    ]
+                    .spacing(1),
+                )
+                .width(Length::Fill)
+                .clip(true),
+                icon_tip(
+                    Icon::Close,
+                    13.0,
+                    style::TEXT_FAINT,
+                    Message::Remove(entry.id),
+                    "Retirer de la file".into()
+                ),
             ]
-            .spacing(1)
-            .width(Length::Fill),
-            icon_tip(
-                Icon::Close,
-                13.0,
-                style::TEXT_FAINT,
-                Message::Remove(entry.id),
-                "Retirer de la file".into()
-            ),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center);
-        list = list.push(
-            mouse_area(
-                button(line)
-                    .width(Length::Fill)
-                    .padding(Padding::from([5, 8]))
-                    .style(style::row(current, app.accent))
-                    .on_press(Message::JumpTo(entry.id)),
+            .spacing(10)
+            .align_y(Alignment::Center);
+            container(
+                mouse_area(
+                    button(content)
+                        .width(Length::Fill)
+                        .padding(Padding::from([5, 8]))
+                        .style(style::row(current, app.accent))
+                        .on_press(Message::JumpTo(entry.id)),
+                )
+                .on_enter(Message::Hover(entry.track.video_id.clone()))
+                .on_exit(Message::Unhover),
             )
-            .on_enter(Message::Hover(entry.track.video_id.clone()))
-            .on_exit(Message::Unhover),
-        );
-    }
+            .height(Length::Fixed(QROW_H))
+            .align_y(Alignment::Center)
+            .into()
+        })
+    };
 
     container(
         column![header, smooth_scroll(list, QUEUE_SCROLL),]
             .spacing(12)
             .padding(14),
     )
-    .width(Length::Fixed(320.0))
+    .width(Length::Fixed(app.queue_width))
     .height(Length::Fill)
     .style(style::sidebar)
     .into()
@@ -1026,13 +1067,19 @@ fn player_bar(app: &App) -> El<'_> {
     let now: El<'_> = match &state.current {
         Some(entry) => {
             let track = &entry.track;
-            let title = button(text(&track.title).size(14).font(SEMIBOLD))
+            let title = button(line(&track.title, 14).font(SEMIBOLD))
                 .padding(0)
                 .style(style::link)
-                .on_press(Message::Navigate(Route::Home));
+                .on_press(Message::Navigate(Route::NowPlaying));
             row![
-                track_cover(app, track, 56.0),
-                column![title, text(&track.artist).size(13).color(style::TEXT_DIM)].spacing(3),
+                button(track_cover(app, track, 56.0))
+                    .padding(0)
+                    .style(style::link)
+                    .on_press(Message::Navigate(Route::NowPlaying)),
+                container(
+                    column![title, line(&track.artist, 13).color(style::TEXT_DIM)].spacing(3)
+                )
+                .clip(true),
                 account_buttons(app, track),
             ]
             .spacing(12)
@@ -1208,6 +1255,22 @@ fn fmt_opt(d: Option<Duration>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visible_range_covers_the_viewport_plus_margin() {
+        let view = View {
+            offset: 1000.0,
+            height: 580.0,
+        };
+        // Haut de liste à 200 px, lignes de 58 px : la 1re visible est la 13e.
+        let (first, last) = visible_range(view, 200.0, 58.0, 1000);
+        assert_eq!(first, 13 - OVERSCAN);
+        assert!(last >= 13 + 10, "toute la hauteur visible est couverte");
+        assert!(last - first < 40, "pas plus que nécessaire");
+        // Liste courte, ou défilée au-delà de la fin.
+        assert_eq!(visible_range(view, 200.0, 58.0, 5), (5, 5));
+        assert_eq!(visible_range(View::default(), 0.0, 58.0, 3), (0, 3));
+    }
 
     #[test]
     fn formats_durations() {

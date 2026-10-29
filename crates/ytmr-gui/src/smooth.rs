@@ -4,13 +4,14 @@
 //! molette, ce qui donne une impression de saccade. Ce widget enveloppe une
 //! liste défilante, intercepte les crans de molette et les transmet à
 //! l'application, qui fait glisser la liste image par image (à la fréquence de
-//! l'écran). Le pavé tactile, déjà fluide, n'est pas intercepté.
+//! l'écran). Le pavé tactile, déjà fluide, n'est pas intercepté, ni la molette
+//! avec Shift : elle revient aux rangées défilant horizontalement.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use iced::advanced::layout::{self, Layout};
-use iced::advanced::widget::{Operation, Tree, Widget};
+use iced::advanced::widget::{Operation, Tree, Widget, tree};
 use iced::advanced::{Clipboard, Shell, mouse, overlay, renderer};
 use iced::widget::scrollable::{AbsoluteOffset, Viewport};
 use iced::{Element, Event, Length, Rectangle, Size, Task, Vector};
@@ -36,11 +37,25 @@ pub fn wheel<'a, Message, Theme, Renderer>(
     }
 }
 
+/// Shift enfoncé ? (suivi via les changements de touches de modification)
+#[derive(Debug, Default)]
+struct Keys {
+    shift: bool,
+}
+
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for WheelCatcher<'_, Message, Theme, Renderer>
 where
     Renderer: renderer::Renderer,
 {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Keys>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(Keys::default())
+    }
+
     fn children(&self) -> Vec<Tree> {
         vec![Tree::new(&self.content)]
     }
@@ -87,9 +102,14 @@ where
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
+        if let Event::Keyboard(iced::keyboard::Event::ModifiersChanged(modifiers)) = event {
+            tree.state.downcast_mut::<Keys>().shift = modifiers.shift();
+        }
+        let shift = tree.state.downcast_ref::<Keys>().shift;
         if let Event::Mouse(mouse::Event::WheelScrolled {
             delta: mouse::ScrollDelta::Lines { y, .. },
         }) = event
+            && !shift
             && cursor.is_over(layout.bounds())
         {
             shell.publish((self.on_wheel)(*y));

@@ -21,8 +21,17 @@ use image::{DynamicImage, GenericImageView, RgbImage};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
-/// Taille téléchargée depuis YouTube (les URL Google acceptent une taille au choix).
-const SOURCE_SIZE: u32 = 1200;
+/// Tailles téléchargées depuis YouTube (les URL Google acceptent une taille au
+/// choix) : une petite pour les vignettes, une grande pour les pochettes en
+/// grand. Télécharger 1 200 px pour une vignette de 48 px coûtait ~150 Ko et un
+/// décodage lourd par ligne de liste.
+const SOURCE_LARGE: u32 = 1200;
+const SOURCE_SMALL: u32 = 240;
+/// Au-delà, on prend la grande source.
+const SMALL_MAX: u32 = 200;
+/// Décodages / redimensionnements menés en même temps (le reste attend) :
+/// l'interface garde du processeur pour rester fluide.
+const MAX_CONCURRENT_DECODES: usize = 2;
 pub const MAX_JPEG_SIZE: u32 = 1200;
 /// L'écran du CYD fait 320 px de large.
 pub const MAX_RGB565_SIZE: u32 = 320;
@@ -106,20 +115,48 @@ fn is_google_image(url: &str) -> bool {
     url.contains(".googleusercontent.com/") || url.contains(".ggpht.com/")
 }
 
-/// URL à télécharger : la plus grande taille utile.
-fn source_url(url: &str) -> String {
-    if is_google_image(url) {
-        return format!(
-            "{}=w{SOURCE_SIZE}-h{SOURCE_SIZE}-l90-rj",
-            normalize_url(url)
-        );
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Small,
+    Large,
+}
+
+impl Tier {
+    fn for_size(size: u32) -> Self {
+        if size <= SMALL_MAX {
+            Self::Small
+        } else {
+            Self::Large
+        }
     }
-    // Vignettes vidéo i.ytimg.com : la version « maxres » n'existe pas toujours,
-    // `hqdefault` (480×360) si.
+
+    fn file(self, id: &str) -> String {
+        match self {
+            Self::Small => format!("{id}_s.img"),
+            Self::Large => format!("{id}.img"),
+        }
+    }
+}
+
+/// URL à télécharger pour une taille de source donnée.
+fn source_url(url: &str, tier: Tier) -> String {
+    if is_google_image(url) {
+        let side = match tier {
+            Tier::Small => SOURCE_SMALL,
+            Tier::Large => SOURCE_LARGE,
+        };
+        return format!("{}=w{side}-h{side}-l90-rj", normalize_url(url));
+    }
+    // Vignettes vidéo i.ytimg.com : `mqdefault` (320×180) suffit pour une
+    // vignette ; `hqdefault` (480×360) existe toujours, contrairement à « maxres ».
     if url.contains("i.ytimg.com/vi/")
         && let Some((base, _)) = url.rsplit_once('/')
     {
-        return format!("{base}/hqdefault.jpg");
+        let name = match tier {
+            Tier::Small => "mqdefault.jpg",
+            Tier::Large => "hqdefault.jpg",
+        };
+        return format!("{base}/{name}");
     }
     url.to_owned()
 }
@@ -129,6 +166,7 @@ pub struct Covers {
     http: reqwest::Client,
     urls: Mutex<HashMap<String, String>>,
     downloads: Semaphore,
+    decodes: Semaphore,
 }
 
 impl Covers {
@@ -141,6 +179,7 @@ impl Covers {
             http: reqwest::Client::new(),
             urls: Mutex::default(),
             downloads: Semaphore::new(MAX_CONCURRENT_DOWNLOADS),
+            decodes: Semaphore::new(MAX_CONCURRENT_DECODES),
         })
     }
 
@@ -166,36 +205,66 @@ impl Covers {
             return Ok(data.into());
         }
 
-        let source = self.source(id).await?;
-        let data = tokio::task::spawn_blocking(move || render(&source, size, format))
-            .await
-            .map_err(|e| std::io::Error::other(e.to_string()))??;
+        let source = self.source(id, Tier::for_size(size)).await?;
+        let data = self.blocking(move || render(&source, size, format)).await?;
         write_atomic(&variant, &data).await?;
         Ok(data.into())
     }
 
     /// Jaquette décodée en pixels RGBA (`size * size * 4` octets), prête à
-    /// afficher sans décodage dans le fil de l'interface.
+    /// afficher sans décodage dans le fil de l'interface. Rendue directement
+    /// depuis la source (sans JPEG intermédiaire) ; la variante JPEG est
+    /// gardée sur disque pour la fois suivante.
     pub async fn get_rgba(&self, id: &str, size: u32) -> Result<Vec<u8>, MediaError> {
-        let jpeg = self.get(id, size, CoverFormat::Jpeg).await?;
-        tokio::task::spawn_blocking(move || {
-            Ok(image::load_from_memory(&jpeg)?.to_rgba8().into_raw())
-        })
-        .await
-        .map_err(|e| std::io::Error::other(e.to_string()))?
+        if !(MIN_SIZE..=MAX_JPEG_SIZE).contains(&size) {
+            return Err(MediaError::InvalidSize(size));
+        }
+        if !is_valid_id(id) {
+            return Err(MediaError::UnknownCover);
+        }
+        let variant = self.dir.join(format!("{id}_{size}.jpg"));
+        if let Ok(jpeg) = tokio::fs::read(&variant).await {
+            return self
+                .blocking(move || Ok(image::load_from_memory(&jpeg)?.to_rgba8().into_raw()))
+                .await;
+        }
+        let source = self.source(id, Tier::for_size(size)).await?;
+        let (rgba, jpeg) = self
+            .blocking(move || {
+                let rgb = scaled(&source, size)?;
+                let jpeg = encode_jpeg(&rgb)?;
+                let rgba = image::DynamicImage::ImageRgb8(rgb).to_rgba8().into_raw();
+                Ok((rgba, jpeg))
+            })
+            .await?;
+        write_atomic(&variant, &jpeg).await?;
+        Ok(rgba)
     }
 
     /// Couleur dominante (vive) de la jaquette, pour teinter une interface.
     pub async fn accent(&self, id: &str) -> Result<[u8; 3], MediaError> {
-        let source = self.source(id).await?;
-        tokio::task::spawn_blocking(move || dominant_color(&source))
+        let source = self.source(id, Tier::Small).await?;
+        self.blocking(move || dominant_color(&source)).await
+    }
+
+    /// Travail processeur hors du fil courant, au plus `MAX_CONCURRENT_DECODES` à la fois.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T, MediaError> + Send + 'static,
+    ) -> Result<T, MediaError> {
+        let _slot = self
+            .decodes
+            .acquire()
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        tokio::task::spawn_blocking(work)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?
     }
 
     /// Image d'origine, téléchargée au premier besoin et gardée sur disque.
-    async fn source(&self, id: &str) -> Result<Vec<u8>, MediaError> {
-        let path = self.dir.join("src").join(format!("{id}.img"));
+    async fn source(&self, id: &str, tier: Tier) -> Result<Vec<u8>, MediaError> {
+        let path = self.dir.join("src").join(tier.file(id));
         if let Ok(data) = tokio::fs::read(&path).await {
             return Ok(data);
         }
@@ -214,7 +283,7 @@ impl Covers {
         }
         let response = self
             .http
-            .get(source_url(&url))
+            .get(source_url(&url, tier))
             .send()
             .await?
             .error_for_status()?;
@@ -297,19 +366,27 @@ fn square(image: &DynamicImage) -> DynamicImage {
     image.crop_imm((w - side) / 2, (h - side) / 2, side, side)
 }
 
-fn render(source: &[u8], size: u32, format: CoverFormat) -> Result<Vec<u8>, MediaError> {
+/// Carré central redimensionné. CatmullRom : quasiment aussi net que Lanczos
+/// en réduction, nettement moins coûteux.
+fn scaled(source: &[u8], size: u32) -> Result<RgbImage, MediaError> {
     let image = square(&image::load_from_memory(source)?);
-    let rgb = image
-        .resize_exact(size, size, FilterType::Lanczos3)
-        .to_rgb8();
-    Ok(match format {
-        CoverFormat::Jpeg => {
-            let mut out = Cursor::new(Vec::new());
-            rgb.write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))?;
-            out.into_inner()
-        }
-        CoverFormat::Rgb565 => to_rgb565_le(&rgb),
-    })
+    Ok(image
+        .resize_exact(size, size, FilterType::CatmullRom)
+        .to_rgb8())
+}
+
+fn encode_jpeg(rgb: &RgbImage) -> Result<Vec<u8>, MediaError> {
+    let mut out = Cursor::new(Vec::new());
+    rgb.write_with_encoder(JpegEncoder::new_with_quality(&mut out, JPEG_QUALITY))?;
+    Ok(out.into_inner())
+}
+
+fn render(source: &[u8], size: u32, format: CoverFormat) -> Result<Vec<u8>, MediaError> {
+    let rgb = scaled(source, size)?;
+    match format {
+        CoverFormat::Jpeg => encode_jpeg(&rgb),
+        CoverFormat::Rgb565 => Ok(to_rgb565_le(&rgb)),
+    }
 }
 
 /// RRRRRGGG GGGBBBBB, octet de poids faible en premier.
@@ -379,15 +456,22 @@ mod tests {
         assert_eq!(cover_id(a), cover_id(b));
         assert_eq!(cover_id(a).len(), 16);
         assert_eq!(
-            source_url(a),
+            source_url(a, Tier::Large),
             "https://lh3.googleusercontent.com/abc=w1200-h1200-l90-rj"
+        );
+        assert_eq!(
+            source_url(a, Tier::Small),
+            "https://lh3.googleusercontent.com/abc=w240-h240-l90-rj"
         );
     }
 
     #[test]
     fn video_thumbnails_use_hqdefault() {
         assert_eq!(
-            source_url("https://i.ytimg.com/vi/Jb6gcoR266U/sddefault.jpg?sqp=x"),
+            source_url(
+                "https://i.ytimg.com/vi/Jb6gcoR266U/sddefault.jpg?sqp=x",
+                Tier::Large
+            ),
             "https://i.ytimg.com/vi/Jb6gcoR266U/hqdefault.jpg"
         );
     }

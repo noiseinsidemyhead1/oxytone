@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
 
 use iced::futures::SinkExt;
 
@@ -32,9 +33,15 @@ use crate::views::{
 
 pub const NEW_PLAYLIST_INPUT: &str = "nouvelle-playlist";
 pub const RENAME_INPUT: &str = "renommer-playlist";
-/// Lignes affichées d'emblée dans une playlist ; la suite s'ajoute en défilant
-/// (afficher 1 000 lignes d'un coup ralentirait chaque image).
-pub const ROWS_STEP: usize = 120;
+
+/// Durées pendant lesquelles une donnée en cache est jugée à jour : au-delà
+/// seulement, on la redemande à YouTube (ou sur demande, bouton ↻).
+const PLAYLIST_TTL: Duration = Duration::from_secs(30 * 60);
+const LIST_TTL: Duration = Duration::from_secs(30 * 60);
+const LIKED_TTL: Duration = Duration::from_secs(60 * 60);
+const HISTORY_TTL: Duration = Duration::from_secs(10 * 60);
+/// Après une écoute signalée, l'historique peut être redemandé plus tôt.
+const HISTORY_STALE_TTL: Duration = Duration::from_secs(3 * 60);
 
 /// Poignée clonable vers le compte (le jeton n'apparaît jamais dans les logs).
 #[derive(Debug, Clone)]
@@ -75,12 +82,11 @@ pub struct LibraryState {
     /// Chargement en cours : version fraîche construite page à page, affichée
     /// à la fin seulement si une version en cache est déjà à l'écran.
     pub streaming: Option<Streaming>,
-    /// Lignes de la playlist affichées pour l'instant.
-    pub visible_rows: usize,
     pub profile: Option<Profile>,
     /// Écoutés récemment (historique du compte).
     pub history: Option<Load<Vec<Track>>>,
     history_stale: bool,
+    history_at: Option<Instant>,
     /// Dernier morceau signalé à l'historique YouTube.
     reported: Option<ytmr_core::QueueId>,
 }
@@ -145,6 +151,10 @@ pub enum Lib {
     Deleted(Result<(), String>),
     RemoveTrack(String, String),
     Removed(String, Result<(), String>),
+    /// Lecture de la playlist ouverte à partir de la ligne donnée.
+    PlayAt(usize),
+    /// Mise à jour forcée de la playlist ouverte.
+    Refresh,
     ProfileLoaded(Result<Profile, String>),
     HistoryLoaded(Result<Vec<Track>, String>),
     Disconnect,
@@ -200,7 +210,13 @@ impl App {
     }
 
     pub fn refresh_home(&mut self) -> Task<Message> {
-        if self.lib.history_stale || self.lib.history.is_none() {
+        let age = self.lib.history_at.map(|t| t.elapsed());
+        let due = match age {
+            None => true,
+            Some(age) if self.lib.history_stale => age > HISTORY_STALE_TTL,
+            Some(age) => age > HISTORY_TTL,
+        };
+        if due {
             self.load_history()
         } else {
             Task::none()
@@ -228,6 +244,7 @@ impl App {
         self.lib.cache_dir.as_ref().map(|d| d.join("disconnected"))
     }
 
+    /// Liste des playlists : en cache si elle a moins de 30 minutes.
     pub fn load_playlists(&mut self) -> Task<Message> {
         if !matches!(self.lib.playlists, Some(Load::Ready(_))) {
             self.lib.playlists = match self.lib.cache_dir.as_deref().and_then(read_list) {
@@ -235,48 +252,79 @@ impl App {
                 None => Some(Load::Loading),
             };
         }
+        let fresh = self
+            .lib
+            .cache_dir
+            .as_deref()
+            .is_some_and(|dir| is_fresh(&dir.join("playlists.json"), LIST_TTL));
+        if fresh && matches!(self.lib.playlists, Some(Load::Ready(_))) {
+            return Task::none();
+        }
+        self.reload_playlists()
+    }
+
+    /// Liste des playlists redemandée sans condition (après une création…).
+    pub fn reload_playlists(&mut self) -> Task<Message> {
         let op = self.lib.ready().map(|a| async move { a.playlists().await });
         call(op, Lib::PlaylistsLoaded)
     }
 
-    /// Ouvre une playlist : la version en cache s'affiche tout de suite, la
-    /// version fraîche arrive page par page.
+    /// Ouvre une playlist : la version en mémoire ou en cache s'affiche tout
+    /// de suite ; YouTube n'est interrogé que si elle a plus de 30 minutes.
     pub fn open_playlist(&mut self, id: String) -> Task<Message> {
         self.lib.renaming = None;
-        self.lib.visible_rows = ROWS_STEP;
-        self.lib.load_generation += 1;
-        let generation = self.lib.load_generation;
-
         let shown = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if *cur == id);
-        let cached = if shown {
-            None
-        } else {
-            self.lib
+        let mut tasks = Vec::new();
+        if !shown {
+            let cached = self
+                .lib
                 .cache_dir
                 .as_deref()
-                .and_then(|dir| read_playlist(dir, &id))
-        };
-        let mut tasks = Vec::new();
-        if let Some(cached) = cached {
-            tasks.push(self.show_playlist_extras(&cached));
-            self.lib.playlist = Some((id.clone(), Load::Ready(cached)));
-        } else if !shown {
-            self.lib.playlist = Some((id.clone(), Load::Loading));
+                .and_then(|dir| read_playlist(dir, &id));
+            match cached {
+                Some(cached) => {
+                    tasks.push(self.show_playlist_extras(&cached));
+                    self.lib.playlist = Some((id.clone(), Load::Ready(cached)));
+                }
+                None => self.lib.playlist = Some((id.clone(), Load::Loading)),
+            }
         }
-        let has_screen_version = matches!(&self.lib.playlist, Some((_, Load::Ready(_))));
+        let on_screen = matches!(&self.lib.playlist, Some((_, Load::Ready(_))));
+        let fresh = self
+            .lib
+            .cache_dir
+            .as_deref()
+            .is_some_and(|dir| is_fresh(&playlist_file(dir, &id), PLAYLIST_TTL));
+        if !(on_screen && fresh) && self.lib.streaming.is_none() {
+            tasks.push(self.fetch_playlist(id));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Redemande la playlist à YouTube, page par page.
+    pub fn fetch_playlist(&mut self, id: String) -> Task<Message> {
+        self.lib.load_generation += 1;
+        let generation = self.lib.load_generation;
+        let on_screen = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if *cur == id);
         self.lib.streaming = Some(Streaming {
             generation,
-            pending: has_screen_version.then(empty_playlist),
+            pending: on_screen.then(empty_playlist),
             received: 0,
         });
         match self.lib.ready() {
-            Some(account) => tasks.push(stream_playlist(account, id, generation)),
-            None => tasks.push(Task::done(Message::Lib(Lib::PlaylistStreamEnded(
+            Some(account) => stream_playlist(account, id, generation),
+            None => Task::done(Message::Lib(Lib::PlaylistStreamEnded(
                 generation,
                 Err("compte YouTube non connecté".into()),
-            )))),
+            ))),
         }
-        Task::batch(tasks)
+    }
+
+    /// La version affichée a été modifiée sur place : le cache suit.
+    fn save_open_playlist(&self) {
+        if let (Some(dir), Some((_, Load::Ready(p)))) = (&self.lib.cache_dir, &self.lib.playlist) {
+            write_playlist(dir, p);
+        }
     }
 
     /// Pochette, teinte, premières vignettes et préparation des premiers titres.
@@ -289,42 +337,12 @@ impl App {
         let mut tasks = vec![
             self.want_cover(cover_id.clone(), HERO),
             self.want_accent(cover_id),
-            self.want_track_covers(playlist.tracks.iter().take(self.lib.visible_rows), THUMB),
+            self.request_visible_covers(),
         ];
         for track in playlist.tracks.iter().take(3).rev() {
             tasks.push(self.send(Command::Prefetch(track.video_id.clone())));
         }
         Task::batch(tasks)
-    }
-
-    /// La page centrale a défilé : on affiche plus de lignes en approchant du bas.
-    pub fn playlist_scrolled(
-        &mut self,
-        viewport: &iced::widget::scrollable::Viewport,
-    ) -> Task<Message> {
-        if !matches!(self.route, Route::Playlist(_)) {
-            return Task::none();
-        }
-        let bottom = viewport.absolute_offset().y + viewport.bounds().height;
-        if bottom < viewport.content_bounds().height - 1500.0 {
-            return Task::none();
-        }
-        let Some((_, Load::Ready(playlist))) = &self.lib.playlist else {
-            return Task::none();
-        };
-        if self.lib.visible_rows >= playlist.tracks.len() {
-            return Task::none();
-        }
-        let from = self.lib.visible_rows;
-        self.lib.visible_rows += ROWS_STEP;
-        let tracks: Vec<Track> = playlist
-            .tracks
-            .iter()
-            .skip(from)
-            .take(ROWS_STEP)
-            .cloned()
-            .collect();
-        self.want_track_covers(&tracks, THUMB)
     }
 
     fn on_playlist_update(&mut self, generation: u64, update: PlaylistUpdate) -> Task<Message> {
@@ -371,17 +389,9 @@ impl App {
                 let Some((_, Load::Ready(playlist))) = &mut self.lib.playlist else {
                     return Task::none();
                 };
-                let before = playlist.tracks.len();
-                let first_page = before == 0;
+                let first_page = playlist.tracks.is_empty();
                 playlist.tracks.extend(tracks);
-                let visible: Vec<Track> = playlist
-                    .tracks
-                    .iter()
-                    .skip(before)
-                    .take(self.lib.visible_rows.saturating_sub(before))
-                    .cloned()
-                    .collect();
-                let mut tasks = vec![self.want_track_covers(&visible, THUMB)];
+                let mut tasks = vec![self.request_visible_covers()];
                 if first_page && let Some((_, Load::Ready(p))) = &self.lib.playlist {
                     let p = p.clone();
                     tasks.push(self.show_playlist_extras(&p));
@@ -414,11 +424,11 @@ impl App {
         } else {
             self.show_toast("YouTube n'a pas rendu toute la playlist (affichage partiel)".into())
         };
-        let covers = self.want_track_covers(fresh.tracks.iter().take(self.lib.visible_rows), THUMB);
+        let covers = Task::none();
         if matches!(&self.lib.playlist, Some((cur, _)) if *cur == fresh.id) {
             self.lib.playlist = Some((fresh.id.clone(), Load::Ready(fresh)));
         }
-        Task::batch([toast, covers])
+        Task::batch([toast, covers, self.request_visible_covers()])
     }
 
     pub fn update_library(&mut self, message: Lib) -> Task<Message> {
@@ -436,16 +446,42 @@ impl App {
                         Lib::ProfileLoaded,
                     )
                 };
-                let liked = call(
-                    Some(async move { account.playlist(LIKED_ID).await }),
-                    Lib::LikedLoaded,
-                );
+                let liked_fresh = self
+                    .lib
+                    .cache_dir
+                    .as_deref()
+                    .is_some_and(|dir| is_fresh(&playlist_file(dir, LIKED_ID), LIKED_TTL));
+                let liked = if liked_fresh {
+                    Task::none()
+                } else {
+                    call(
+                        Some(async move { account.playlist(LIKED_ID).await }),
+                        Lib::LikedLoaded,
+                    )
+                };
                 let mut tasks = vec![self.load_playlists(), liked, profile, self.load_history()];
                 if let Route::Playlist(id) = self.route.clone() {
                     tasks.push(self.open_playlist(id));
                 }
                 Task::batch(tasks)
             }
+            Lib::PlayAt(index) => match &self.lib.playlist {
+                Some((_, Load::Ready(playlist))) if index < playlist.tracks.len() => {
+                    let tracks = playlist.tracks.clone();
+                    self.send(Command::PlayTracks {
+                        tracks,
+                        start: index,
+                    })
+                }
+                _ => Task::none(),
+            },
+            Lib::Refresh => match &self.lib.playlist {
+                Some((id, _)) => {
+                    let id = id.clone();
+                    self.fetch_playlist(id)
+                }
+                None => Task::none(),
+            },
             Lib::ProfileLoaded(result) => match result {
                 Ok(profile) => {
                     let photo = self.url_cover(profile.photo_url.as_deref());
@@ -460,6 +496,7 @@ impl App {
             Lib::HistoryLoaded(result) => match result {
                 Ok(tracks) => {
                     self.lib.history_stale = false;
+                    self.lib.history_at = Some(Instant::now());
                     let task = self.want_track_covers(tracks.iter().take(16), CARD);
                     self.lib.history = Some(Load::Ready(tracks));
                     task
@@ -647,7 +684,7 @@ impl App {
                 Task::batch([toast, call(op, Lib::Created)])
             }
             Lib::Created(result) => match result {
-                Ok(_) => self.load_playlists(),
+                Ok(_) => self.reload_playlists(),
                 Err(e) => self.show_toast(format!("Création refusée : {e}")),
             },
             Lib::RenameStart => {
@@ -672,6 +709,7 @@ impl App {
                 }
                 playlist.title = name.clone();
                 let id = id.clone();
+                self.save_open_playlist();
                 if let Some(Load::Ready(list)) = &mut self.lib.playlists
                     && let Some(p) = list.iter_mut().find(|p| p.id == id)
                 {
@@ -688,8 +726,8 @@ impl App {
                 Ok(()) => Task::none(),
                 Err(e) => Task::batch([
                     self.show_toast(format!("Renommage refusé : {e}")),
-                    self.open_playlist(id),
-                    self.load_playlists(),
+                    self.fetch_playlist(id),
+                    self.reload_playlists(),
                 ]),
             },
             Lib::AskDelete => {
@@ -721,7 +759,7 @@ impl App {
                 Ok(()) => Task::none(),
                 Err(e) => Task::batch([
                     self.show_toast(format!("Suppression refusée : {e}")),
-                    self.load_playlists(),
+                    self.reload_playlists(),
                 ]),
             },
             Lib::RemoveTrack(playlist_id, video_id) => {
@@ -730,6 +768,7 @@ impl App {
                 {
                     p.tracks.retain(|t| t.video_id != video_id);
                 }
+                self.save_open_playlist();
                 let target = playlist_id.clone();
                 let op = self
                     .lib
@@ -768,13 +807,21 @@ impl App {
             if like {
                 p.tracks.insert(0, track.clone());
             }
+            self.save_open_playlist();
         }
     }
 
+    /// Après un ajout : la playlist ouverte est redemandée, une autre perd son
+    /// cache (elle sera redemandée à sa prochaine ouverture).
     fn refresh_if_open(&mut self, playlist_id: &str) -> Task<Message> {
         match &self.lib.playlist {
-            Some((id, _)) if id == playlist_id => self.open_playlist(playlist_id.to_owned()),
-            _ => Task::none(),
+            Some((id, _)) if id == playlist_id => self.fetch_playlist(playlist_id.to_owned()),
+            _ => {
+                if let Some(dir) = &self.lib.cache_dir {
+                    let _ = std::fs::remove_file(playlist_file(dir, playlist_id));
+                }
+                Task::none()
+            }
         }
     }
 }
@@ -826,6 +873,15 @@ fn playlist_file(dir: &Path, id: &str) -> PathBuf {
         .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     dir.join(format!("playlist-{safe}.json"))
+}
+
+/// Le fichier existe et a été écrit il y a moins de `ttl`.
+fn is_fresh(path: &Path, ttl: Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age < ttl)
 }
 
 fn read_playlist(dir: &Path, id: &str) -> Option<Playlist> {
@@ -1048,7 +1104,15 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             .into(),
         _ => Space::new().height(Length::Fixed(0.0)).into(),
     };
-    let mut actions = row![].spacing(4).align_y(Alignment::Center);
+    let mut actions = row![icon_tip(
+        Icon::Refresh,
+        17.0,
+        style::TEXT_DIM,
+        Message::Lib(Lib::Refresh),
+        "Mettre à jour depuis YouTube".into(),
+    )]
+    .spacing(4)
+    .align_y(Alignment::Center);
     if !liked {
         actions = actions
             .push(icon_tip(
@@ -1102,33 +1166,35 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         &playlist.tracks,
     );
 
-    let mut list = column![].spacing(2);
-    if playlist.tracks.is_empty() {
-        list = list.push(muted("Cette playlist est vide."));
-    }
-    for (i, track) in playlist
-        .tracks
-        .iter()
-        .enumerate()
-        .take(app.lib.visible_rows)
-    {
-        let remove = if liked {
-            Message::Lib(Lib::ToggleLike(track.clone()))
-        } else {
-            Message::Lib(Lib::RemoveTrack(id.to_owned(), track.video_id.clone()))
-        };
-        list = list.push(track_row(
-            app,
-            track,
-            None,
-            Message::Play(playlist.tracks.clone(), i),
-            Some(remove),
-        ));
-    }
+    // Seules les lignes visibles sont construites, et le clic ne transporte
+    // qu'un numéro : copier la playlist dans chaque ligne coûtait ~1,4 million
+    // de copies de morceaux par image pour 1 189 titres.
+    let range = crate::views::visible_range(
+        app.page_view,
+        crate::views::PLAYLIST_LIST_TOP,
+        crate::views::ROW_H,
+        playlist.tracks.len(),
+    );
+    let list: El<'a> = if playlist.tracks.is_empty() {
+        muted("Cette playlist est vide.")
+    } else {
+        crate::views::virtual_list(playlist.tracks.len(), crate::views::ROW_H, range, |i| {
+            let track = &playlist.tracks[i];
+            let remove = if liked {
+                Message::Lib(Lib::ToggleLike(track.clone()))
+            } else {
+                Message::Lib(Lib::RemoveTrack(id.to_owned(), track.video_id.clone()))
+            };
+            track_row(app, track, None, Message::Lib(Lib::PlayAt(i)), Some(remove))
+        })
+    };
     column![
-        header,
+        // Hauteur fixe : c'est elle qui permet de savoir quelles lignes sont visibles.
+        container(header)
+            .height(Length::Fixed(crate::views::PLAYLIST_HEADER_H))
+            .clip(true),
         container(list).padding(Padding {
-            top: 8.0,
+            top: crate::views::PLAYLIST_LIST_TOP - crate::views::PLAYLIST_HEADER_H,
             right: 28.0,
             bottom: 32.0,
             left: 28.0,

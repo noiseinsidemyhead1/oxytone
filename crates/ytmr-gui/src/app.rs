@@ -43,6 +43,8 @@ pub const QUEUE_SCROLL: &str = "file";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Route {
     Home,
+    /// Grande vue du morceau en cours (clic sur la pochette de la barre du bas).
+    NowPlaying,
     Search,
     Album(String),
     Artist(String),
@@ -125,12 +127,66 @@ pub enum Message {
     DismissToast(u64),
     Wheel(&'static str, f32),
     Scrolled(&'static str, iced::widget::scrollable::Viewport),
+    /// Le défilement s'est arrêté : charger les pochettes des lignes visibles.
+    CoversSettle(u64),
+    DragStart(Panel),
+    DragMove(f32),
+    DragEnd,
+    WindowResized(f32),
     Frame(std::time::Instant),
     Lib(crate::library::Lib),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
     CloseRequested,
     ShutdownDone,
+}
+
+/// Barre latérale redimensionnable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Panel {
+    Left,
+    Right,
+}
+
+/// Partie visible d'une liste défilante.
+#[derive(Debug, Clone, Copy)]
+pub struct View {
+    pub offset: f32,
+    pub height: f32,
+}
+
+impl Default for View {
+    fn default() -> Self {
+        Self {
+            offset: 0.0,
+            height: 900.0,
+        }
+    }
+}
+
+pub const LEFT_DEFAULT: f32 = 232.0;
+pub const RIGHT_DEFAULT: f32 = 320.0;
+const LEFT_RANGE: (f32, f32) = (180.0, 380.0);
+const RIGHT_RANGE: (f32, f32) = (260.0, 560.0);
+const COVERS_SETTLE: Duration = Duration::from_millis(120);
+
+/// Réglages d'affichage gardés entre deux lancements.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct UiSettings {
+    left_width: f32,
+    queue_width: f32,
+    show_queue: bool,
+}
+
+impl Default for UiSettings {
+    fn default() -> Self {
+        Self {
+            left_width: LEFT_DEFAULT,
+            queue_width: RIGHT_DEFAULT,
+            show_queue: true,
+        }
+    }
 }
 
 pub enum Phase {
@@ -161,6 +217,14 @@ pub struct App {
     toast_seq: u64,
     scrolling: Scrolling,
     pub lib: crate::library::LibraryState,
+    pub page_view: View,
+    pub queue_view: View,
+    covers_seq: u64,
+    pub left_width: f32,
+    pub queue_width: f32,
+    window_width: f32,
+    dragging: Option<Panel>,
+    ui_file: Option<std::path::PathBuf>,
     shutting_down: bool,
 }
 
@@ -203,6 +267,14 @@ impl App {
             toast_seq: 0,
             scrolling: Scrolling::default(),
             lib: crate::library::LibraryState::default(),
+            page_view: View::default(),
+            queue_view: View::default(),
+            covers_seq: 0,
+            left_width: LEFT_DEFAULT,
+            queue_width: RIGHT_DEFAULT,
+            window_width: 1320.0,
+            dragging: None,
+            ui_file: None,
             shutting_down: false,
         };
         (app, start)
@@ -233,7 +305,20 @@ impl App {
         let mut subscriptions = vec![
             window::close_requests().map(|_| Message::CloseRequested),
             keyboard::listen().map(Message::Key),
+            window::resize_events().map(|(_, size)| Message::WindowResized(size.width)),
         ];
+        // Glissement d'une barre latérale : on suit la souris jusqu'au relâchement.
+        if self.dragging.is_some() {
+            subscriptions.push(iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position }) => {
+                    Some(Message::DragMove(position.x))
+                }
+                iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                    iced::mouse::Button::Left,
+                )) => Some(Message::DragEnd),
+                _ => None,
+            }));
+        }
         // Une image par rafraîchissement de l'écran, seulement pendant une animation.
         if self.scrolling.is_animating() {
             subscriptions.push(window::frames().map(Message::Frame));
@@ -349,6 +434,63 @@ impl App {
         })
     }
 
+    /// Pochettes des lignes visibles (playlist ouverte, file d'attente).
+    pub(crate) fn request_visible_covers(&mut self) -> Task<Message> {
+        let mut tracks: Vec<Track> = Vec::new();
+        if let Route::Playlist(_) = self.route
+            && let Some((_, Load::Ready(playlist))) = &self.lib.playlist
+        {
+            let (first, last) = crate::views::visible_range(
+                self.page_view,
+                crate::views::PLAYLIST_LIST_TOP,
+                crate::views::ROW_H,
+                playlist.tracks.len(),
+            );
+            tracks.extend(playlist.tracks[first..last].iter().cloned());
+        }
+        if self.show_queue {
+            let (first, last) = crate::views::visible_range(
+                self.queue_view,
+                0.0,
+                crate::views::QROW_H,
+                self.queue.entries.len(),
+            );
+            tracks.extend(
+                self.queue.entries[first..last]
+                    .iter()
+                    .map(|e| e.track.clone()),
+            );
+        }
+        self.want_track_covers(&tracks, THUMB)
+    }
+
+    fn load_ui(&mut self) {
+        let Some(path) = &self.ui_file else {
+            return;
+        };
+        let settings: UiSettings = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+        self.left_width = settings.left_width.clamp(LEFT_RANGE.0, LEFT_RANGE.1);
+        self.queue_width = settings.queue_width.clamp(RIGHT_RANGE.0, RIGHT_RANGE.1);
+        self.show_queue = settings.show_queue;
+    }
+
+    fn save_ui(&self) {
+        let Some(path) = &self.ui_file else {
+            return;
+        };
+        let settings = UiSettings {
+            left_width: self.left_width,
+            queue_width: self.queue_width,
+            show_queue: self.show_queue,
+        };
+        if let Ok(json) = serde_json::to_vec(&settings) {
+            let _ = std::fs::write(path, json);
+        }
+    }
+
     /// « Se reconnecter » : nouvelle lecture de la session du navigateur.
     pub(crate) fn reconnect_task(&self) -> Option<Task<Message>> {
         let backend = self.backend()?;
@@ -374,6 +516,7 @@ impl App {
         let previous = std::mem::replace(&mut self.route, route.clone());
         self.history.push(previous);
         self.scrolling.reset(PAGE_SCROLL);
+        self.page_view.offset = 0.0;
         Task::batch([self.open(route), scroll_top()])
     }
 
@@ -414,6 +557,7 @@ impl App {
             Route::Library => self.load_playlists(),
             Route::Playlist(id) => self.open_playlist(id),
             Route::Home => self.refresh_home(),
+            Route::NowPlaying => Task::none(),
         }
     }
 
@@ -448,6 +592,8 @@ impl App {
                         self.lib.liked = liked.tracks.iter().map(|t| t.video_id.clone()).collect();
                         self.lib.liked_count = Some(liked.tracks.len());
                     }
+                    self.ui_file = cache_dir.parent().map(|d| d.join("ui.json"));
+                    self.load_ui();
                     self.lib.cache_dir = Some(cache_dir);
                     self.phase = Phase::Ready(backend);
                     // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
@@ -467,6 +613,7 @@ impl App {
                 Some(route) => {
                     self.route = route.clone();
                     self.scrolling.reset(PAGE_SCROLL);
+                    self.page_view.offset = 0.0;
                     Task::batch([self.open(route), scroll_top()])
                 }
                 None => Task::none(),
@@ -644,6 +791,7 @@ impl App {
             Message::ToggleAutoplay => self.send(Command::SetAutoplay(!self.state.autoplay)),
             Message::ToggleQueue => {
                 self.show_queue = !self.show_queue;
+                self.save_ui();
                 Task::none()
             }
             Message::JumpTo(id) => self.send(Command::JumpTo(id)),
@@ -695,11 +843,51 @@ impl App {
             }
             Message::Scrolled(id, viewport) => {
                 self.scrolling.scrolled(id, &viewport);
+                let view = View {
+                    offset: viewport.absolute_offset().y,
+                    height: viewport.bounds().height,
+                };
                 if id == PAGE_SCROLL {
-                    self.playlist_scrolled(&viewport)
+                    self.page_view = view;
+                } else if id == QUEUE_SCROLL {
+                    self.queue_view = view;
+                }
+                self.covers_seq += 1;
+                let seq = self.covers_seq;
+                Task::perform(tokio::time::sleep(COVERS_SETTLE), move |()| {
+                    Message::CoversSettle(seq)
+                })
+            }
+            Message::CoversSettle(seq) => {
+                if seq == self.covers_seq {
+                    self.request_visible_covers()
                 } else {
                     Task::none()
                 }
+            }
+            Message::DragStart(panel) => {
+                self.dragging = Some(panel);
+                Task::none()
+            }
+            Message::DragMove(x) => {
+                match self.dragging {
+                    Some(Panel::Left) => self.left_width = x.clamp(LEFT_RANGE.0, LEFT_RANGE.1),
+                    Some(Panel::Right) => {
+                        self.queue_width =
+                            (self.window_width - x).clamp(RIGHT_RANGE.0, RIGHT_RANGE.1);
+                    }
+                    None => {}
+                }
+                Task::none()
+            }
+            Message::DragEnd => {
+                self.dragging = None;
+                self.save_ui();
+                Task::none()
+            }
+            Message::WindowResized(width) => {
+                self.window_width = width;
+                Task::none()
             }
             Message::Frame(now) => self.scrolling.frame(now),
             Message::Lib(message) => self.update_library(message),
@@ -744,8 +932,9 @@ impl App {
             }
             CoreUpdate::Queue(queue) => {
                 self.queue = queue;
-                let queue = Arc::clone(&self.queue);
-                self.want_track_covers(queue.entries.iter().map(|e| &e.track), THUMB)
+                // Seulement les lignes visibles : une file de 900 titres ne doit
+                // pas déclencher 900 téléchargements.
+                self.request_visible_covers()
             }
             CoreUpdate::Event(CoreEvent::Error(message)) => self.show_toast(message),
             CoreUpdate::Event(_) => Task::none(),
