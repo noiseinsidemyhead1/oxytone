@@ -968,6 +968,8 @@ fn empty_playlist() -> Playlist {
         thumbnail_url: None,
         tracks: Vec::new(),
         complete: true,
+        // Seules les playlists qu'on vient de créer partent de ce modèle.
+        owned: true,
     }
 }
 

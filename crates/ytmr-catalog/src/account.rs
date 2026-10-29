@@ -24,8 +24,7 @@ use ytmapi_rs::parse::LibraryPlaylist;
 use ytmapi_rs::parse::{ParseFrom, ProcessedResult};
 use ytmapi_rs::query::playlist::PrivacyStatus;
 use ytmapi_rs::query::{
-    CreatePlaylistQuery, EditPlaylistQuery, GetHistoryQuery, GetPlaylistDetailsQuery,
-    GetPlaylistTracksQuery,
+    CreatePlaylistQuery, EditPlaylistQuery, GetHistoryQuery, GetPlaylistTracksQuery,
 };
 use ytmapi_rs::query::{PostMethod, PostQuery, Query};
 use ytmapi_rs::{YtMusic, YtMusicBuilder};
@@ -76,6 +75,9 @@ pub struct Playlist {
     pub tracks: Vec<Track>,
     /// `false` si YouTube n'a pas rendu toutes les pages.
     pub complete: bool,
+    /// Playlist du compte (modifiable). `false` pour celles des autres.
+    #[serde(default)]
+    pub owned: bool,
 }
 
 /// Morceau de playlist arrivé au fil du chargement (voir [`Account::playlist_progressive`]).
@@ -143,10 +145,17 @@ impl Account {
 
     /// Détails et morceaux (toutes les pages). `LIKED_ID` pour les titres likés.
     pub async fn playlist(&self, id: &str) -> Result<Playlist, CatalogError> {
-        let mut playlist = self.header(id).await?;
-        playlist.complete = self
-            .for_each_page(id, |page| collect_tracks(page, &mut playlist.tracks))
+        let mut playlist: Option<Playlist> = None;
+        let mut tracks = Vec::new();
+        let complete = self
+            .for_each_page(id, |page| {
+                playlist.get_or_insert_with(|| header_from_page(id, page));
+                collect_tracks(page, &mut tracks);
+            })
             .await?;
+        let mut playlist = playlist.unwrap_or_else(|| header_from_page(id, &Value::Null));
+        playlist.tracks = tracks;
+        playlist.complete = complete;
         Ok(playlist)
     }
 
@@ -158,10 +167,13 @@ impl Account {
         id: &str,
         tx: UnboundedSender<PlaylistUpdate>,
     ) -> Result<(), CatalogError> {
-        let header = self.header(id).await?;
-        let _ = tx.send(PlaylistUpdate::Header(header));
+        let mut first = true;
         let complete = self
             .for_each_page(id, |page| {
+                // L'en-tête est dans la première page : pas de requête en plus.
+                if std::mem::take(&mut first) {
+                    let _ = tx.send(PlaylistUpdate::Header(header_from_page(id, page)));
+                }
                 let mut tracks = Vec::new();
                 collect_tracks(page, &mut tracks);
                 let _ = tx.send(PlaylistUpdate::Tracks(tracks));
@@ -169,24 +181,6 @@ impl Account {
             .await?;
         let _ = tx.send(PlaylistUpdate::Done { complete });
         Ok(())
-    }
-
-    /// Détails d'une playlist, sans ses morceaux.
-    async fn header(&self, id: &str) -> Result<Playlist, CatalogError> {
-        let details = self
-            .yt
-            .query(GetPlaylistDetailsQuery::new(browse_id(id)))
-            .await?;
-        Ok(Playlist {
-            id: bare_id(id).to_owned(),
-            title: details.title,
-            author: details.author,
-            description: details.description,
-            duration_text: details.duration,
-            thumbnail_url: largest_thumbnail(&details.thumbnails),
-            tracks: Vec::new(),
-            complete: true,
-        })
     }
 
     pub async fn create_playlist(
@@ -580,6 +574,7 @@ fn track_from_raw(item: &Value) -> Option<Track> {
     let artist: String = runs(1)
         .map(|r| r.iter().filter_map(text_of).collect())
         .unwrap_or_default();
+    let artist_id = runs(1).and_then(|r| crate::raw::artist_id(r));
     let album_run = runs(2).and_then(|r| r.first());
     let album_id = album_run
         .and_then(|r| r.pointer("/navigationEndpoint/browseEndpoint/browseId"))
@@ -606,11 +601,36 @@ fn track_from_raw(item: &Value) -> Option<Track> {
         video_id,
         title,
         artist,
+        artist_id,
         album: album_id.as_ref().and(album_run.and_then(text_of)),
         album_id,
         duration,
         thumbnail_url,
     })
+}
+
+/// Détails d'une playlist lus dans sa première page brute. Tolérant : le
+/// décodeur de ytmapi-rs refusait les playlists des autres (« Expected …
+/// straplineTextOne … facepile »).
+fn header_from_page(id: &str, page: &Value) -> Playlist {
+    let h = crate::raw::playlist_header(page);
+    let bare = bare_id(id);
+    let fallback = if bare == LIKED_ID {
+        "Titres likés"
+    } else {
+        "Playlist"
+    };
+    Playlist {
+        id: bare.to_owned(),
+        title: h.title.unwrap_or_else(|| fallback.to_owned()),
+        author: h.author.unwrap_or_default(),
+        description: h.description,
+        duration_text: h.second_line.unwrap_or_default(),
+        thumbnail_url: h.thumbnail_url,
+        tracks: Vec::new(),
+        complete: true,
+        owned: h.owned,
+    }
 }
 
 /// Identifiants vidéo d'une liste (pour savoir ce qui est liké).
@@ -621,6 +641,36 @@ pub fn video_ids(tracks: &[Track]) -> std::collections::HashSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lecture seule : une playlist publique d'un autre compte et une des siennes.
+    #[tokio::test]
+    #[ignore = "nécessite YTMR_TEST_COOKIE"]
+    async fn reads_foreign_and_own_playlists() {
+        let cookie = std::env::var("YTMR_TEST_COOKIE").unwrap();
+        let account = Account::connect(&cookie).await.unwrap();
+        let foreign = account.playlist("PL9A1600EA18716662").await.unwrap();
+        println!(
+            "externe : {} / {} / {} titres / owned={}",
+            foreign.title,
+            foreign.author,
+            foreign.tracks.len(),
+            foreign.owned
+        );
+        assert!(!foreign.owned);
+        assert!(!foreign.tracks.is_empty());
+        let mine = account.playlists().await.unwrap();
+        if let Some(first) = mine.first() {
+            let own = account.playlist(&first.id).await.unwrap();
+            println!("à moi : {} / owned={}", own.title, own.owned);
+        }
+        let liked = account.playlist(LIKED_ID).await.unwrap();
+        println!(
+            "likés : {} / {} titres / owned={}",
+            liked.title,
+            liked.tracks.len(),
+            liked.owned
+        );
+    }
 
     /// Crée une playlist vide, regarde son contenu, puis la supprime.
     #[tokio::test]

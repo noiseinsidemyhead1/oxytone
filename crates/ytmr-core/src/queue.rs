@@ -313,6 +313,7 @@ mod tests {
             video_id: format!("vid{n:08}"),
             title: format!("titre {n}"),
             artist: "artiste".into(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: None,

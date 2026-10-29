@@ -1290,6 +1290,7 @@ mod tests {
             video_id: format!("v{n}"),
             title: format!("t{n}"),
             artist: "a".into(),
+            artist_id: None,
             album: None,
             album_id: None,
             duration: Some(Duration::from_secs(200)),

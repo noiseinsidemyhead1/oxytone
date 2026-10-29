@@ -160,6 +160,7 @@ impl TrackDto {
             video_id: self.video_id,
             title: self.title,
             artist: self.artist,
+            artist_id: None,
             album: self.album.filter(|a| a.len() <= MAX_TEXT_LEN),
             album_id: self.album_id,
             duration: self.duration_ms.map(Duration::from_millis),

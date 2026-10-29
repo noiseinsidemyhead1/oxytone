@@ -5,6 +5,9 @@
 //! si YouTube change son API interne, seul ce crate est à adapter.
 
 pub mod account;
+mod raw;
+
+pub use raw::normalize_query;
 
 use reqwest::header::{COOKIE, HeaderMap, HeaderValue};
 use thiserror::Error;
@@ -12,7 +15,7 @@ use ytmapi_rs::auth::noauth::NoAuthToken;
 use ytmapi_rs::common::{AlbumID, AlbumType, ArtistChannelID, Thumbnail, VideoID, YoutubeID};
 use ytmapi_rs::parse::{
     AlbumResult, AlbumSong, ArtistSong, GetAlbum, GetArtist, ParsedSongArtist, SearchResultAlbum,
-    SearchResultArtist, SearchResultSong, WatchPlaylistTrack,
+    SearchResultArtist, WatchPlaylistTrack,
 };
 use ytmapi_rs::{YtMusic, YtMusicBuilder};
 use ytmr_core::engine::BoxError;
@@ -116,22 +119,34 @@ impl Catalog {
         self.yt.get_or_try_init(connect).await
     }
     /// Recherche limitée aux morceaux (pas de vidéos, albums ni playlists).
+    ///
+    /// Lue en JSON brut : le décodeur de ytmapi-rs rejetait toute la recherche
+    /// dès qu'un résultat n'avait pas de page artiste (« Expected Song result »).
     pub async fn search_songs(&self, query: &str) -> Result<Vec<Track>, CatalogError> {
-        let results = self.client().await?.search_songs(query).await?;
-        tracing::debug!(query, count = results.len(), "recherche de morceaux");
-        Ok(results.into_iter().map(track_from_song).collect())
+        let query = normalize_query(query);
+        let raw = self
+            .client()
+            .await?
+            .raw_json_query(raw::songs_search(&query))
+            .await?;
+        let json: serde_json::Value = serde_json::from_str(&raw).unwrap_or_default();
+        let tracks = raw::search_songs(&json);
+        tracing::debug!(query, count = tracks.len(), "recherche de morceaux");
+        Ok(tracks)
     }
 
     /// Morceaux, albums et artistes, trois requêtes lancées en parallèle.
     /// Un échec partiel (ex. albums) n'empêche pas de rendre le reste.
     pub async fn search_all(&self, query: &str) -> Result<SearchAll, CatalogError> {
+        let query = normalize_query(query);
+        let query = query.as_str();
         let yt = self.client().await?;
         let (songs, albums, artists) = tokio::join!(
-            yt.search_songs(query),
+            self.search_songs(query),
             yt.search_albums(query),
             yt.search_artists(query),
         );
-        let songs: Vec<Track> = songs?.into_iter().map(track_from_song).collect();
+        let songs = songs?;
         let albums = albums
             .inspect_err(|e| tracing::warn!(error = %e, "recherche d'albums"))
             .map(|v| v.into_iter().map(album_from_search).collect())
@@ -220,26 +235,11 @@ fn track_from_watch(t: WatchPlaylistTrack) -> Track {
         video_id: t.video_id.get_raw().to_owned(),
         title: t.title,
         artist: t.author,
+        artist_id: None,
         album: None,
         album_id: None,
         duration: parse_duration(&t.duration),
         thumbnail_url: largest_thumbnail(&t.thumbnails),
-    }
-}
-
-fn track_from_song(song: SearchResultSong) -> Track {
-    let (album, album_id) = song
-        .album
-        .map(|a| (Some(a.name), Some(a.id.get_raw().to_owned())))
-        .unwrap_or_default();
-    Track {
-        video_id: song.video_id.get_raw().to_owned(),
-        title: song.title,
-        artist: song.artist,
-        album,
-        album_id,
-        duration: parse_duration(&song.duration),
-        thumbnail_url: largest_thumbnail(&song.thumbnails),
     }
 }
 
@@ -249,6 +249,7 @@ fn track_from_album_song(song: AlbumSong, album: &Album) -> Track {
         video_id: song.video_id.get_raw().to_owned(),
         title: song.title,
         artist: album.artist.clone(),
+        artist_id: album.artist_id.clone(),
         album: Some(album.title.clone()),
         album_id: Some(album.id.clone()),
         duration: parse_duration(&song.duration),
@@ -261,6 +262,11 @@ fn track_from_artist_song(song: ArtistSong) -> Track {
         video_id: song.video_id.get_raw().to_owned(),
         title: song.title,
         artist: join_artists(&song.artists),
+        artist_id: song
+            .artists
+            .iter()
+            .find_map(|a| a.id.as_ref())
+            .map(|i| i.get_raw().to_owned()),
         album: Some(song.album.name),
         album_id: Some(song.album.id.get_raw().to_owned()),
         duration: None,

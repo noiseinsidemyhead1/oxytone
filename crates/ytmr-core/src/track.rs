@@ -13,6 +13,9 @@ pub struct Track {
     pub video_id: String,
     pub title: String,
     pub artist: String,
+    /// Page de l'artiste principal (`UC…`), quand YouTube la donne.
+    #[serde(default)]
+    pub artist_id: Option<String>,
     pub album: Option<String>,
     /// Identifiant d'album YouTube Music (`MPREb…`), pour ouvrir sa page.
     pub album_id: Option<String>,
