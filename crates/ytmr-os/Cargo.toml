@@ -10,3 +10,9 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+# zbus plutôt que libdbus : rien à installer côté système sous Linux.
+souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt", "sync"] }
+tracing = "0.1.44"
+ytmr-core = { version = "0.1.0", path = "../ytmr-core" }

@@ -153,6 +153,9 @@ pub enum Message {
     /// Clic sur le nom de l'artiste : (page connue, nom à chercher sinon).
     OpenArtist(Option<String>, String),
     ArtistFound(Result<Option<String>, String>),
+    /// Handle natif de la fenêtre, pour l'overlay média du système.
+    NativeWindow(Option<usize>),
+    MediaControls(Result<(), String>),
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
@@ -833,7 +836,14 @@ impl App {
                     self.phase = Phase::Ready(backend);
                     // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
                     let initial = self.on_core(CoreUpdate::State(core.state()));
-                    Task::batch([initial, account, Task::stream(core_updates(core))])
+                    // Touches média et overlay du système : il faut la fenêtre native.
+                    let native = window::oldest().and_then(|id| window::run(id, native_handle));
+                    Task::batch([
+                        initial,
+                        account,
+                        Task::stream(core_updates(core)),
+                        native.map(Message::NativeWindow),
+                    ])
                 }
                 Ok(None) => Task::none(),
                 Err(e) => {
@@ -1033,6 +1043,29 @@ impl App {
                     )
                 }
             },
+            Message::NativeWindow(handle) => {
+                let Some(core) = self.backend().map(|b| b.core.clone()) else {
+                    return Task::none();
+                };
+                Task::perform(
+                    async move {
+                        let runtime = tokio::runtime::Handle::current();
+                        tokio::task::spawn_blocking(move || {
+                            ytmr_os::start(core, handle, runtime).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::MediaControls,
+                )
+            }
+            Message::MediaControls(result) => {
+                match result {
+                    Ok(()) => tracing::info!("touches média et overlay du système branchés"),
+                    Err(e) => tracing::warn!(error = %e, "touches média indisponibles"),
+                }
+                Task::none()
+            }
             Message::ArtistFound(result) => {
                 self.search_inflight = false;
                 match result {
@@ -1413,6 +1446,15 @@ impl App {
             .map_or(f32::MAX, |d| d.as_secs_f32() - 1.0);
         let target = (self.state.position.as_secs_f32() + delta).clamp(0.0, max.max(0.0));
         self.send(Command::Seek(Duration::from_secs_f32(target)))
+    }
+}
+
+/// HWND sous Windows (exigé par l'overlay média) ; rien ailleurs.
+fn native_handle(window: &dyn window::Window) -> Option<usize> {
+    use raw_window_handle::RawWindowHandle;
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get() as usize),
+        _ => None,
     }
 }
 
