@@ -1393,7 +1393,7 @@ fn queue_panel(app: &App) -> El<'_> {
                 active: current,
                 hovered: drag.is_none() && app.queue_hover == Some(i),
                 // Saisie pour un déplacement : rendue comme sélectionnée.
-                selected: held || app.queue_selected == Some(i),
+                selected: held || app.queue_selected == Some(entry.id),
             };
             let body = container(content)
                 .width(Length::Fill)
@@ -1438,10 +1438,19 @@ fn queue_panel(app: &App) -> El<'_> {
                 } else {
                     iced::mouse::Interaction::Pointer
                 });
-            container(area)
-                .height(Length::Fixed(QROW_H))
-                .align_y(Alignment::Center)
-                .into()
+            // Aléatoire activé / coupé : chaque morceau glisse de son ancienne
+            // place à la nouvelle.
+            let dy = app
+                .queue_reorder
+                .as_ref()
+                .map_or(0.0, |r| r.offset(entry.id, app.frame_now) * QROW_H);
+            crate::anim::shift(
+                container(area)
+                    .height(Length::Fixed(QROW_H))
+                    .align_y(Alignment::Center),
+                dy,
+            )
+            .into()
         })
     };
 

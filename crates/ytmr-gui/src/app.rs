@@ -370,7 +370,14 @@ pub struct App {
     pub right_panel: RightPanel,
     /// Morceau sélectionné d'un clic (listes) ; ligne sélectionnée de la file.
     pub selected: Option<String>,
-    pub queue_selected: Option<usize>,
+    /// Morceau sélectionné dans la file (par identifiant : il suit le morceau).
+    pub queue_selected: Option<QueueId>,
+    /// Ordre de la file juste avant un changement d'aléatoire (animation).
+    queue_before_shuffle: Option<Vec<QueueId>>,
+    /// Morceaux de la file en train de glisser vers leur nouvelle place.
+    pub queue_reorder: Option<crate::anim::Reorder>,
+    /// Instant de la dernière image (position des morceaux qui glissent).
+    pub frame_now: std::time::Instant,
     /// Défilement manuel des paroles : le suivi automatique reprend après.
     lyrics_manual_until: Option<std::time::Instant>,
     /// Mesure des images par seconde (`YTMR_FPS`) : début de la seconde, images.
@@ -500,6 +507,9 @@ impl App {
             right_panel: RightPanel::Queue,
             selected: None,
             queue_selected: None,
+            queue_before_shuffle: None,
+            queue_reorder: None,
+            frame_now: std::time::Instant::now(),
             lyrics_manual_until: None,
             fps_meter: std::env::var_os("YTMR_FPS").map(|_| (std::time::Instant::now(), 0)),
             lyrics_line: None,
@@ -582,6 +592,7 @@ impl App {
             || self.fps_meter.is_some()
             || self.controls_anim.is_some()
             || self.anims.is_running()
+            || self.queue_reorder.is_some()
             || self.is_loading()
             || self.accent_fade.is_running()
             || self.page_fade.is_running()
@@ -604,7 +615,7 @@ impl App {
     fn queue_drag_step(&mut self, step: QueueDrag) -> Task<Message> {
         match step {
             QueueDrag::Press(i) => {
-                self.queue_selected = Some(i);
+                self.queue_selected = self.queue.entries.get(i).map(|e| e.id);
                 self.queue_drag = Some(QueueDragState {
                     from: i,
                     over: i,
@@ -1566,7 +1577,13 @@ impl App {
                     self.send(Command::SetVolume(0))
                 }
             },
-            Message::ToggleShuffle => self.send(Command::SetShuffle(!self.state.shuffle)),
+            Message::ToggleShuffle => {
+                // La file va être remélangée : la sélection n'a plus de sens, et
+                // l'ordre actuel sert de point de départ à l'animation.
+                self.queue_selected = None;
+                self.queue_before_shuffle = Some(self.queue.entries.iter().map(|e| e.id).collect());
+                self.send(Command::SetShuffle(!self.state.shuffle))
+            }
             Message::CycleRepeat => self.send(Command::SetRepeat(self.state.repeat.cycle())),
             Message::ToggleQueue => {
                 self.show_queue = !(self.show_queue && self.right_panel == RightPanel::Queue);
@@ -1772,6 +1789,10 @@ impl App {
             }
             Message::Frame(now) => {
                 self.anims.frame(now);
+                self.frame_now = now;
+                if self.queue_reorder.as_ref().is_some_and(|r| r.is_done(now)) {
+                    self.queue_reorder = None;
+                }
                 if let Some((since, from)) = self.controls_anim {
                     let t = (now.saturating_duration_since(since).as_secs_f32()
                         / CONTROLS_FADE.as_secs_f32())
@@ -1984,6 +2005,12 @@ impl App {
                 ])
             }
             CoreUpdate::Queue(queue) => {
+                if let Some(before) = self.queue_before_shuffle.take() {
+                    let after: Vec<QueueId> = queue.entries.iter().map(|e| e.id).collect();
+                    let now = std::time::Instant::now();
+                    self.frame_now = now;
+                    self.queue_reorder = crate::anim::Reorder::new(&before, &after, now);
+                }
                 self.queue = queue;
                 // Seulement les lignes visibles : une file de 900 titres ne doit
                 // pas déclencher 900 téléchargements.
