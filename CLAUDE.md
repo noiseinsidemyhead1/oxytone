@@ -35,6 +35,8 @@ RUST_LOG=debug cargo run -p ytmr-cli
 
 Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque le `link.exe` de MSVC.
 
+**CI :** `.github/workflows/ci.yml` existe, mais GitHub Actions est bloqué sur le compte (`startup_failure` même sur un workflow vide, quota non épuisé). La validation de fin de phase se fait donc **en local sur Windows ET sur CachyOS** (`cargo build`, `clippy`, `test`).
+
 ## Emplacements à l'exécution
 
 | | Linux | Windows |
@@ -47,7 +49,7 @@ Sous Windows, compiler depuis PowerShell : dans Git Bash, `/usr/bin/link` masque
 
 | Phase | État |
 |---|---|
-| 0 — Socle (workspace, lints, CI, tracing, config) | en validation |
+| 0 — Socle (workspace, lints, CI, tracing, config) | validée sous Windows ; à vérifier sous CachyOS |
 | 1 — Lecture headless | à faire |
 | 2 — Core et file d'attente | à faire |
 | 3 — API et jaquettes | à faire |
