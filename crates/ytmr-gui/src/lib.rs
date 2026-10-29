@@ -46,7 +46,11 @@ pub fn run(config: Config, paths: AppPaths) -> iced::Result {
         decorations: false,
         ..window::Settings::default()
     })
-    .antialiasing(true)
+    // Pas d'anticrénelage MSAA : iced lisse déjà texte, formes et images, et
+    // l'appli ne dessine aucun tracé vectoriel. Le MSAA ×4 coûtait une image
+    // quatre fois plus grande (~60 Mo en 2560 × 1440, pris dans la RAM avec
+    // une carte graphique intégrée).
+    .antialiasing(false)
     .run()
 }
 

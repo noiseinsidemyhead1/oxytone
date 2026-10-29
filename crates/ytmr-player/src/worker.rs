@@ -42,6 +42,35 @@ if "cookiesfrombrowser" in opts:
 local = threading.local()
 out = threading.Lock()
 
+# Premium détecté une fois pour toutes. yt-dlp lit la page « initial data »
+# (~1 s par morceau) seulement pour savoir si le compte est Premium ; la
+# réponse ne change pas d'un morceau à l'autre. Une fois connue, on la
+# redonne et la requête est sautée. Si yt-dlp change ces noms, rien n'est
+# modifié (même comportement qu'avant, juste plus lent).
+premium = {"known": None}
+try:
+    from yt_dlp.extractor.youtube._video import YoutubeIE as _IE
+    _orig_premium = _IE._is_premium_subscriber
+    _orig_initial = _IE._download_initial_data
+
+    def _is_premium(self, initial_data):
+        if initial_data is None and premium["known"] is not None:
+            return premium["known"]
+        result = _orig_premium(self, initial_data)
+        if initial_data is not None and self.is_authenticated:
+            premium["known"] = result
+        return result
+
+    def _initial_data(self, *args, **kwargs):
+        if premium["known"] is not None:
+            return None
+        return _orig_initial(self, *args, **kwargs)
+
+    _IE._is_premium_subscriber = _is_premium
+    _IE._download_initial_data = _initial_data
+except Exception:
+    pass
+
 def ydl():
     if not hasattr(local, "ydl"):
         local.ydl = yt_dlp.YoutubeDL(opts)
@@ -68,6 +97,14 @@ def work(req):
         if req.get("op") == "warm":
             ydl()
             return
+        if req.get("op") == "premium":
+            # Au lancement, en tâche de fond : le premier vrai morceau profite
+            # déjà de la détection Premium.
+            if "cookiesfrombrowser" in opts and premium["known"] is None:
+                ydl().extract_info(
+                    "https://music.youtube.com/watch?v=dQw4w9WgXcQ", download=False
+                )
+            return
         if req.get("op") == "cookie":
             emit({"id": req["id"], "ok": {"cookie": browser_cookie(req["browser"])}})
             return
@@ -84,6 +121,7 @@ def work(req):
 pool = ThreadPoolExecutor(int(sys.argv[2]))
 for _ in range(int(sys.argv[2])):
     pool.submit(work, {"op": "warm"})
+pool.submit(work, {"op": "premium"})
 emit({"ready": True, "version": yt_dlp.version.__version__})
 for line in sys.stdin:
     line = line.strip()

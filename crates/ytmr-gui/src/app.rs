@@ -29,9 +29,10 @@ use crate::style;
 pub const THUMB: u32 = 96;
 /// Cartes (~164 px à l'écran) : 160 Ko décodés chacune.
 pub const CARD: u32 = 200;
-pub const HERO: u32 = 640;
+/// Grandes pochettes (en-tête ~220 px, vue « En cours » ~420 px) : 1 Mo décodé.
+pub const HERO: u32 = 512;
 /// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
-const COVER_BUDGET: u64 = 96 << 20;
+const COVER_BUDGET: u64 = 64 << 20;
 
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(320);
 /// Attente maximale des pochettes avant d'afficher des résultats de recherche.
@@ -857,7 +858,14 @@ impl App {
         };
         let key = (id.clone(), size);
         self.touch_cover(&key);
-        self.cover_evictable.remove(&key);
+        // Grandes pochettes : libérables (celles du morceau en cours et de la
+        // page affichée sont protégées, et redemandées à chaque visite). Avant,
+        // chaque page visitée en gardait une de plus en mémoire.
+        if size == HERO {
+            self.cover_evictable.insert(key.clone());
+        } else {
+            self.cover_evictable.remove(&key);
+        }
         if self.covers.contains_key(&key) {
             return Task::none();
         }
@@ -1179,7 +1187,8 @@ impl App {
         self.page_view.offset = 0.0;
         let open = self.open(route);
         self.update_page_accent();
-        Task::batch([open, scroll_top()])
+        let hero = self.want_cover(self.page_cover(), HERO);
+        Task::batch([open, scroll_top(), hero])
     }
 
     /// Charge les données de la page (album, artiste) si besoin.
@@ -1327,7 +1336,9 @@ impl App {
                     self.page_view.offset = 0.0;
                     let open = self.open(route);
                     self.update_page_accent();
-                    Task::batch([open, scroll_top()])
+                    // Pochette d'en-tête peut-être libérée entre-temps.
+                    let hero = self.want_cover(self.page_cover(), HERO);
+                    Task::batch([open, scroll_top(), hero])
                 }
                 None => Task::none(),
             },
@@ -1799,6 +1810,18 @@ impl App {
                 };
                 if id == PAGE_SCROLL {
                     self.page_view = view;
+                    if self.route == Route::Home {
+                        // Rangées de l'accueil qui arrivent à l'écran.
+                        let covers = self.want_home_covers();
+                        self.covers_seq += 1;
+                        let seq = self.covers_seq;
+                        return Task::batch([
+                            covers,
+                            Task::perform(tokio::time::sleep(COVERS_SETTLE), move |()| {
+                                Message::CoversSettle(seq)
+                            }),
+                        ]);
+                    }
                 } else if id == QUEUE_SCROLL {
                     self.queue_view = view;
                 } else if id == LYRICS_SCROLL {

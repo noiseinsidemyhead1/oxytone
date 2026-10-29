@@ -240,25 +240,38 @@ impl App {
                 .as_deref()
                 .and_then(|dir| crate::collection::read_json(&dir.join("home.json")));
             self.lib.home = Some(match cached {
-                Some(shelves) => {
-                    tasks.push(self.want_home_covers(&shelves));
-                    Load::Ready(shelves)
-                }
+                Some(shelves) => Load::Ready(shelves),
                 None => Load::Loading,
             });
+            tasks.push(self.want_home_covers());
         }
         self.lib.home_at = Some(Instant::now());
         tasks.push(call(op, Lib::HomeLoaded));
         Task::batch(tasks)
     }
 
-    /// Toutes les pochettes de l'accueil (gardées : elles restent affichées).
-    fn want_home_covers(&mut self, shelves: &[HomeShelf]) -> Task<Message> {
-        let ids: Vec<_> = shelves
+    /// Pochettes des rangées de l'accueil visibles, plus une d'avance (au fil
+    /// du défilement) : les décoder toutes d'un coup (~140) coûtait ~25 Mo de
+    /// plus au lancement pour des rangées que l'on ne voit pas forcément.
+    /// Une pochette demandée reste gardée : elle est affichée.
+    pub(crate) fn want_home_covers(&mut self) -> Task<Message> {
+        /// Hauteur approximative de la salutation, de la mosaïque et de « Tes playlists ».
+        const TOP: f32 = 900.0;
+        /// Hauteur approximative d'une rangée (titre, cartes, barre de défilement).
+        const SHELF_H: f32 = 300.0;
+        let Some(Load::Ready(shelves)) = &self.lib.home else {
+            return Task::none();
+        };
+        let bottom = self.page_view.offset + self.page_view.height.max(800.0) + SHELF_H;
+        let rows = ((bottom - TOP).max(0.0) / SHELF_H).ceil() as usize + 1;
+        let urls: Vec<Option<String>> = shelves
             .iter()
+            .filter(|s| is_listen_again(s))
+            .chain(shelves.iter().filter(|s| !is_listen_again(s)).take(rows))
             .flat_map(|s| &s.items)
-            .map(|i| self.url_cover(i.thumbnail_url.as_deref()))
+            .map(|i| i.thumbnail_url.clone())
             .collect();
+        let ids: Vec<_> = urls.iter().map(|u| self.url_cover(u.as_deref())).collect();
         Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)))
     }
 
@@ -275,7 +288,7 @@ impl App {
     }
 
     pub fn refresh_home(&mut self) -> Task<Message> {
-        self.load_home()
+        Task::batch([self.load_home(), self.want_home_covers()])
     }
 
     /// Signale à YouTube le morceau qui commence (une fois par entrée de file).
@@ -626,9 +639,8 @@ impl App {
                     if matches!(self.lib.home, Some(Load::Ready(_))) {
                         return Task::none();
                     }
-                    let task = self.want_home_covers(&shelves);
                     self.lib.home = Some(Load::Ready(shelves));
-                    task
+                    self.want_home_covers()
                 }
                 Err(e) => {
                     tracing::warn!("accueil : {e}");
