@@ -108,7 +108,15 @@ def work(req):
         if req.get("op") == "cookie":
             emit({"id": req["id"], "ok": {"cookie": browser_cookie(req["browser"])}})
             return
-        info = ydl().extract_info(req["url"], download=False)
+        y = ydl()
+        fmt = req.get("format")
+        # yt-dlp fige son sélecteur de format à la création : on le refait
+        # quand la qualité demandée change (Paramètres).
+        if fmt and getattr(local, "fmt", None) != fmt:
+            y.params["format"] = fmt
+            y.format_selector = y.build_format_selector(fmt)
+            local.fmt = fmt
+        info = y.extract_info(req["url"], download=False)
         emit({"id": req["id"], "ok": {
             "url": info.get("url"),
             "vcodec": info.get("vcodec"),
@@ -184,8 +192,9 @@ impl Worker {
     }
 
     /// Infos yt-dlp (`url`, `vcodec`, `available_at`, `http_headers`) pour `url`.
-    pub async fn extract(&self, url: &str) -> Result<Value, String> {
-        self.request(json!({ "url": url })).await
+    /// `format` : sélecteur yt-dlp (qualité choisie dans les Paramètres).
+    pub async fn extract(&self, url: &str, format: &str) -> Result<Value, String> {
+        self.request(json!({ "url": url, "format": format })).await
     }
 
     /// En-tête `Cookie` YouTube de la session du navigateur (`firefox`,

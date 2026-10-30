@@ -25,8 +25,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
 use ytmr_player::{
-    AudioEffects, EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent, Priority,
-    Resolver, StartMode, StreamQuality,
+    AudioDevice, AudioEffects, EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent,
+    Priority, QualityPreference, Resolver, StartMode, StreamQuality,
 };
 
 use crate::Track;
@@ -91,6 +91,11 @@ pub struct PlaybackState {
     pub next_ready: bool,
     /// Égaliseur et volume homogène.
     pub effects: AudioEffects,
+    /// Qualité demandée à yt-dlp.
+    pub quality_pref: QualityPreference,
+    /// Sorties audio disponibles, et celle choisie (`auto` ou vide = système).
+    pub audio_devices: Vec<AudioDevice>,
+    pub audio_device: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -140,6 +145,14 @@ pub enum Command {
     SetAutoplay(bool),
     /// Égaliseur, volume homogène (bornés par le moteur).
     SetEffects(AudioEffects),
+    SetQuality(QualityPreference),
+    SetAudioDevice(String),
+    /// Garde (`true`) ou non des morceaux sur le disque pour l'écoute hors
+    /// ligne ; gardés, ils sont téléchargés en tâche de fond.
+    KeepOffline {
+        video_ids: Vec<String>,
+        keep: bool,
+    },
     /// Indice : ce morceau risque d'être lancé bientôt (survol, page ouverte).
     /// Le résout en avance pour un démarrage quasi instantané ; sans effet sur la lecture.
     Prefetch(String),
@@ -182,6 +195,10 @@ struct Session {
     effects: Option<AudioEffects>,
     #[serde(default)]
     shuffle: Option<bool>,
+    #[serde(default)]
+    quality: Option<QualityPreference>,
+    #[serde(default)]
+    audio_device: Option<String>,
 }
 
 impl Session {
@@ -285,6 +302,12 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         if let Some(effects) = session.effects {
             state.effects = effects.clamped();
         }
+        if let Some(quality) = session.quality {
+            state.quality_pref = quality;
+        }
+        if let Some(device) = session.audio_device {
+            state.audio_device = device;
+        }
         queue.set_repeat(session.repeat.unwrap_or_default());
         if let Some(id) = queue.restore(
             session.tracks,
@@ -328,6 +351,7 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         radio_retries: 0,
         warming: HashSet::new(),
         warm_wanted: VecDeque::new(),
+        offline_wanted: VecDeque::new(),
         gains: HashMap::new(),
         gains_pending: HashSet::new(),
         applied_gain: None,
@@ -410,6 +434,8 @@ struct Engine<P, R, C> {
     warming: HashSet<String>,
     /// Morceaux à résoudre d'avance, par ordre de priorité.
     warm_wanted: VecDeque<String>,
+    /// Morceaux à télécharger pour l'écoute hors ligne (après l'anticipation).
+    offline_wanted: VecDeque<String>,
     /// Gains de volume homogène par morceau (dB), et ceux en cours de demande.
     gains: HashMap<String, f32>,
     gains_pending: HashSet<String>,
@@ -436,6 +462,13 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             && let Err(e) = self.player.set_effects(&self.state.effects).await
         {
             tracing::warn!(error = %e, "effets audio de la session précédente");
+        }
+        self.resolver.set_quality(self.state.quality_pref);
+        if !self.state.audio_device.is_empty()
+            && self.state.audio_device != "auto"
+            && let Err(e) = self.player.set_audio_device(&self.state.audio_device).await
+        {
+            tracing::warn!(error = %e, "sortie audio de la session précédente");
         }
         self.queue_dirty = self.queue.current().is_some();
         self.refresh_lookahead();
@@ -588,6 +621,30 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.apply_gain().await;
                 Ok(())
             }
+            Command::SetQuality(quality) => {
+                self.state.quality_pref = quality;
+                self.resolver.set_quality(quality);
+                Ok(())
+            }
+            Command::SetAudioDevice(name) => {
+                self.player.set_audio_device(&name).await?;
+                self.state.audio_device = name;
+                Ok(())
+            }
+            Command::KeepOffline { video_ids, keep } => {
+                self.resolver.keep_offline(&video_ids, keep);
+                if keep {
+                    for video_id in video_ids {
+                        if !self.is_ready(&video_id) && !self.offline_wanted.contains(&video_id) {
+                            self.offline_wanted.push_back(video_id);
+                        }
+                    }
+                    self.pump_warm();
+                } else {
+                    self.offline_wanted.retain(|v| !video_ids.contains(v));
+                }
+                Ok(())
+            }
             Command::Prefetch(video_id) => {
                 self.warm(video_id);
                 Ok(())
@@ -647,7 +704,12 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
 
     fn pump_warm(&mut self) {
         while self.warming.len() < MAX_WARMING {
-            let Some(video_id) = self.warm_wanted.pop_front() else {
+            // L'écoute en cours d'abord, puis les téléchargements hors ligne.
+            let Some(video_id) = self
+                .warm_wanted
+                .pop_front()
+                .or_else(|| self.offline_wanted.pop_front())
+            else {
                 return;
             };
             if self.warming.contains(&video_id) || self.is_ready(&video_id) {
@@ -690,6 +752,8 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             autoplay: Some(self.state.autoplay),
             effects: Some(self.state.effects),
             shuffle: Some(self.queue.shuffle()),
+            quality: Some(self.state.quality_pref),
+            audio_device: Some(self.state.audio_device.clone()),
         }
         .save(path);
     }
@@ -1145,6 +1209,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 }
             }
             PlayerEvent::Volume(volume) => self.state.volume = volume,
+            PlayerEvent::AudioDevices(devices) => self.state.audio_devices = devices,
             PlayerEvent::Ended { entry, reason } => self.on_ended(entry, reason).await,
             PlayerEvent::Idle => {}
             PlayerEvent::Exited => {

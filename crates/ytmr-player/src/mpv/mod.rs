@@ -24,11 +24,12 @@ const POSITION_STEP: Duration = Duration::from_millis(250);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Propriétés mpv suivies, avec leur identifiant d'observation.
-const OBSERVED: [(u64, &str); 4] = [
+const OBSERVED: [(u64, &str); 5] = [
     (1, "pause"),
     (2, "time-pos"),
     (3, "duration"),
     (4, "volume"),
+    (5, "audio-device-list"),
 ];
 
 pub struct MpvPlayer {
@@ -198,6 +199,10 @@ impl Player for MpvPlayer {
             .map(drop)
     }
 
+    async fn set_audio_device(&self, name: &str) -> Result<(), PlayerError> {
+        self.set("audio-device", json!(name)).await
+    }
+
     async fn set_effects(&self, effects: &crate::AudioEffects) -> Result<(), PlayerError> {
         self.set("af", json!(effects.to_mpv_af())).await
     }
@@ -289,6 +294,9 @@ fn property_event(msg: &Value, last_position: &mut Option<Duration>) -> Option<P
         "volume" => data
             .as_f64()
             .map(|v| PlayerEvent::Volume(v.round().clamp(0.0, 100.0) as u8)),
+        "audio-device-list" => serde_json::from_value::<Vec<crate::AudioDevice>>(data.clone())
+            .ok()
+            .map(PlayerEvent::AudioDevices),
         "time-pos" => {
             let pos = seconds(data)?;
             let moved_enough = last_position.is_none_or(|last| pos.abs_diff(last) >= POSITION_STEP);

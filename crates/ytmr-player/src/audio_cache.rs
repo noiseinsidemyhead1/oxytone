@@ -4,7 +4,8 @@
 //! obtenir l'adresse), puis on garde le fichier audio sur le disque. Les fois
 //! suivantes, mpv lit ce fichier directement : le son part tout de suite, sans
 //! yt-dlp ni réseau. Les plus anciens fichiers sont effacés au-delà de la
-//! taille fixée (`player.audio_cache_mb`).
+//! taille fixée (`player.audio_cache_mb`), sauf ceux gardés hors ligne
+//! (playlists épinglées : `pinned.json`), qui ne partent jamais.
 //!
 //! On ne réimplémente rien de l'extraction : on télécharge l'adresse que
 //! yt-dlp a donnée, par morceaux de 1 Mo (comme yt-dlp, YouTube bride les
@@ -21,6 +22,8 @@ use tokio::sync::Semaphore;
 use crate::resolve::{MediaSource, StreamQuality};
 
 const EXTENSION: &str = "audio";
+/// Liste des morceaux gardés hors ligne, dans le dossier du cache.
+const PINNED_FILE: &str = "pinned.json";
 const CHUNK: u64 = 1 << 20;
 /// Un morceau de plus de 30 min (mix, album entier) n'est pas gardé.
 const MAX_FILE: u64 = 60 << 20;
@@ -34,6 +37,8 @@ pub struct AudioCache {
     inflight: Mutex<HashSet<String>>,
     /// Un seul téléchargement à la fois : la lecture garde la bande passante.
     lane: Semaphore,
+    /// Morceaux gardés hors ligne : jamais effacés pour faire de la place.
+    pinned: Mutex<HashSet<String>>,
 }
 
 impl std::fmt::Debug for AudioCache {
@@ -63,13 +68,39 @@ impl AudioCache {
             .timeout(REQUEST_TIMEOUT)
             .build()
             .ok()?;
+        let pinned = std::fs::read_to_string(dir.join(PINNED_FILE))
+            .ok()
+            .and_then(|t| serde_json::from_str::<HashSet<String>>(&t).ok())
+            .unwrap_or_default();
         Some(Arc::new(Self {
             dir,
             max_bytes: max_mb << 20,
             http,
             inflight: Mutex::default(),
             lane: Semaphore::new(1),
+            pinned: Mutex::new(pinned),
         }))
+    }
+
+    /// Garde (`true`) ou non des morceaux hors ligne. Retirés, ils redeviennent
+    /// des morceaux en cache ordinaires (effacés un jour pour faire de la place).
+    pub fn keep(&self, video_ids: &[String], keep: bool) {
+        let mut pinned = lock(&self.pinned);
+        for id in video_ids {
+            if keep {
+                pinned.insert(id.clone());
+            } else {
+                pinned.remove(id);
+            }
+        }
+        if let Ok(json) = serde_json::to_string(&*pinned) {
+            let _ = std::fs::write(self.dir.join(PINNED_FILE), json);
+        }
+    }
+
+    /// Le fichier du morceau est déjà sur le disque.
+    pub fn has(&self, video_id: &str) -> bool {
+        self.file(video_id).is_some_and(|p| p.exists())
     }
 
     fn file(&self, video_id: &str) -> Option<PathBuf> {
@@ -200,9 +231,17 @@ impl AudioCache {
             .collect();
         let mut used: u64 = files.iter().map(|(_, len, _)| len).sum();
         files.sort_by_key(|(at, _, _)| *at);
+        let pinned = lock(&self.pinned).clone();
         for (_, len, path) in files {
             if used <= self.max_bytes {
                 break;
+            }
+            let id = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default();
+            if pinned.contains(id) {
+                continue;
             }
             if std::fs::remove_file(&path).is_ok() {
                 used -= len;

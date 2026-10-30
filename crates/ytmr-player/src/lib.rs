@@ -22,8 +22,18 @@ pub use deps::Dependencies;
 pub use effects::AudioEffects;
 pub use mpv::MpvPlayer;
 pub use resolve::{
-    MediaSource, Priority, Resolver, ResolverOptions, StartMode, StreamQuality, YtDlpResolver,
+    MediaSource, Priority, QualityPreference, Resolver, ResolverOptions, StartMode, StreamQuality,
+    YtDlpResolver,
 };
+
+/// Sortie audio proposée par mpv (`audio-device-list`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AudioDevice {
+    /// Identifiant pour mpv (`auto`, `wasapi/{…}`…).
+    pub name: String,
+    /// Nom lisible (« Haut-parleurs (Realtek…) »).
+    pub description: String,
+}
 
 #[derive(Debug, Error)]
 pub enum PlayerError {
@@ -85,6 +95,8 @@ pub enum PlayerEvent {
     Idle,
     /// Le moteur de lecture a disparu (crash ou arrêt).
     Exited,
+    /// Sorties audio disponibles (au démarrage et à chaque branchement).
+    AudioDevices(Vec<AudioDevice>),
 }
 
 /// Contrat commun à tous les moteurs de lecture.
@@ -120,6 +132,13 @@ pub trait Player: Send + Sync + 'static {
     /// Gain du morceau en cours en dB (volume homogène). Sans effet si le
     /// volume homogène est coupé.
     fn set_gain(&self, _db: f32) -> impl Future<Output = Result<(), PlayerError>> + Send {
+        async { Ok(()) }
+    }
+    /// Sortie audio (`auto` = celle du système).
+    fn set_audio_device(
+        &self,
+        _name: &str,
+    ) -> impl Future<Output = Result<(), PlayerError>> + Send {
         async { Ok(()) }
     }
     fn subscribe(&self) -> broadcast::Receiver<PlayerEvent>;

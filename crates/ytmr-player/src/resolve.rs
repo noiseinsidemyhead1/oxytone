@@ -106,9 +106,36 @@ impl MediaSource {
 }
 
 /// Contrat du résolveur, pour pouvoir le remplacer par un faux dans les tests du core.
+/// Qualité demandée à yt-dlp (Paramètres).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum QualityPreference {
+    /// Le meilleur format disponible (Opus ~256 kb/s avec Premium).
+    #[default]
+    Max,
+    /// Jusqu'à ~160 kb/s.
+    High,
+    /// Jusqu'à ~70 kb/s : économise les données.
+    DataSaver,
+}
+
+impl QualityPreference {
+    /// Sélecteur de format yt-dlp.
+    pub fn format(self) -> &'static str {
+        match self {
+            Self::Max => "bestaudio/best",
+            Self::High => "bestaudio[abr<=160]/bestaudio/best",
+            Self::DataSaver => "bestaudio[abr<=70]/worstaudio/best",
+        }
+    }
+}
+
 pub trait Resolver: Send + Sync + 'static {
     /// Source déjà connue et encore valable, sans rien lancer.
     fn cached(&self, video_id: &str) -> Option<MediaSource>;
+    /// Qualité des prochaines résolutions (les adresses déjà connues sont oubliées).
+    fn set_quality(&self, _quality: QualityPreference) {}
+    /// Garde (`true`) ou non des morceaux sur le disque, à l'abri de la limite du cache.
+    fn keep_offline(&self, _video_ids: &[String], _keep: bool) {}
     /// Résout (ou relit le cache). Ne rend la main que quand l'URL est utilisable.
     fn resolve(
         &self,
@@ -152,6 +179,7 @@ pub struct YtDlpResolver {
     inflight: Mutex<HashMap<String, Shared>>,
     urgent: Semaphore,
     background: Semaphore,
+    quality: Mutex<QualityPreference>,
 }
 
 impl YtDlpResolver {
@@ -184,6 +212,7 @@ impl YtDlpResolver {
             inflight: Mutex::default(),
             urgent: Semaphore::new(MAX_URGENT),
             background: Semaphore::new(MAX_BACKGROUND),
+            quality: Mutex::new(QualityPreference::default()),
         }
     }
 
@@ -301,8 +330,9 @@ impl YtDlpResolver {
     ) -> Result<(MediaSource, Option<SystemTime>), PlayerError> {
         let started = std::time::Instant::now();
         let url = format!("https://music.youtube.com/watch?v={video_id}");
+        let format = lock(&self.quality).format();
         let value = worker
-            .extract(&url)
+            .extract(&url, format)
             .await
             .map_err(|e| PlayerError::Resolve(format!("{video_id} : {e}")))?;
         let info: YtDlpInfo = serde_json::from_value(value)
@@ -335,7 +365,7 @@ impl YtDlpResolver {
             "--no-warnings",
             "--no-playlist",
             "-f",
-            "bestaudio/best",
+            lock(&self.quality).format(),
         ])
         .args(&self.common_args);
         let client = match mode {
@@ -385,6 +415,46 @@ impl YtDlpResolver {
 }
 
 impl Resolver for YtDlpResolver {
+    fn set_quality(&self, quality: QualityPreference) {
+        let changed = std::mem::replace(&mut *lock(&self.quality), quality) != quality;
+        if changed {
+            // Les adresses déjà résolues sont d'une autre qualité.
+            let mut cache = lock(&self.cache);
+            cache.clear();
+            if let Some(path) = &self.cache_file {
+                save_cache(path, &cache);
+            }
+            tracing::info!(?quality, "qualité changée");
+        }
+    }
+
+    fn keep_offline(&self, video_ids: &[String], keep: bool) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        audio.keep(video_ids, keep);
+        if !keep {
+            return;
+        }
+        // Adresse déjà connue mais fichier pas encore gardé : on le télécharge.
+        let known: Vec<(String, MediaSource)> = {
+            let cache = lock(&self.cache);
+            video_ids
+                .iter()
+                .filter(|id| !audio.has(id))
+                .filter_map(|id| {
+                    cache
+                        .get(id)
+                        .filter(|s| s.is_fresh() && s.quality == StreamQuality::High)
+                        .map(|s| (id.clone(), s.clone()))
+                })
+                .collect()
+        };
+        for (id, source) in known {
+            audio.store(&id, &source);
+        }
+    }
+
     fn cached(&self, video_id: &str) -> Option<MediaSource> {
         // Déjà sur le disque : rien à résoudre, rien à télécharger.
         if let Some(local) = self.audio.as_ref().and_then(|a| a.get(video_id)) {
