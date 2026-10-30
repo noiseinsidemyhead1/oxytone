@@ -269,7 +269,7 @@ pub fn settings_page(app: &App) -> El<'_> {
     let normalize = row![
         column![
             text("Volume homogène").size(15).font(SEMIBOLD),
-            muted("Rapproche le volume des morceaux entre eux (utile en radio ou en aléatoire)."),
+            muted("Chaque morceau trop fort est baissé au niveau prévu par YouTube Music (un gain fixe par morceau, le son reste intact)."),
         ]
         .spacing(4)
         .width(Length::Fill),

@@ -13,7 +13,7 @@
 //! Radio : quand il reste moins de deux morceaux, des titres similaires au
 //! morceau courant sont ajoutés à la fin (si l'autoplay est actif).
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -37,7 +37,17 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// Source de morceaux similaires, pour l'autoplay.
 pub trait Radio: Send + Sync + 'static {
     fn radio(&self, video_id: &str) -> impl Future<Output = Result<Vec<Track>, BoxError>> + Send;
+    /// Gain (dB) qui ramène le morceau au niveau de YouTube (volume homogène).
+    fn loudness(
+        &self,
+        _video_id: &str,
+    ) -> impl Future<Output = Result<Option<f32>, BoxError>> + Send {
+        async { Ok(None) }
+    }
 }
+
+/// Gains de volume homogène gardés en mémoire.
+const GAINS_KEPT: usize = 600;
 
 /// En dessous, « précédent » revient au morceau d'avant ; au-dessus, au début du morceau.
 const RESTART_THRESHOLD: Duration = Duration::from_secs(3);
@@ -318,6 +328,9 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         radio_retries: 0,
         warming: HashSet::new(),
         warm_wanted: VecDeque::new(),
+        gains: HashMap::new(),
+        gains_pending: HashSet::new(),
+        applied_gain: None,
         resume_at,
         restored_volume,
         session_file: options.session_file,
@@ -358,6 +371,10 @@ enum TaskDone {
     Warmed {
         video_id: String,
     },
+    Gain {
+        video_id: String,
+        result: Result<Option<f32>, BoxError>,
+    },
 }
 
 struct Engine<P, R, C> {
@@ -393,6 +410,11 @@ struct Engine<P, R, C> {
     warming: HashSet<String>,
     /// Morceaux à résoudre d'avance, par ordre de priorité.
     warm_wanted: VecDeque<String>,
+    /// Gains de volume homogène par morceau (dB), et ceux en cours de demande.
+    gains: HashMap<String, f32>,
+    gains_pending: HashSet<String>,
+    /// Dernier gain envoyé au lecteur.
+    applied_gain: Option<f32>,
     /// Position à rejoindre au premier démarrage du morceau repris.
     resume_at: Option<(QueueId, Duration)>,
     /// Volume de la session précédente, à transmettre au lecteur au démarrage.
@@ -558,6 +580,12 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 let effects = effects.clamped();
                 self.player.set_effects(&effects).await?;
                 self.state.effects = effects;
+                // Nouvelle chaîne de filtres : le gain repart de zéro.
+                self.applied_gain = None;
+                if let Some(video_id) = self.queue.current().map(|e| e.track.video_id.clone()) {
+                    self.want_gain(&video_id);
+                }
+                self.apply_gain().await;
                 Ok(())
             }
             Command::Prefetch(video_id) => {
@@ -1018,6 +1046,20 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.warming.remove(&video_id);
                 self.pump_warm();
             }
+            TaskDone::Gain { video_id, result } => {
+                self.gains_pending.remove(&video_id);
+                match result {
+                    Ok(Some(gain)) => {
+                        if self.gains.len() >= GAINS_KEPT {
+                            self.gains.clear();
+                        }
+                        self.gains.insert(video_id, gain);
+                        self.apply_gain().await;
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::debug!(error = %e, "niveau sonore indisponible"),
+                }
+            }
             TaskDone::Radio { result } => {
                 self.radio_inflight = false;
                 match result {
@@ -1116,6 +1158,43 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         }
     }
 
+    /// Demande le gain d'un morceau (volume homogène actif seulement).
+    fn want_gain(&mut self, video_id: &str) {
+        if !self.state.effects.normalize
+            || self.gains.contains_key(video_id)
+            || !self.gains_pending.insert(video_id.to_owned())
+        {
+            return;
+        }
+        let radio = Arc::clone(&self.radio);
+        let video_id = video_id.to_owned();
+        self.tasks.spawn(async move {
+            let result = radio.loudness(&video_id).await;
+            TaskDone::Gain { video_id, result }
+        });
+    }
+
+    /// Applique le gain du morceau en cours (0 dB tant qu'il n'est pas connu,
+    /// pour ne pas garder celui d'un morceau précédent plus fort).
+    async fn apply_gain(&mut self) {
+        if !self.state.effects.normalize {
+            return;
+        }
+        let gain = self
+            .queue
+            .current()
+            .and_then(|e| self.gains.get(&e.track.video_id))
+            .copied()
+            .unwrap_or(0.0);
+        if self.applied_gain == Some(gain) {
+            return;
+        }
+        match self.player.set_gain(gain).await {
+            Ok(()) => self.applied_gain = Some(gain),
+            Err(e) => tracing::debug!(error = %e, "gain du volume homogène"),
+        }
+    }
+
     async fn on_started(&mut self, entry: EntryId) {
         if let Some(pending) = self.pending.take_if(|p| p.entry == entry) {
             // Enchaînement automatique par le lecteur.
@@ -1131,6 +1210,18 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         } else if self.current_entry != Some(entry) {
             return;
         }
+        // Volume homogène : gain du morceau qui commence, et du suivant d'avance.
+        let wanted: Vec<String> = self
+            .queue
+            .current()
+            .into_iter()
+            .chain(self.queue.peek_auto_next())
+            .map(|e| e.track.video_id.clone())
+            .collect();
+        for video_id in wanted {
+            self.want_gain(&video_id);
+        }
+        self.apply_gain().await;
         // Retire les entrées terminées de la playlist du lecteur.
         if let Err(e) = self.player.clear_pending().await {
             tracing::warn!(error = %e, "nettoyage de la playlist du lecteur");

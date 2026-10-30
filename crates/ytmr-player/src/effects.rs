@@ -10,12 +10,16 @@ use serde::{Deserialize, Serialize};
 pub const EQ_BANDS: [u32; 10] = [31, 62, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
 /// Gain maximal d'une bande, en dB (dans les deux sens).
 pub const EQ_MAX_DB: i8 = 12;
+/// Étiquette du filtre de gain par morceau (volume homogène), piloté par
+/// `af-command` à chaque nouveau morceau.
+pub const GAIN_LABEL: &str = "ytmrgain";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AudioEffects {
     /// Gain de chaque bande de [`EQ_BANDS`], en dB (−12 à +12).
     pub eq: [i8; 10],
-    /// Rapproche le volume des morceaux entre eux (filtre `dynaudnorm`).
+    /// Volume homogène : chaque morceau trop fort est baissé au niveau prévu
+    /// par YouTube (gain fixe par morceau, comme YouTube Music).
     pub normalize: bool,
 }
 
@@ -42,14 +46,15 @@ impl AudioEffects {
                 graph.push(format!("equalizer=f={freq}:t=o:w=1:g={gain}"));
             }
         }
+        let mut chain: Vec<String> = Vec::new();
+        if !graph.is_empty() {
+            chain.push(format!("lavfi=[{}]", graph.join(",")));
+        }
         if effects.normalize {
-            graph.push("dynaudnorm=f=250:g=15:p=0.9".to_owned());
+            // Gain du morceau en cours, réglé par le moteur (1 = inchangé).
+            chain.push(format!("@{GAIN_LABEL}:lavfi=[volume=1]"));
         }
-        if graph.is_empty() {
-            String::new()
-        } else {
-            format!("lavfi=[{}]", graph.join(","))
-        }
+        chain.join(",")
     }
 }
 
@@ -80,7 +85,7 @@ mod tests {
         fx.normalize = true;
         assert_eq!(
             fx.to_mpv_af(),
-            "lavfi=[volume=-4dB,equalizer=f=31:t=o:w=1:g=4,equalizer=f=16000:t=o:w=1:g=-12,dynaudnorm=f=250:g=15:p=0.9]"
+            "lavfi=[volume=-4dB,equalizer=f=31:t=o:w=1:g=4,equalizer=f=16000:t=o:w=1:g=-12],@ytmrgain:lavfi=[volume=1]"
         );
     }
 }

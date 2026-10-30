@@ -117,6 +117,11 @@ pub trait Player: Send + Sync + 'static {
         &self,
         effects: &AudioEffects,
     ) -> impl Future<Output = Result<(), PlayerError>> + Send;
+    /// Gain du morceau en cours en dB (volume homogène). Sans effet si le
+    /// volume homogène est coupé.
+    fn set_gain(&self, _db: f32) -> impl Future<Output = Result<(), PlayerError>> + Send {
+        async { Ok(()) }
+    }
     fn subscribe(&self) -> broadcast::Receiver<PlayerEvent>;
     /// Arrête le moteur proprement. Plus aucune commande n'est possible ensuite.
     fn shutdown(&self) -> impl Future<Output = ()> + Send;

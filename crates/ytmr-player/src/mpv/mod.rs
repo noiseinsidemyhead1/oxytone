@@ -182,6 +182,22 @@ impl Player for MpvPlayer {
         self.set("volume", json!(check_volume(volume)?)).await
     }
 
+    async fn set_gain(&self, db: f32) -> Result<(), PlayerError> {
+        let linear = format!("{:.4}", 10f32.powf(db.clamp(-30.0, 6.0) / 20.0));
+        // Cible « volume » (le filtre dans le graphe) : sans elle, mpv répond
+        // « error running command » (vérifié avec mpv 0.41).
+        self.ipc
+            .command(json!([
+                "af-command",
+                crate::effects::GAIN_LABEL,
+                "volume",
+                linear,
+                "volume"
+            ]))
+            .await
+            .map(drop)
+    }
+
     async fn set_effects(&self, effects: &crate::AudioEffects) -> Result<(), PlayerError> {
         self.set("af", json!(effects.to_mpv_af())).await
     }

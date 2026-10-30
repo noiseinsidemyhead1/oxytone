@@ -127,6 +127,47 @@ impl Catalog {
         self.yt.get_or_try_init(connect).await
     }
 
+    /// Gain (dB, ≤ 0) qui ramène le morceau au niveau prévu par YouTube :
+    /// réponse « player » du client iOS, où seules les métadonnées de son sont
+    /// lues (`playerConfig.audioConfig`, aucune adresse de flux). Les clients
+    /// web (WEB, WEB_REMIX, MWEB) répondent « UNPLAYABLE » sans ces données
+    /// (constaté le 2026-10-30) ; iOS et Android répondent. Comme YouTube
+    /// Music, on ne fait que baisser les morceaux trop forts.
+    pub async fn loudness(&self, video_id: &str) -> Result<Option<f32>, CatalogError> {
+        let body = serde_json::json!({
+            "context": {"client": {
+                "clientName": "IOS",
+                "clientVersion": "20.10.4",
+                "deviceModel": "iPhone16,2",
+                "hl": "fr"
+            }},
+            "videoId": video_id,
+        });
+        let text = self
+            .http
+            .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+            .header(reqwest::header::COOKIE, CONSENT_COOKIE)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body.to_string())
+            .timeout(std::time::Duration::from_secs(8))
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        let reply: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        if cfg!(test) {
+            println!(
+                "statut : {:?} / {}",
+                reply.pointer("/playabilityStatus/status"),
+                &text[..text.len().min(300)]
+            );
+        }
+        Ok(gain_from_audio_config(
+            reply.pointer("/playerConfig/audioConfig"),
+        ))
+    }
+
     /// Suggestions pendant la frappe (complétions proposées par YouTube Music).
     pub async fn suggestions(&self, query: &str) -> Result<Vec<String>, CatalogError> {
         let query = normalize_query(query);
@@ -265,6 +306,19 @@ impl Catalog {
     }
 }
 
+/// `trackAbsoluteLoudnessLkfs` et `loudnessTargetLkfs` (-14 si absente ;
+/// sinon `loudnessDb`, l'écart déjà calculé) → gain à appliquer, jamais positif.
+fn gain_from_audio_config(config: Option<&serde_json::Value>) -> Option<f32> {
+    const DEFAULT_TARGET: f64 = -14.0;
+    let config = config?;
+    let number = |key: &str| config.get(key).and_then(serde_json::Value::as_f64);
+    let excess = match number("trackAbsoluteLoudnessLkfs") {
+        Some(track) => track - number("loudnessTargetLkfs").unwrap_or(DEFAULT_TARGET),
+        None => number("loudnessDb")?,
+    };
+    Some((-excess).min(0.0) as f32)
+}
+
 impl Default for Catalog {
     fn default() -> Self {
         Self::new()
@@ -299,6 +353,10 @@ async fn connect() -> Result<YtMusic<NoAuthToken>, CatalogError> {
 impl Radio for Catalog {
     async fn radio(&self, video_id: &str) -> Result<Vec<Track>, BoxError> {
         Ok(Catalog::radio(self, video_id).await?)
+    }
+
+    async fn loudness(&self, video_id: &str) -> Result<Option<f32>, BoxError> {
+        Ok(Catalog::loudness(self, video_id).await?)
     }
 }
 
@@ -532,5 +590,31 @@ mod artist_raw_tests {
             a.thumbnail_url.is_some()
         );
         assert!(!a.songs.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod loudness_tests {
+    use serde_json::json;
+
+    #[test]
+    fn only_lowers_loud_tracks() {
+        let loud = json!({"trackAbsoluteLoudnessLkfs": -10.5, "loudnessTargetLkfs": -14});
+        assert_eq!(super::gain_from_audio_config(Some(&loud)), Some(-3.5));
+        let quiet = json!({"trackAbsoluteLoudnessLkfs": -20.0, "loudnessTargetLkfs": -14});
+        assert_eq!(super::gain_from_audio_config(Some(&quiet)), Some(0.0));
+        let no_target = json!({"trackAbsoluteLoudnessLkfs": -10.0});
+        assert_eq!(super::gain_from_audio_config(Some(&no_target)), Some(-4.0));
+        let old = json!({"loudnessDb": 2.0});
+        assert_eq!(super::gain_from_audio_config(Some(&old)), Some(-2.0));
+        assert_eq!(super::gain_from_audio_config(None), None);
+    }
+
+    #[tokio::test]
+    #[ignore = "réseau"]
+    async fn reads_a_real_track_loudness() {
+        let gain = crate::Catalog::new().loudness("5NV6Rdv1a3I").await.unwrap();
+        println!("gain : {gain:?}");
+        assert!(gain.is_some());
     }
 }
