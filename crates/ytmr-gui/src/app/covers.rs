@@ -94,13 +94,19 @@ impl App {
         if let Route::Playlist(_) = self.route
             && let Some((_, Load::Ready(playlist))) = &self.lib.playlist
         {
+            // Lignes visibles dans l'ordre affiché (tri, recherche).
+            let order = crate::library::view_order(self, playlist);
             let (first, last) = crate::views::visible_range(
                 self.page_view,
                 crate::views::PLAYLIST_LIST_TOP,
                 crate::views::ROW_H,
-                playlist.tracks.len(),
+                order.len(),
             );
-            tracks.extend(playlist.tracks[first..last].iter().cloned());
+            tracks.extend(
+                order[first.min(order.len())..last.min(order.len())]
+                    .iter()
+                    .map(|&i| playlist.tracks[i].clone()),
+            );
         }
         if self.show_queue {
             let (first, last) = crate::views::visible_range(

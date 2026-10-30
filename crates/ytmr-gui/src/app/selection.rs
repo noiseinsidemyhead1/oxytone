@@ -56,8 +56,12 @@ impl App {
     /// Morceaux de la liste affichée (pour la sélection et le glisser-déposer).
     pub(crate) fn current_list(&self) -> Vec<&Track> {
         match &self.route {
+            // Dans l'ordre affiché (tri et recherche), comme les rangs des lignes.
             Route::Playlist(_) => match &self.lib.playlist {
-                Some((_, Load::Ready(p))) => p.tracks.iter().collect(),
+                Some((_, Load::Ready(p))) => crate::library::view_order(self, p)
+                    .into_iter()
+                    .map(|i| &p.tracks[i])
+                    .collect(),
                 _ => Vec::new(),
             },
             Route::Album(_) => match &self.album {

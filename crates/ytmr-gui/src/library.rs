@@ -57,6 +57,18 @@ pub enum AccountView {
     Disconnected,
 }
 
+/// Tri d'une playlist ouverte (affichage et lecture).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlaylistSort {
+    /// Ordre de la playlist (date d'ajout).
+    #[default]
+    Original,
+    Title,
+    Artist,
+    Album,
+    Duration,
+}
+
 /// Fenêtres par-dessus la page.
 #[derive(Debug, Clone)]
 pub enum Overlay {
@@ -103,6 +115,9 @@ pub struct LibraryState {
     home_at: Option<Instant>,
     /// Recherche dans la playlist ouverte.
     pub filter: String,
+    /// Tri de la playlist ouverte ; `sort_reversed` : second clic sur le même tri.
+    pub sort: PlaylistSort,
+    pub sort_reversed: bool,
     /// Playlists créées pendant cette session : YouTube met quelques secondes
     /// à les rendre lisibles, on les affiche vides en attendant.
     created: HashSet<String>,
@@ -168,6 +183,7 @@ pub enum Lib {
     /// Vérification différée de la liste après une création.
     ReloadPlaylists,
     FilterInput(String),
+    Sort(PlaylistSort),
     RenameStart,
     RenameInput(String),
     RenameCommit,
@@ -695,14 +711,24 @@ impl App {
             },
             Lib::PlayAt(index) => match &self.lib.playlist {
                 Some((_, Load::Ready(playlist))) if index < playlist.tracks.len() => {
-                    let tracks = playlist.tracks.clone();
-                    self.send(Command::PlayTracks {
-                        tracks,
-                        start: index,
-                    })
+                    // Lecture dans l'ordre affiché (tri), toute la playlist.
+                    let order = sorted_order(playlist, self.lib.sort, self.lib.sort_reversed);
+                    let start = order.iter().position(|&i| i == index).unwrap_or(0);
+                    let tracks = order.iter().map(|&i| playlist.tracks[i].clone()).collect();
+                    self.send(Command::PlayTracks { tracks, start })
                 }
                 _ => Task::none(),
             },
+            Lib::Sort(sort) => {
+                if self.lib.sort == sort && sort != PlaylistSort::Original {
+                    self.lib.sort_reversed = !self.lib.sort_reversed;
+                } else {
+                    self.lib.sort = sort;
+                    self.lib.sort_reversed = false;
+                }
+                // D'autres lignes arrivent à l'écran : leurs pochettes.
+                self.request_visible_covers()
+            }
             Lib::Refresh => match &self.lib.playlist {
                 Some((id, _)) => {
                     let id = id.clone();
@@ -1758,24 +1784,7 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     // qu'un numéro : copier la playlist dans chaque ligne coûtait ~1,4 million
     // de copies de morceaux par image pour 1 189 titres.
     // Recherche : indices des morceaux correspondants (titre, artiste, album).
-    let needle = fold(app.lib.filter.trim());
-    let shown: Vec<usize> = if needle.is_empty() {
-        (0..playlist.tracks.len()).collect()
-    } else {
-        playlist
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| {
-                fold(&t.title).contains(&needle)
-                    || fold(&t.artist).contains(&needle)
-                    || t.album
-                        .as_deref()
-                        .is_some_and(|a| fold(a).contains(&needle))
-            })
-            .map(|(i, _)| i)
-            .collect()
-    };
+    let shown = view_order(app, playlist);
     let range = crate::views::visible_range(
         app.page_view,
         crate::views::PLAYLIST_LIST_TOP,
@@ -1801,7 +1810,8 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             } else {
                 None
             };
-            track_row(app, track, i, None, Message::Lib(Lib::PlayAt(i)), remove)
+            // `row` : rang à l'écran (sélection avec Maj) ; `i` : place dans la playlist.
+            track_row(app, track, row, None, Message::Lib(Lib::PlayAt(i)), remove)
         })
     };
     column![
@@ -1810,14 +1820,19 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             .height(Length::Fixed(crate::views::PLAYLIST_HEADER_H))
             .clip(true),
         container(
-            text_input(
-                "Rechercher dans la playlist (titre, artiste, album)",
-                &app.lib.filter
-            )
-            .on_input(|t| Message::Lib(Lib::FilterInput(t)))
-            .size(14)
-            .padding(Padding::from([9, 14]))
-            .style(style::search_input),
+            row![
+                text_input(
+                    "Rechercher dans la playlist (titre, artiste, album)",
+                    &app.lib.filter
+                )
+                .on_input(|t| Message::Lib(Lib::FilterInput(t)))
+                .size(14)
+                .padding(Padding::from([9, 14]))
+                .style(style::search_input),
+                sort_pills(app),
+            ]
+            .spacing(14)
+            .align_y(Alignment::Center),
         )
         .height(Length::Fixed(crate::views::PLAYLIST_FILTER_H))
         .padding(Padding {
@@ -1835,6 +1850,83 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             left: 28.0,
         }),
     ]
+    .into()
+}
+
+/// Indices de la playlist dans l'ordre choisi (toute la playlist).
+pub(crate) fn sorted_order(playlist: &Playlist, sort: PlaylistSort, reversed: bool) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..playlist.tracks.len()).collect();
+    let tracks = &playlist.tracks;
+    match sort {
+        PlaylistSort::Original => {}
+        PlaylistSort::Title => order.sort_by_cached_key(|&i| fold(&tracks[i].title)),
+        PlaylistSort::Artist => {
+            order.sort_by_cached_key(|&i| (fold(&tracks[i].artist), fold(&tracks[i].title)))
+        }
+        PlaylistSort::Album => order.sort_by_cached_key(|&i| {
+            (
+                fold(tracks[i].album.as_deref().unwrap_or("")),
+                fold(&tracks[i].title),
+            )
+        }),
+        PlaylistSort::Duration => order.sort_by_key(|&i| tracks[i].duration),
+    }
+    if reversed {
+        order.reverse();
+    }
+    order
+}
+
+/// Ordre affiché : trié, puis filtré par la recherche dans la playlist.
+pub(crate) fn view_order(app: &App, playlist: &Playlist) -> Vec<usize> {
+    let order = sorted_order(playlist, app.lib.sort, app.lib.sort_reversed);
+    let needle = fold(app.lib.filter.trim());
+    if needle.is_empty() {
+        return order;
+    }
+    order
+        .into_iter()
+        .filter(|&i| {
+            let t = &playlist.tracks[i];
+            fold(&t.title).contains(&needle)
+                || fold(&t.artist).contains(&needle)
+                || t.album
+                    .as_deref()
+                    .is_some_and(|a| fold(a).contains(&needle))
+        })
+        .collect()
+}
+
+/// Boutons de tri à côté de la recherche (second clic : ordre inverse).
+fn sort_pills(app: &App) -> El<'_> {
+    let accent = app.accent;
+    let pill = |label: &'static str, sort: PlaylistSort| -> El<'_> {
+        let active = app.lib.sort == sort;
+        let arrow = match (active, app.lib.sort_reversed) {
+            (true, false) if sort != PlaylistSort::Original => " ↑",
+            (true, true) => " ↓",
+            _ => "",
+        };
+        button(text(format!("{label}{arrow}")).size(12).font(SEMIBOLD))
+            .padding(Padding::from([6, 11]))
+            .style(move |theme, status| {
+                if active {
+                    style::pill(accent)(theme, status)
+                } else {
+                    style::pill_ghost(theme, status)
+                }
+            })
+            .on_press(Message::Lib(Lib::Sort(sort)))
+            .into()
+    };
+    row![
+        pill("Ordre", PlaylistSort::Original),
+        pill("Titre", PlaylistSort::Title),
+        pill("Artiste", PlaylistSort::Artist),
+        pill("Album", PlaylistSort::Album),
+        pill("Durée", PlaylistSort::Duration),
+    ]
+    .spacing(4)
     .into()
 }
 
