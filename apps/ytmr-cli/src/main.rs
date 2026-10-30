@@ -155,6 +155,7 @@ async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result
             autoplay,
             // La CLI est un outil de test : elle ne touche pas à la session de l'appli.
             session_file: None,
+            stats_file: None,
         },
     );
     println!("{HELP}");

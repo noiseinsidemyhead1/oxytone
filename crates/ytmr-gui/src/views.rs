@@ -199,6 +199,7 @@ fn main_layout(app: &App) -> El<'_> {
         Route::Playlist(_) => library::playlist_page(app),
         Route::Settings => crate::settings::settings_page(app),
         Route::History => library::history_page(app),
+        Route::Stats => crate::stats_page::stats_page(app),
     };
     // La barre de chargement passe par-dessus la page : elle ne la décale pas
     // (sinon une bande noire de 3 px restait au-dessus du dégradé).
@@ -356,6 +357,7 @@ fn sidebar(app: &App) -> El<'_> {
         column![
             nav("Accueil", Icon::Home, Route::Home),
             nav("Bibliothèque", Icon::Library, Route::Library),
+            nav("Statistiques", Icon::Chart, Route::Stats),
             nav("Paramètres", Icon::Settings, Route::Settings),
         ]
         .spacing(4),
@@ -1175,14 +1177,22 @@ fn local_hour() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    (secs.saturating_add_signed(utc_offset_secs()) / 3600) % 24
+}
+
+/// Décalage de l'heure locale (Paris : +1 h, +2 h l'été ; approximation au jour près).
+pub(crate) fn utc_offset_secs() -> i64 {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let day_of_year = (secs / 86_400) % 365;
-    // Heure d'été européenne : fin mars → fin octobre (approximation au jour près).
-    let offset = if (85..300).contains(&day_of_year) {
-        2
+    // Heure d'été européenne : fin mars → fin octobre.
+    if (85..300).contains(&day_of_year) {
+        7200
     } else {
-        1
-    };
-    (secs / 3600 + offset) % 24
+        3600
+    }
 }
 
 fn search_page(app: &App) -> El<'_> {

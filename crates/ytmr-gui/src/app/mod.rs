@@ -126,6 +126,8 @@ pub enum Route {
     Settings,
     /// Historique d'écoute complet.
     History,
+    /// Statistiques d'écoute (calculées en local).
+    Stats,
 }
 
 #[derive(Debug, Clone)]
@@ -269,6 +271,7 @@ pub enum Message {
     MediaControls(Result<(), String>),
     Lib(crate::library::Lib),
     Settings(crate::settings::Settings),
+    Stats(crate::stats_page::Stats),
     Coll(crate::collection::Coll),
     Window(crate::chrome::Win),
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
@@ -443,6 +446,7 @@ pub struct App {
     scrolling: Scrolling,
     pub lib: crate::library::LibraryState,
     pub settings: crate::settings::SettingsState,
+    pub stats: crate::stats_page::StatsState,
     pub coll: crate::collection::CollectionState,
     pub page_view: View,
     pub queue_view: View,
@@ -539,6 +543,7 @@ impl App {
             scrolling: Scrolling::default(),
             lib: crate::library::LibraryState::default(),
             settings: crate::settings::SettingsState::default(),
+            stats: crate::stats_page::StatsState::default(),
             coll: crate::collection::CollectionState::default(),
             page_view: View::default(),
             queue_view: View::default(),
@@ -585,6 +590,7 @@ impl App {
         app.load_ui();
         app.lib.cache_dir = Some(config.1.cache_dir.join("library"));
         app.settings.audio_dir = Some(config.1.cache_dir.join("audio"));
+        app.stats.file = Some(config.1.data_dir.join("plays.jsonl"));
         (app, start)
     }
 

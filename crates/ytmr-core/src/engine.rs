@@ -179,6 +179,8 @@ pub struct CoreOptions {
     pub autoplay: bool,
     /// Fichier où garder la file et la position entre deux lancements.
     pub session_file: Option<PathBuf>,
+    /// Journal des écoutes (statistiques), `None` = rien n'est noté.
+    pub stats_file: Option<PathBuf>,
 }
 
 /// File, position et réglages sauvegardés à la fermeture, repris au lancement suivant.
@@ -358,6 +360,8 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         resume_at,
         restored_volume,
         session_file: options.session_file,
+        stats_file: options.stats_file,
+        play_logged: None,
         consecutive_errors: 0,
         player_alive: true,
     };
@@ -446,6 +450,9 @@ struct Engine<P, R, C> {
     /// Volume de la session précédente, à transmettre au lecteur au démarrage.
     restored_volume: Option<u8>,
     session_file: Option<PathBuf>,
+    stats_file: Option<PathBuf>,
+    /// Entrée de file dont l'écoute a déjà été notée.
+    play_logged: Option<QueueId>,
     consecutive_errors: u32,
     player_alive: bool,
 }
@@ -1201,6 +1208,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             PlayerEvent::Position(position) => {
                 if self.current_entry.is_some() {
                     self.state.position = position;
+                    self.log_play();
                 }
             }
             PlayerEvent::Duration(duration) => {
@@ -1220,6 +1228,26 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.state.status = Status::Idle;
                 self.report("le lecteur mpv s'est arrêté".into());
             }
+        }
+    }
+
+    /// Note l'écoute du morceau en cours, une fois, après le seuil d'écoute.
+    fn log_play(&mut self) {
+        let Some(path) = &self.stats_file else {
+            return;
+        };
+        let Some(entry) = self.queue.current() else {
+            return;
+        };
+        if self.play_logged == Some(entry.id)
+            || self.state.position < crate::stats::threshold(self.state.duration)
+        {
+            return;
+        }
+        self.play_logged = Some(entry.id);
+        let play = crate::stats::Play::now(entry.track.clone());
+        if let Err(e) = crate::stats::append(path, &play) {
+            tracing::debug!(error = %e, "écoute non notée");
         }
     }
 
@@ -1583,6 +1611,7 @@ mod tests {
                 volume: 50,
                 autoplay,
                 session_file,
+                stats_file: None,
             },
             Queue::with_rng(fastrand::Rng::with_seed(7)),
         );

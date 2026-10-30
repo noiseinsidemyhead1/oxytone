@@ -135,6 +135,7 @@ impl App {
             Route::NowPlaying => self.want_lyrics(),
             Route::Settings => self.open_settings(),
             Route::History => self.load_history_page(),
+            Route::Stats => self.load_stats(),
         }
     }
 

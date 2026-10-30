@@ -16,6 +16,7 @@ mod icons;
 mod library;
 mod settings;
 mod smooth;
+mod stats_page;
 mod style;
 mod views;
 

@@ -100,6 +100,7 @@ impl Backend {
                 volume: config.player.volume,
                 autoplay: config.playback.autoplay,
                 session_file: Some(paths.data_dir.join("session.json")),
+                stats_file: Some(paths.data_dir.join("plays.jsonl")),
             },
         );
 
