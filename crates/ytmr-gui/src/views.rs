@@ -14,7 +14,7 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_COVER, NP_GAP,
+    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP, NP_LYRIC_SIZE,
     NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, RightPanel,
     Route, SEARCH_INPUT, THUMB, View,
 };
@@ -1029,13 +1029,14 @@ fn now_playing(app: &App) -> El<'_> {
     };
     let track = &entry.track;
     let id = app.track_cover(track);
+    let side = app.np_cover();
     let big =
-        container(cover(app.cover(id.as_deref(), HERO), NP_COVER, 12.0)).style(style::cover_frame);
+        container(cover(app.cover(id.as_deref(), HERO), side, 14.0)).style(style::cover_frame);
     let mut info = column![
         text(ellipsize(&track.title, 60).into_owned())
-            .size(30)
+            .size(34)
             .font(BOLD),
-        button(text(&track.artist).size(17).color(style::TEXT_DIM))
+        button(text(&track.artist).size(19).color(style::TEXT_DIM))
             .padding(0)
             .style(style::link)
             .on_press(Message::OpenArtist(
@@ -1052,19 +1053,25 @@ fn now_playing(app: &App) -> El<'_> {
                 .on_press(Message::Navigate(Route::Album(album_id.clone()))),
         );
     }
-    let left = column![big, info]
-        .spacing(22)
-        .width(Length::Fixed(NP_COVER));
+    // Pochette et titre centrés en hauteur à gauche, paroles en grand à droite ;
+    // l'ensemble est centré dans la fenêtre (rien ne reste collé à gauche).
+    let left = container(column![big, info].spacing(24).width(Length::Fixed(side)))
+        .height(Length::Fill)
+        .align_y(Alignment::Center);
     let lyrics = container(lyrics_body(
         app,
         NP_LYRICS_SCROLL,
         app.np_lyrics_text_width(),
         app.np_lyrics_view.height,
         false,
+        NP_LYRIC_SIZE,
     ))
-    .width(Length::Fill)
+    .width(Length::Fixed(app.np_lyrics_text_width() + 4.0))
     .height(Length::Fill);
-    let main = row![left, lyrics].spacing(NP_GAP).height(Length::Fill);
+    let main = container(row![left, lyrics].spacing(NP_GAP).height(Length::Fill))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .align_x(Alignment::Center);
 
     // Mode focus : rien n'apparaît tout seul ; un clic n'importe où affiche
     // ou masque les contrôles (Échap pour revenir). La marge du bas laisse la
@@ -1116,6 +1123,7 @@ fn lyrics_side(app: &App) -> El<'_> {
         crate::app::lyrics_text_width(app.queue_width),
         app.lyrics_view.height,
         true,
+        LYRIC_SIZE,
     );
     let footer = text(
         lyrics
@@ -1156,6 +1164,7 @@ fn lyrics_body<'a>(
     text_width: f32,
     view_height: f32,
     interactive: bool,
+    size: f32,
 ) -> El<'a> {
     use ytmr_catalog::lyrics::LyricsBody;
     let current = app.state.current.as_ref();
@@ -1171,7 +1180,11 @@ fn lyrics_body<'a>(
     match (current, lyrics) {
         (None, _) => message("Rien en lecture."),
         (Some(e), None) => match app.lyrics.get(&e.track.video_id) {
-            None | Some(Load::Loading) => message("Chargement…"),
+            None | Some(Load::Loading) if !app.lib.offline_mode => message("Chargement…"),
+            None | Some(Load::Loading) => message("Paroles indisponibles hors ligne."),
+            Some(Load::Failed(_)) if app.lib.offline_mode => {
+                message("Paroles indisponibles hors ligne.")
+            }
             _ => message("Paroles indisponibles pour ce titre."),
         },
         (Some(_), Some(lyrics)) => match &lyrics.body {
@@ -1181,6 +1194,7 @@ fn lyrics_body<'a>(
                 let heights = crate::app::lyric_heights(
                     lines.iter().map(|l| l.text.chars().count()),
                     text_width,
+                    size,
                 );
                 for ((i, line), height) in lines.iter().enumerate().zip(heights) {
                     // Opacité de repos : pleine (chantée), 0,5 (à venir), 0,3 (passée).
@@ -1194,7 +1208,7 @@ fn lyrics_body<'a>(
                     } else {
                         line.text.as_str()
                     };
-                    let words = container(text(words).size(LYRIC_SIZE).font(BOLD))
+                    let words = container(text(words).size(size).font(BOLD))
                         .height(Length::Fixed(height))
                         .align_y(Alignment::Center);
                     if !interactive {

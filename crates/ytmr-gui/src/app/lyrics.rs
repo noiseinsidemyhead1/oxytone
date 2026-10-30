@@ -9,12 +9,14 @@ use super::*;
 /// ligne longue passe sur plusieurs lignes de texte. Estimation volontairement
 /// large (0,62 × la taille par caractère, gras) : un peu d'air plutôt qu'un
 /// chevauchement. Sert à l'affichage et au défilement (même calcul).
-pub fn lyric_heights(texts: impl Iterator<Item = usize>, width: f32) -> Vec<f32> {
-    let per_line = ((width / (LYRIC_SIZE * 0.62)).floor() as usize).max(8);
+pub fn lyric_heights(texts: impl Iterator<Item = usize>, width: f32, size: f32) -> Vec<f32> {
+    let per_line = ((width / (size * 0.62)).floor() as usize).max(8);
+    // Hauteur d'une ligne de texte et écart entre deux lignes, à l'échelle.
+    let (text_h, gap) = (size * 1.35, size * 0.8);
     texts
         .map(|chars| {
             let rows = chars.max(1).div_ceil(per_line).min(5) as f32;
-            rows * LYRIC_TEXT_H + LYRIC_GAP
+            rows * text_h + gap
         })
         .collect()
 }
@@ -31,17 +33,24 @@ impl App {
 
     /// Largeur du texte des paroles dans la vue « En cours ».
     pub(crate) fn np_lyrics_text_width(&self) -> f32 {
-        (self.window_width - 2.0 * NP_PAD - NP_COVER - NP_GAP - 4.0).max(200.0)
+        (self.window_width - 2.0 * NP_PAD - self.np_cover() - NP_GAP - 4.0)
+            .clamp(200.0, NP_LYRICS_MAX)
+    }
+
+    /// Côté de la pochette de la vue « En cours » : suit la hauteur de la fenêtre.
+    pub(crate) fn np_cover(&self) -> f32 {
+        (self.window_size.height * 0.52).clamp(280.0, 620.0)
     }
 
     /// Où les paroles sont affichées : (défilement, largeur du texte, hauteur visible).
-    fn lyrics_surfaces(&self) -> Vec<(&'static str, f32, f32)> {
+    fn lyrics_surfaces(&self) -> Vec<(&'static str, f32, f32, f32)> {
         let mut out = Vec::new();
         if self.lyrics_shown() {
             out.push((
                 LYRICS_SCROLL,
                 lyrics_text_width(self.queue_width),
                 self.lyrics_view.height,
+                LYRIC_SIZE,
             ));
         }
         if self.route == Route::NowPlaying {
@@ -49,6 +58,7 @@ impl App {
                 NP_LYRICS_SCROLL,
                 self.np_lyrics_text_width(),
                 self.np_lyrics_view.height,
+                NP_LYRIC_SIZE,
             ));
         }
         out
@@ -80,8 +90,8 @@ impl App {
             return;
         };
         let lengths: Vec<usize> = lines.iter().map(|l| l.text.chars().count()).collect();
-        for (scroll, width, view_height) in surfaces {
-            let heights = lyric_heights(lengths.iter().copied(), width);
+        for (scroll, width, view_height, size) in surfaces {
+            let heights = lyric_heights(lengths.iter().copied(), width, size);
             let index = line.unwrap_or(0).min(heights.len().saturating_sub(1));
             let above: f32 = heights[..index].iter().sum();
             let middle = heights.get(index).copied().unwrap_or(0.0) / 2.0;
@@ -102,6 +112,12 @@ impl App {
             return Task::none();
         }
         let Some(catalog) = self.catalog() else {
+            if self.lib.offline_mode {
+                self.lyrics.insert(
+                    track.video_id,
+                    Load::Failed("indisponibles hors ligne".into()),
+                );
+            }
             return Task::none();
         };
         if self.lyrics.len() >= LYRICS_KEPT {

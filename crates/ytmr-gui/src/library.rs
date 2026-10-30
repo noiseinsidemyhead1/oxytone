@@ -5,7 +5,7 @@
 //! puis sont envoyés à YouTube ; en cas de refus, l'affichage est corrigé et un
 //! message explique pourquoi.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -101,8 +101,10 @@ pub struct LibraryState {
     pub profile: Option<Profile>,
     /// Playlists gardées hors ligne (`offline.json`).
     pub offline_playlists: HashSet<String>,
-    /// Morceaux téléchargés un par un (`downloads.json`), playlist « Téléchargés ».
+    /// Morceaux téléchargés un par un (`downloads.json`).
     pub downloads: Vec<Track>,
+    /// Morceaux des playlists gardées hors ligne (playlist « Téléchargés »).
+    pub offline_lists: HashMap<String, Vec<Track>>,
     /// Mode hors ligne (Paramètres) : aucun accès au réseau, seulement ce qui
     /// est téléchargé.
     pub offline_mode: bool,
@@ -158,16 +160,32 @@ impl LibraryState {
         !track.unavailable && (!self.offline_mode || self.offline_ids.contains(&track.video_id))
     }
 
-    /// Playlist « Téléchargés » : les morceaux téléchargés un par un.
+    /// Tout ce qui est sur l'appareil : morceaux téléchargés un par un, puis
+    /// ceux des playlists téléchargées (sans doublon, fichiers présents seulement).
+    pub fn downloaded_tracks(&self) -> Vec<Track> {
+        let mut seen = HashSet::new();
+        let mut lists: Vec<(&String, &Vec<Track>)> = self.offline_lists.iter().collect();
+        lists.sort_by(|a, b| a.0.cmp(b.0));
+        self.downloads
+            .iter()
+            .chain(lists.into_iter().flat_map(|(_, tracks)| tracks.iter()))
+            .filter(|t| self.offline_ids.contains(&t.video_id))
+            .filter(|t| seen.insert(t.video_id.clone()))
+            .cloned()
+            .collect()
+    }
+
+    /// Playlist « Téléchargés ».
     pub fn downloads_playlist(&self) -> Playlist {
+        let tracks = self.downloaded_tracks();
         Playlist {
             id: DOWNLOADS_ID.to_owned(),
             title: "Téléchargés".to_owned(),
             author: "Sur cet appareil".to_owned(),
             description: None,
             duration_text: String::new(),
-            thumbnail_url: self.downloads.first().and_then(|t| t.thumbnail_url.clone()),
-            tracks: self.downloads.clone(),
+            thumbnail_url: tracks.first().and_then(|t| t.thumbnail_url.clone()),
+            tracks,
             complete: true,
             owned: false,
         }
@@ -342,6 +360,27 @@ impl App {
         self.lib.cache_dir.as_ref().map(|d| d.join("offline.json"))
     }
 
+    /// Pochettes de la mosaïque « Téléchargés ».
+    fn want_downloads_covers(&mut self) -> Task<Message> {
+        let mut ids: Vec<String> = Vec::new();
+        for track in self.lib.downloaded_tracks() {
+            if let Some(id) = self.track_cover(&track)
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+                if ids.len() == 4 {
+                    break;
+                }
+            }
+        }
+        let first = ids.first().cloned();
+        let mut tasks = vec![self.want_cover(first, CARD)];
+        for id in ids {
+            tasks.push(self.want_cover(Some(id), THUMB));
+        }
+        Task::batch(tasks)
+    }
+
     fn downloads_file(&self) -> Option<PathBuf> {
         self.lib
             .cache_dir
@@ -360,16 +399,22 @@ impl App {
             .downloads_file()
             .and_then(|p| crate::collection::read_json(&p))
             .unwrap_or_default();
-        let mut ids: Vec<String> = match &self.lib.cache_dir {
+        self.lib.offline_lists = match &self.lib.cache_dir {
             Some(dir) => self
                 .lib
                 .offline_playlists
                 .iter()
-                .filter_map(|id| read_playlist(dir, id))
-                .flat_map(|p| p.tracks.into_iter().map(|t| t.video_id))
+                .filter_map(|id| read_playlist(dir, id).map(|p| (id.clone(), p.tracks)))
                 .collect(),
-            None => Vec::new(),
+            None => HashMap::new(),
         };
+        let mut ids: Vec<String> = self
+            .lib
+            .offline_lists
+            .values()
+            .flatten()
+            .map(|t| t.video_id.clone())
+            .collect();
         ids.extend(self.lib.downloads.iter().map(|t| t.video_id.clone()));
         let keep = if ids.is_empty() {
             Task::none()
@@ -656,6 +701,9 @@ impl App {
     /// Version complète reçue : affichage, cache disque, likes.
     fn finish_playlist(&mut self, fresh: Playlist) -> Task<Message> {
         let offline = if self.lib.offline_playlists.contains(&fresh.id) {
+            self.lib
+                .offline_lists
+                .insert(fresh.id.clone(), fresh.tracks.clone());
             let ids: Vec<String> = fresh.tracks.iter().map(|t| t.video_id.clone()).collect();
             self.lib.offline_watch = ids.clone();
             Task::batch([
@@ -846,10 +894,14 @@ impl App {
                 let ids: Vec<String> = playlist.tracks.iter().map(|t| t.video_id.clone()).collect();
                 let keep = !self.lib.offline_playlists.contains(&id);
                 if keep {
+                    self.lib
+                        .offline_lists
+                        .insert(id.clone(), playlist.tracks.clone());
                     self.lib.offline_playlists.insert(id);
                     self.lib.offline_watch = ids.clone();
                     self.lib.offline_stalled = 0;
                 } else {
+                    self.lib.offline_lists.remove(&id);
                     self.lib.offline_playlists.remove(&id);
                 }
                 if let Some(path) = self.offline_file() {
@@ -914,6 +966,14 @@ impl App {
             Lib::OfflineScanned(ids) => {
                 let before = self.lib.offline_ids.len();
                 self.lib.offline_ids = ids;
+                // « Téléchargés » ouverte suit les fichiers qui arrivent.
+                if matches!(&self.lib.playlist, Some((id, _)) if id == DOWNLOADS_ID) {
+                    self.lib.playlist = Some((
+                        DOWNLOADS_ID.to_owned(),
+                        Load::Ready(self.lib.downloads_playlist()),
+                    ));
+                }
+                let covers = self.want_downloads_covers();
                 let missing = self
                     .lib
                     .offline_watch
@@ -922,7 +982,7 @@ impl App {
                     .count();
                 if missing == 0 {
                     self.lib.offline_watch.clear();
-                    return Task::none();
+                    return covers;
                 }
                 // Plus rien n'arrive depuis ~1 min (morceaux trop longs, indisponibles) : on arrête.
                 if self.lib.offline_ids.len() == before {
@@ -932,11 +992,14 @@ impl App {
                 }
                 if self.lib.offline_stalled > 15 {
                     self.lib.offline_watch.clear();
-                    return Task::none();
+                    return covers;
                 }
-                Task::perform(tokio::time::sleep(Duration::from_secs(4)), |()| {
-                    Message::Lib(Lib::OfflineTick)
-                })
+                Task::batch([
+                    covers,
+                    Task::perform(tokio::time::sleep(Duration::from_secs(4)), |()| {
+                        Message::Lib(Lib::OfflineTick)
+                    }),
+                ])
             }
             Lib::OfflineTick => self.scan_offline(),
             Lib::PlayHistory(index) => match &self.lib.history {
@@ -1596,31 +1659,17 @@ pub fn cached_liked(dir: &Path) -> Option<Playlist> {
 
 /// Tuile « Téléchargés » de la bibliothèque (morceaux gardés un par un).
 pub(crate) fn downloads_tile<'a>(app: &App) -> El<'a> {
-    let count = match app.lib.downloads.len() {
+    let tracks = app.lib.downloaded_tracks();
+    let count = match tracks.len() {
         1 => "1 titre".to_owned(),
         n => format!("{n} titres"),
     };
-    let accent = app.accent;
     let hovered = app.card_hover.as_deref() == Some(DOWNLOADS_ID);
     let tile = button(
         column![
             crate::views::cover_with_play(
                 app,
-                container(icon(Icon::Download, 54.0, Color::WHITE))
-                    .center(Length::Fixed(164.0))
-                    .style(move |_| iced::widget::container::Style {
-                        background: Some(iced::Background::Gradient(iced::Gradient::Linear(
-                            iced::gradient::Linear::new(std::f32::consts::FRAC_PI_4)
-                                .add_stop(0.0, style::shade(accent, 0.25))
-                                .add_stop(1.0, style::shade(accent, 0.7)),
-                        ))),
-                        border: iced::Border {
-                            radius: 8.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    })
-                    .into(),
+                downloads_art(app, &tracks, 164.0),
                 164.0,
                 hovered,
                 Message::PlayItem(HomeKind::Playlist, DOWNLOADS_ID.to_owned()),
@@ -1643,6 +1692,61 @@ pub(crate) fn downloads_tile<'a>(app: &App) -> El<'a> {
         .on_enter(Message::CardHover(DOWNLOADS_ID.to_owned()))
         .on_exit(Message::CardUnhover(DOWNLOADS_ID.to_owned()))
         .into()
+}
+
+/// Image de « Téléchargés » : mosaïque 2 × 2 des premières pochettes (une seule
+/// s'il y a moins de quatre albums différents, un aplat de la teinte si vide).
+pub(crate) fn downloads_art<'a>(app: &App, tracks: &[Track], side: f32) -> El<'a> {
+    let mut ids: Vec<String> = Vec::new();
+    for track in tracks {
+        if let Some(id) = app.track_cover(track)
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+            if ids.len() == 4 {
+                break;
+            }
+        }
+    }
+    let accent = app.accent;
+    match ids.len() {
+        0 => container(Space::new())
+            .width(Length::Fixed(side))
+            .height(Length::Fixed(side))
+            .style(move |_| iced::widget::container::Style {
+                background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                    iced::gradient::Linear::new(std::f32::consts::FRAC_PI_4)
+                        .add_stop(0.0, style::shade(accent, 0.25))
+                        .add_stop(1.0, style::shade(accent, 0.7)),
+                ))),
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into(),
+        1..=3 => cover(app.cover(Some(&ids[0]), CARD), side, 8.0),
+        _ => {
+            let half = side / 2.0;
+            let tile = |id: &String| cover(app.cover(Some(id), THUMB), half, 0.0);
+            container(column![
+                row![tile(&ids[0]), tile(&ids[1])],
+                row![tile(&ids[2]), tile(&ids[3])],
+            ])
+            .width(Length::Fixed(side))
+            .height(Length::Fixed(side))
+            .clip(true)
+            .style(|_| iced::widget::container::Style {
+                border: iced::Border {
+                    radius: 8.0.into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .into()
+        }
+    }
 }
 
 pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
@@ -1823,46 +1927,42 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     let playable = playlist.tracks.iter().filter(|t| !t.unavailable).count();
     // Tout est sur l'appareil : le bouton devient une pastille pleine.
     let complete = pinned && playable > 0 && available >= playable;
-    let (offline_icon, offline_label) = if complete {
-        (Icon::Check, "Téléchargée".to_owned())
+    let offline_label = if complete {
+        "Téléchargée".to_owned()
     } else if pinned {
-        (
-            Icon::Download,
-            format!("Téléchargement · {available} / {playable}"),
-        )
+        format!("Téléchargement · {available} / {playable}")
     } else {
-        (Icon::Download, "Télécharger".to_owned())
+        "Télécharger".to_owned()
     };
-    let offline = button(
+    // Téléchargée : pastille pleine, texte seul. Avant : petite icône.
+    let offline_content: El<'_> = if complete {
+        text(offline_label).size(12).font(SEMIBOLD).into()
+    } else {
         row![
             icon(
-                offline_icon,
+                Icon::Download,
                 14.0,
-                if complete {
-                    Color::WHITE
-                } else if pinned {
-                    accent
-                } else {
-                    style::TEXT_DIM
-                }
+                if pinned { accent } else { style::TEXT_DIM }
             ),
             text(offline_label).size(12).font(SEMIBOLD),
         ]
         .spacing(6)
-        .align_y(Alignment::Center),
-    )
-    .padding(Padding::from([5, 12]))
-    .style(move |theme, status| {
-        if complete {
-            return style::pill(accent)(theme, status);
-        }
-        let mut s = style::pill_ghost(theme, status);
-        if pinned {
-            s.border.color = style::alpha(accent, 0.7);
-        }
-        s
-    })
-    .on_press(Message::Lib(Lib::ToggleOffline));
+        .align_y(Alignment::Center)
+        .into()
+    };
+    let offline = button(offline_content)
+        .padding(Padding::from([5, 12]))
+        .style(move |theme, status| {
+            if complete {
+                return style::pill(accent)(theme, status);
+            }
+            let mut s = style::pill_ghost(theme, status);
+            if pinned {
+                s.border.color = style::alpha(accent, 0.7);
+            }
+            s
+        })
+        .on_press(Message::Lib(Lib::ToggleOffline));
     let mut actions = row![
         icon_tip(
             Icon::Refresh,

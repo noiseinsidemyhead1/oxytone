@@ -295,6 +295,16 @@ impl Covers {
         if let Ok(data) = tokio::fs::read(&path).await {
             return Ok(data);
         }
+        // Hors ligne : l'autre taille, si elle est là, vaut mieux que rien.
+        if self.offline.load(Ordering::Relaxed) {
+            let other = match tier {
+                Tier::Small => Tier::Large,
+                Tier::Large => Tier::Small,
+            };
+            return tokio::fs::read(self.dir.join("src").join(other.file(id)))
+                .await
+                .map_err(|_| MediaError::Offline);
+        }
         let url = lock(&self.urls)
             .get(id)
             .cloned()

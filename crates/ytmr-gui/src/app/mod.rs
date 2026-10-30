@@ -72,14 +72,13 @@ pub const LYRICS_SCROLL: &str = "paroles";
 /// Paroles de la vue « En cours » (défilement à part du panneau de droite).
 pub const NP_LYRICS_SCROLL: &str = "paroles-en-cours";
 /// Vue « En cours » : marges, largeur de la colonne pochette et écart.
-pub const NP_PAD: f32 = 48.0;
-pub const NP_COVER: f32 = 380.0;
-pub const NP_GAP: f32 = 48.0;
-/// Taille du texte des paroles et hauteur d'une ligne de texte.
+pub const NP_PAD: f32 = 64.0;
+pub const NP_GAP: f32 = 72.0;
+/// Largeur maximale de la colonne des paroles de la vue « En cours ».
+pub const NP_LYRICS_MAX: f32 = 960.0;
+/// Taille du texte des paroles (panneau de droite, vue « En cours »).
 pub const LYRIC_SIZE: f32 = 20.0;
-const LYRIC_TEXT_H: f32 = 27.0;
-/// Espace entre deux lignes de paroles.
-const LYRIC_GAP: f32 = 16.0;
+pub const NP_LYRIC_SIZE: f32 = 32.0;
 
 /// Marge au-dessus de la première ligne de paroles.
 pub const LYRICS_TOP: f32 = 24.0;

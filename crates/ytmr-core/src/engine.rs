@@ -661,6 +661,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                     // Rien à résoudre sans réseau : les files de fond sont vidées.
                     self.warm_wanted.clear();
                     self.offline_wanted.clear();
+                    self.drop_unavailable_offline().await;
                 }
                 Ok(())
             }
@@ -684,6 +685,35 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             }
             Command::Shutdown => Ok(()),
         }
+    }
+
+    /// Passage hors ligne : les morceaux pas sur le disque quittent la file
+    /// (et le morceau en cours, s'il est lu depuis le réseau, laisse la place).
+    async fn drop_unavailable_offline(&mut self) {
+        let local = |s: &Self, video_id: &str| s.resolver.cached(video_id).is_some();
+        let gone: Vec<QueueId> = self
+            .queue
+            .upcoming()
+            .iter()
+            .filter(|e| !local(self, &e.track.video_id))
+            .map(|e| e.id)
+            .collect();
+        for id in gone {
+            if let Err(e) = self.remove(id).await {
+                tracing::debug!(error = %e, "file hors ligne");
+            }
+        }
+        let current = self
+            .queue
+            .current()
+            .filter(|e| !local(self, &e.track.video_id))
+            .map(|e| e.id);
+        if let Some(id) = current
+            && let Err(e) = self.remove(id).await
+        {
+            tracing::debug!(error = %e, "morceau en cours hors ligne");
+        }
+        self.queue_dirty = true;
     }
 
     /// Indice explicite (survol, page ouverte) : passe devant l'anticipation.

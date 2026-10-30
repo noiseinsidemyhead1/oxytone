@@ -24,6 +24,9 @@ impl App {
         if self.pending_route.as_ref() == Some(&route) {
             return Task::none();
         }
+        if self.lib.offline_mode && matches!(route, Route::Album(_) | Route::Artist(_)) {
+            return self.show_toast("Indisponible en mode hors ligne".into());
+        }
         if self.needs_loading(&route) {
             // On charge d'abord, on change de page ensuite.
             self.pending_route = Some(route.clone());
@@ -39,6 +42,11 @@ impl App {
         match route {
             Route::Album(id) => !matches!(&self.album, Some((cur, Load::Ready(_))) if cur == id),
             Route::Artist(id) => !matches!(&self.artist, Some((cur, Load::Ready(_))) if cur == id),
+            // « Téléchargés » est local ; hors ligne, rien n'arrivera du réseau :
+            // la page s'ouvre tout de suite (avec un message si elle manque).
+            Route::Playlist(id) if id == crate::library::DOWNLOADS_ID || self.lib.offline_mode => {
+                false
+            }
             Route::Playlist(id) => {
                 let shown = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if cur == id);
                 !shown && !crate::library::has_cache(&self.lib, id)

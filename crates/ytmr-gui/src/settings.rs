@@ -69,6 +69,14 @@ impl App {
             }
             Settings::OfflineMode(on) => {
                 self.lib.offline_mode = on;
+                if on {
+                    // Plus rien n'arrivera du réseau : la barre de chargement s'arrête.
+                    self.pending_route = None;
+                    self.loading_since = None;
+                    self.lib.streaming = None;
+                    self.lyrics
+                        .retain(|_, l| matches!(l, crate::app::Load::Ready(_)));
+                }
                 self.save_ui();
                 self.apply_offline_mode();
                 let toast = self.show_toast(if on {
