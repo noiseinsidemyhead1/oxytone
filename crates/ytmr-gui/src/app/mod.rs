@@ -56,6 +56,20 @@ pub const NP_FADE: Duration = Duration::from_millis(700);
 pub const NP_HD_WAIT: Duration = Duration::from_secs(3);
 /// Mode focus : la pochette glisse vers la gauche et les paroles apparaissent.
 pub const NP_SPLIT: Duration = Duration::from_millis(650);
+/// Changement de morceau : titres et pochette de la barre apparaissent en fondu.
+pub const TRACK_FADE: Duration = Duration::from_millis(350);
+/// Paroles du morceau quitté : elles s'estompent…
+pub const LYRICS_OUT: Duration = Duration::from_millis(300);
+/// … puis celles du nouveau apparaissent.
+pub const LYRICS_IN: Duration = Duration::from_millis(450);
+/// Ligne chantée qui s'allume (et la précédente qui s'éteint).
+pub const LINE_FADE: Duration = Duration::from_millis(350);
+
+/// Courbe douce de 0 à 1 (début et fin ralentis) sur `length` depuis `since`.
+pub fn ease(since: std::time::Instant, length: Duration) -> f32 {
+    let t = (since.elapsed().as_secs_f32() / length.as_secs_f32()).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
 /// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
 const COVER_BUDGET: u64 = 64 << 20;
 
@@ -262,6 +276,8 @@ pub enum Message {
     /// Glisser-déposer dans la file d'attente.
     QueueDrag(QueueDrag),
     WindowResized(iced::Size),
+    /// Fin de l'effacement des paroles du morceau quitté : retour en haut.
+    LyricsReset(String),
     /// Mise à l'échelle de l'écran (125 %, 150 %…).
     ScaleFactor(f32),
     /// Plusieurs messages à la suite (menu contextuel : fermer puis agir).
@@ -463,6 +479,15 @@ pub struct App {
     /// Paroles du mode focus : 0 = pochette seule au centre, 1 = paroles à
     /// droite ; animé de `from` vers la cible depuis l'instant donné.
     pub np_split: f32,
+    /// Dernier changement de morceau (fondus d'entrée).
+    pub track_since: std::time::Instant,
+    /// Paroles du morceau quitté qui s'estompent : (vidéo, depuis, ligne figée).
+    pub lyrics_out: Option<(String, std::time::Instant, Option<usize>)>,
+    /// Paroles qui apparaissent : (vidéo, à partir de quand).
+    pub lyrics_in: Option<(String, std::time::Instant)>,
+    /// Ligne chantée précédente et moment du changement (fondu des lignes).
+    pub lyrics_prev_line: Option<usize>,
+    pub lyrics_line_at: std::time::Instant,
     np_split_target: f32,
     np_split_anim: Option<(std::time::Instant, f32)>,
     /// Ligne survolée dans la file d'attente.
@@ -602,6 +627,11 @@ impl App {
             np_fade: None,
             np_waiting: None,
             np_split: 0.0,
+            track_since: std::time::Instant::now(),
+            lyrics_out: None,
+            lyrics_in: None,
+            lyrics_prev_line: None,
+            lyrics_line_at: std::time::Instant::now(),
             np_split_target: 0.0,
             np_split_anim: None,
             queue_hover: None,
@@ -752,6 +782,7 @@ impl App {
             || self.controls_anim.is_some()
             || self.np_fade.is_some()
             || self.np_split_anim.is_some()
+            || self.fading()
             || (self.route == Route::NowPlaying && self.np_waiting.is_some())
             || self.anims.is_running()
             || self.queue_fade.is_some()

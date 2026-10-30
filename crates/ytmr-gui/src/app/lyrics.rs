@@ -26,9 +26,76 @@ pub fn lyrics_text_width(panel: f32) -> f32 {
     panel - 40.0
 }
 
+/// Paroles affichées à un instant donné (avec leurs fondus).
+pub struct LyricsOnScreen<'a> {
+    pub lyrics: &'a ytmr_catalog::lyrics::Lyrics,
+    pub sung: Option<usize>,
+    /// Ligne chantée juste avant (elle s'éteint pendant que `sung` s'allume).
+    pub previous: Option<usize>,
+    /// Avancement du fondu entre les deux lignes (0 → 1).
+    pub line_t: f32,
+    /// Opacité d'ensemble (entrée ou sortie).
+    pub alpha: f32,
+}
+
 impl App {
     pub(crate) fn lyrics_shown(&self) -> bool {
         self.show_queue && self.right_panel == RightPanel::Lyrics
+    }
+
+    /// Un fondu (morceau, paroles, ligne chantée) est en cours.
+    pub(crate) fn fading(&self) -> bool {
+        let now = std::time::Instant::now();
+        let running = |since: std::time::Instant, length: Duration| now < since + length;
+        running(self.track_since, TRACK_FADE.max(LYRICS_OUT))
+            || self
+                .lyrics_in
+                .as_ref()
+                .is_some_and(|(_, at)| running(*at, LYRICS_IN))
+            || running(self.lyrics_line_at, LINE_FADE)
+    }
+
+    /// Opacité des informations du morceau (fondu d'entrée au changement).
+    pub(crate) fn track_alpha(&self) -> f32 {
+        ease(self.track_since, TRACK_FADE)
+    }
+
+    /// Les paroles à montrer maintenant : celles du morceau en cours (en
+    /// fondu d'entrée), ou celles du morceau quitté (en fondu de sortie).
+    pub(crate) fn lyrics_on_screen(&self) -> Option<LyricsOnScreen<'_>> {
+        let now = std::time::Instant::now();
+        let current = self.state.current.as_ref()?;
+        let id = current.track.video_id.as_str();
+        if let Some(Load::Ready(Some(lyrics))) = self.lyrics.get(id) {
+            let start = match &self.lyrics_in {
+                Some((v, at)) if v == id => Some(*at),
+                _ => None,
+            };
+            if start.is_none_or(|at| now >= at) {
+                let sung = lyrics.line_at(self.state.position + Duration::from_millis(200));
+                return Some(LyricsOnScreen {
+                    lyrics,
+                    sung,
+                    previous: self.lyrics_prev_line,
+                    line_t: ease(self.lyrics_line_at, LINE_FADE),
+                    alpha: start.map_or(1.0, |at| ease(at, LYRICS_IN)),
+                });
+            }
+        }
+        let (old, since, line) = self.lyrics_out.as_ref()?;
+        if now >= *since + LYRICS_OUT {
+            return None;
+        }
+        match self.lyrics.get(old) {
+            Some(Load::Ready(Some(lyrics))) => Some(LyricsOnScreen {
+                lyrics,
+                sung: *line,
+                previous: *line,
+                line_t: 1.0,
+                alpha: 1.0 - ease(*since, LYRICS_OUT),
+            }),
+            _ => None,
+        }
     }
 
     /// Le morceau en cours a des paroles synchronisées (affichées en mode focus).
@@ -105,6 +172,14 @@ impl App {
     /// Fait glisser les paroles jusqu'à la ligne chantée (quand elle change),
     /// dans le panneau de droite et dans la vue « En cours ».
     pub(super) fn follow_lyrics(&mut self) {
+        // Les paroles du morceau quitté s'estompent encore : on ne bouge pas.
+        if self
+            .lyrics_out
+            .as_ref()
+            .is_some_and(|(_, since, _)| since.elapsed() < LYRICS_OUT)
+        {
+            return;
+        }
         let surfaces = self.lyrics_surfaces();
         if surfaces.is_empty() {
             return;
@@ -122,6 +197,8 @@ impl App {
         if line == self.lyrics_line || manual {
             return;
         }
+        self.lyrics_prev_line = self.lyrics_line;
+        self.lyrics_line_at = std::time::Instant::now();
         self.lyrics_line = line;
         // La ligne chantée (son milieu) se place aux deux cinquièmes du panneau.
         let ytmr_catalog::lyrics::LyricsBody::Synced(lines) = &lyrics.body else {

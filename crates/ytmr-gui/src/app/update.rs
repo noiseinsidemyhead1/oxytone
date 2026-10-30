@@ -749,6 +749,29 @@ impl App {
                     .map(Message::ScaleFactor);
                 Task::batch([self.refresh_maximized(), scale])
             }
+            Message::LyricsReset(video_id) => {
+                let current = self
+                    .state
+                    .current
+                    .as_ref()
+                    .map(|e| e.track.video_id.as_str());
+                if current != Some(video_id.as_str()) {
+                    return Task::none();
+                }
+                self.lyrics_out = None;
+                self.lyrics_line = None;
+                self.scrolling.reset(LYRICS_SCROLL);
+                self.scrolling.reset(NP_LYRICS_SCROLL);
+                let top = iced::widget::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(0.0),
+                };
+                self.follow_lyrics();
+                Task::batch([
+                    operation::scroll_to(LYRICS_SCROLL, top),
+                    operation::scroll_to(NP_LYRICS_SCROLL, top),
+                ])
+            }
             Message::ScaleFactor(scale) => {
                 self.scale_factor = scale;
                 Task::none()
@@ -768,6 +791,15 @@ impl App {
                         Load::Failed(e)
                     }
                 };
+                let current = self
+                    .state
+                    .current
+                    .as_ref()
+                    .is_some_and(|e| e.track.video_id == video_id);
+                if current {
+                    let start = (self.track_since + LYRICS_OUT).max(std::time::Instant::now());
+                    self.lyrics_in = Some((video_id.clone(), start));
+                }
                 self.lyrics.insert(video_id, load);
                 self.lyrics_line = None;
                 self.follow_lyrics();

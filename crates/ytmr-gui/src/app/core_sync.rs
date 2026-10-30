@@ -11,6 +11,11 @@ impl App {
             CoreUpdate::State(state) => {
                 let track_changed = state.current.as_ref().map(|e| e.id)
                     != self.state.current.as_ref().map(|e| e.id);
+                let previous = self
+                    .state
+                    .current
+                    .as_ref()
+                    .map(|e| e.track.video_id.clone());
                 self.state = state;
                 if self.muted_volume.is_some() && self.state.volume > 0 {
                     self.muted_volume = None;
@@ -25,18 +30,24 @@ impl App {
                     self.follow_lyrics();
                     return report;
                 }
-                // Nouveau morceau : les paroles repartent du haut.
+                // Nouveau morceau : les anciennes paroles s'estompent (figées sur
+                // leur dernière ligne), puis la liste remonte et les nouvelles
+                // apparaissent en fondu. Avant : saut en haut et « Chargement… ».
+                let now = std::time::Instant::now();
+                self.track_since = now;
+                self.lyrics_out = previous.map(|v| (v, now, self.lyrics_line));
                 self.lyrics_line = None;
-                self.scrolling.reset(LYRICS_SCROLL);
-                self.scrolling.reset(NP_LYRICS_SCROLL);
-                let top = iced::widget::scrollable::AbsoluteOffset {
-                    x: None,
-                    y: Some(0.0),
-                };
-                let lyrics_top = Task::batch([
-                    operation::scroll_to(LYRICS_SCROLL, top),
-                    operation::scroll_to(NP_LYRICS_SCROLL, top),
-                ]);
+                self.lyrics_prev_line = None;
+                let new_id = self
+                    .state
+                    .current
+                    .as_ref()
+                    .map(|e| e.track.video_id.clone())
+                    .unwrap_or_default();
+                self.lyrics_in = Some((new_id.clone(), now + LYRICS_OUT));
+                let lyrics_top = Task::perform(tokio::time::sleep(LYRICS_OUT), move |()| {
+                    Message::LyricsReset(new_id.clone())
+                });
                 let cover = self.current_cover();
                 if let Some(color) = cover.as_ref().and_then(|id| self.accents.get(id)).copied() {
                     self.accent_fade.set(self.accent, color);

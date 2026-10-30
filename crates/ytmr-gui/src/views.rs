@@ -1090,27 +1090,37 @@ fn now_playing(app: &App) -> El<'_> {
         None => cover(art(app.np_art.as_deref().or(id.as_deref())), side, 14.0),
     };
     let big = container(shown).style(style::cover_frame);
+    let fade = app.track_alpha();
     let mut info = column![
-        // Titre long : sur deux lignes plutôt que coupé.
+        // Titre long : sur deux lignes plutôt que coupé. Fondu au changement.
         text(&track.title)
             .size(34)
             .font(BOLD)
+            .color(style::alpha(style::TEXT, fade))
             .width(Length::Fixed(side)),
-        button(text(&track.artist).size(19).color(style::TEXT_DIM))
-            .padding(0)
-            .style(style::link)
-            .on_press(Message::OpenArtist(
-                track.artist_id.clone(),
-                main_artist(&track.artist).to_owned(),
-            )),
+        button(
+            text(&track.artist)
+                .size(19)
+                .color(style::alpha(style::TEXT_DIM, fade))
+        )
+        .padding(0)
+        .style(style::link)
+        .on_press(Message::OpenArtist(
+            track.artist_id.clone(),
+            main_artist(&track.artist).to_owned(),
+        )),
     ]
     .spacing(6);
     if let (Some(album), Some(album_id)) = (&track.album, &track.album_id) {
         info = info.push(
-            button(text(album).size(14).color(style::TEXT_DIM))
-                .padding(0)
-                .style(style::link)
-                .on_press(Message::Navigate(Route::Album(album_id.clone()))),
+            button(
+                text(album)
+                    .size(14)
+                    .color(style::alpha(style::TEXT_DIM, fade)),
+            )
+            .padding(0)
+            .style(style::link)
+            .on_press(Message::Navigate(Route::Album(album_id.clone()))),
         );
     }
     // Paroles seulement si elles suivent le son (synchronisées) ; sinon la
@@ -1251,106 +1261,119 @@ fn lyrics_body<'a>(
 ) -> El<'a> {
     use ytmr_catalog::lyrics::LyricsBody;
     let current = app.state.current.as_ref();
-    let lyrics = current.and_then(|e| match app.lyrics.get(&e.track.video_id) {
-        Some(Load::Ready(Some(l))) => Some(l),
-        _ => None,
-    });
-    let message = |m: &'static str| -> El<'_> {
+    // Pendant un changement de morceau : les anciennes paroles s'estompent,
+    // les nouvelles apparaissent ; rien entre les deux (pas de « Chargement… »).
+    let shown = app.lyrics_on_screen();
+    let message = |m: &'static str, a: f32| -> El<'_> {
         container(
             text(m)
                 .size(15)
-                .color(style::alpha(Color::WHITE, 0.6 * alpha)),
+                .color(style::alpha(Color::WHITE, 0.6 * alpha * a)),
         )
         .center(Length::Fill)
         .into()
     };
-    match (current, lyrics) {
-        (None, _) => message("Rien en lecture."),
-        (Some(e), None) => match app.lyrics.get(&e.track.video_id) {
-            None | Some(Load::Loading) if !app.lib.offline_mode => message("Chargement…"),
-            None | Some(Load::Loading) => message("Paroles indisponibles hors ligne."),
-            Some(Load::Failed(_)) if app.lib.offline_mode => {
-                message("Paroles indisponibles hors ligne.")
-            }
-            _ => message("Paroles indisponibles pour ce titre."),
-        },
-        (Some(_), Some(lyrics)) => match &lyrics.body {
-            LyricsBody::Synced(lines) => {
-                let sung = lyrics.line_at(app.state.position + Duration::from_millis(200));
-                let mut list = column![Space::new().height(Length::Fixed(LYRICS_TOP))];
-                let heights = crate::app::lyric_heights(
-                    lines.iter().map(|l| l.text.chars().count()),
-                    text_width,
-                    size,
-                );
-                for ((i, line), height) in lines.iter().enumerate().zip(heights) {
-                    // Opacité de repos : pleine (chantée), 0,5 (à venir), 0,3 (passée).
-                    let rest = match sung {
-                        Some(c) if c == i => 1.0,
-                        Some(c) if i < c => 0.3,
-                        _ => 0.5,
-                    };
-                    let words = if line.text.is_empty() {
-                        "♪"
-                    } else {
-                        line.text.as_str()
-                    };
-                    let words = container(text(words).size(size).font(BOLD))
-                        .height(Length::Fixed(height))
-                        .align_y(Alignment::Center);
-                    if !interactive {
-                        list = list.push(
-                            container(words)
-                                .width(Length::Fill)
-                                .padding(Padding::from([0, 2]))
-                                .style(move |_| iced::widget::container::Style {
-                                    text_color: Some(style::alpha(Color::WHITE, rest * alpha)),
-                                    ..Default::default()
-                                }),
-                        );
-                        continue;
-                    }
+    let Some(shown) = shown else {
+        // Mode focus : rien (la pochette reste seule). Panneau : un mot
+        // seulement quand on sait qu'il n'y a pas de paroles.
+        let after_out = app.lyrics_out.is_none();
+        return match current {
+            _ if !interactive => Space::new().into(),
+            None => message("Rien en lecture.", 1.0),
+            Some(e) => match app.lyrics.get(&e.track.video_id) {
+                _ if !after_out => Space::new().into(),
+                Some(Load::Loading) | None if !app.lib.offline_mode => Space::new().into(),
+                Some(Load::Ready(None) | Load::Failed(_)) if !app.lib.offline_mode => {
+                    message("Paroles indisponibles pour ce titre.", app.track_alpha())
+                }
+                _ => message("Paroles indisponibles hors ligne.", app.track_alpha()),
+            },
+        };
+    };
+    let alpha = alpha * shown.alpha;
+    let lyrics = shown.lyrics;
+    match &lyrics.body {
+        // Mode focus : seulement des paroles qui suivent la musique.
+        LyricsBody::Plain(_) if !interactive => Space::new().into(),
+        LyricsBody::Synced(lines) => {
+            let sung = shown.sung;
+            let mut list = column![Space::new().height(Length::Fixed(LYRICS_TOP))];
+            let heights = crate::app::lyric_heights(
+                lines.iter().map(|l| l.text.chars().count()),
+                text_width,
+                size,
+            );
+            // Opacité de repos : pleine (chantée), 0,5 (à venir), 0,3 (passée) ;
+            // la ligne qui s'allume et celle qui s'éteint passent en fondu.
+            let level = |line: Option<usize>, i: usize| match line {
+                Some(c) if c == i => 1.0,
+                Some(c) if i < c => 0.3,
+                _ => 0.5,
+            };
+            for ((i, line), height) in lines.iter().enumerate().zip(heights) {
+                let target = level(sung, i);
+                let from = level(shown.previous, i);
+                let rest = from + (target - from) * shown.line_t;
+                let words = if line.text.is_empty() {
+                    "♪"
+                } else {
+                    line.text.as_str()
+                };
+                let words = container(text(words).size(size).font(BOLD))
+                    .height(Length::Fixed(height))
+                    .align_y(Alignment::Center);
+                if !interactive {
                     list = list.push(
-                        button(words)
+                        container(words)
                             .width(Length::Fill)
                             .padding(Padding::from([0, 2]))
-                            .style(move |_, status| button::Style {
-                                background: None,
-                                text_color: style::alpha(
-                                    Color::WHITE,
-                                    match status {
-                                        button::Status::Hovered | button::Status::Pressed => {
-                                            f32::max(rest, 0.85)
-                                        }
-                                        _ => rest,
-                                    },
-                                ),
-                                ..button::Style::default()
-                            })
-                            .on_press(Message::SeekTo(line.at)),
+                            .style(move |_| iced::widget::container::Style {
+                                text_color: Some(style::alpha(Color::WHITE, rest * alpha)),
+                                ..Default::default()
+                            }),
                     );
+                    continue;
                 }
-                // Marge du bas : la dernière ligne peut remonter comme les autres.
-                list = list.push(Space::new().height(Length::Fixed(view_height)));
-                lyrics_scroll(list, scroll, interactive)
+                list = list.push(
+                    button(words)
+                        .width(Length::Fill)
+                        .padding(Padding::from([0, 2]))
+                        .style(move |_, status| button::Style {
+                            background: None,
+                            text_color: style::alpha(
+                                Color::WHITE,
+                                match status {
+                                    button::Status::Hovered | button::Status::Pressed => {
+                                        f32::max(rest, 0.85)
+                                    }
+                                    _ => rest,
+                                },
+                            ),
+                            ..button::Style::default()
+                        })
+                        .on_press(Message::SeekTo(line.at)),
+                );
             }
-            LyricsBody::Plain(body) => lyrics_scroll(
-                container(
-                    text(body)
-                        .size(19)
-                        .font(SEMIBOLD)
-                        .line_height(1.6)
-                        .color(style::alpha(Color::WHITE, 0.85 * alpha)),
-                )
-                .padding(Padding {
-                    top: LYRICS_TOP,
-                    bottom: 40.0,
-                    ..Padding::ZERO
-                }),
-                scroll,
-                interactive,
-            ),
-        },
+            // Marge du bas : la dernière ligne peut remonter comme les autres.
+            list = list.push(Space::new().height(Length::Fixed(view_height)));
+            lyrics_scroll(list, scroll, interactive)
+        }
+        LyricsBody::Plain(body) => lyrics_scroll(
+            container(
+                text(body)
+                    .size(19)
+                    .font(SEMIBOLD)
+                    .line_height(1.6)
+                    .color(style::alpha(Color::WHITE, 0.85 * alpha)),
+            )
+            .padding(Padding {
+                top: LYRICS_TOP,
+                bottom: 40.0,
+                ..Padding::ZERO
+            }),
+            scroll,
+            interactive,
+        ),
     }
 }
 
@@ -1775,7 +1798,7 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
                 if app.lib.offline_mode {
                     heart
                 } else {
-                    row![heart, download]
+                    row![download, heart]
                         .spacing(8)
                         .align_y(Alignment::Center)
                         .into()
@@ -2054,19 +2077,31 @@ fn player_bar(app: &App) -> El<'_> {
             let track = &entry.track;
             // Nom : la page du morceau (album ou single) ; la grande vue
             // « En cours » s'ouvre seulement depuis la pochette.
-            let title = button(line(&track.title, 14).font(SEMIBOLD))
+            // Nouveau morceau : pochette et noms apparaissent en fondu.
+            let fade = app.track_alpha();
+            let title = button(
+                line(&track.title, 14)
+                    .font(SEMIBOLD)
+                    .color(style::alpha(style::TEXT, fade)),
+            )
+            .padding(0)
+            .style(style::link)
+            .on_press(Message::OpenAlbumOf(track.clone()));
+            let id = app.track_cover(track);
+            row![
+                button(faded_cover(
+                    app.cover(id.as_deref(), THUMB),
+                    56.0,
+                    6.0,
+                    fade
+                ))
                 .padding(0)
                 .style(style::link)
-                .on_press(Message::OpenAlbumOf(track.clone()));
-            row![
-                button(track_cover(app, track, 56.0))
-                    .padding(0)
-                    .style(style::link)
-                    .on_press(Message::Navigate(Route::NowPlaying)),
+                .on_press(Message::Navigate(Route::NowPlaying)),
                 container(
                     column![
                         title,
-                        button(line(&track.artist, 13).color(style::TEXT_DIM))
+                        button(line(&track.artist, 13).color(style::alpha(style::TEXT_DIM, fade)))
                             .padding(0)
                             .style(style::link)
                             .on_press(Message::OpenArtist(

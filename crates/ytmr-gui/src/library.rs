@@ -2012,20 +2012,21 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         pinned,
         Message::Lib(Lib::ToggleOffline),
     );
-    let mut actions = row![
-        icon_tip(
-            Icon::Refresh,
-            17.0,
-            style::TEXT_DIM,
-            Message::Lib(Lib::Refresh),
-            "Mettre à jour depuis YouTube".into(),
-        ),
-        offline,
-    ]
+    // Ordre : Lecture, Aléatoire, Télécharger, puis les petites icônes
+    // (cœur, mise à jour, renommer, supprimer).
+    let mut actions = row![icon_tip(
+        Icon::Refresh,
+        17.0,
+        style::TEXT_DIM,
+        Message::Lib(Lib::Refresh),
+        "Mettre à jour depuis YouTube".into(),
+    )]
     .spacing(4)
     .align_y(Alignment::Center);
     // « Téléchargés » et mode hors ligne : rien à mettre à jour depuis YouTube.
-    if id == DOWNLOADS_ID || app.lib.offline_mode {
+    let local = id == DOWNLOADS_ID || app.lib.offline_mode;
+    let download: El<'_> = if local { Space::new().into() } else { offline };
+    if local {
         actions = row![];
     }
     if !liked && playlist.owned && !app.lib.offline_mode {
@@ -2111,7 +2112,7 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
                 } else {
                     Space::new().into()
                 };
-                row![heart, actions]
+                row![download, heart, actions]
                     .spacing(8)
                     .align_y(Alignment::Center)
                     .into()
