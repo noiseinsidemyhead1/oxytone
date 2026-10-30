@@ -55,9 +55,12 @@ impl App {
                     let initial = self.on_core(CoreUpdate::State(core.state()));
                     // Touches média et overlay du système : il faut la fenêtre native.
                     let native = window::oldest().and_then(|id| window::run(id, native_handle));
+                    // Playlists gardées hors ligne : redonnées au moteur, cache relevé.
+                    let offline = self.load_offline();
                     Task::batch([
                         initial,
                         account,
+                        offline,
                         Task::stream(core_updates(core)),
                         native.map(Message::NativeWindow),
                     ])

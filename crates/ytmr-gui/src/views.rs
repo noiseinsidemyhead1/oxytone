@@ -800,6 +800,13 @@ pub(crate) fn track_row<'a>(
         )
         .width(Length::Fill)
         .clip(true),
+        // Disponible sans réseau (cache audio) ; la place est toujours réservée.
+        container(if app.lib.offline_ids.contains(&track.video_id) {
+            El::from(icon(Icon::Download, 13.0, style::alpha(app.accent, 0.8)))
+        } else {
+            Space::new().into()
+        })
+        .width(Length::Fixed(14.0)),
         text(fmt_opt(track.duration))
             .size(13)
             .color(style::TEXT_FAINT),

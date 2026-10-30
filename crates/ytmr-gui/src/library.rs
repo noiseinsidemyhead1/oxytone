@@ -87,6 +87,14 @@ pub struct LibraryState {
     /// à la fin seulement si une version en cache est déjà à l'écran.
     pub streaming: Option<Streaming>,
     pub profile: Option<Profile>,
+    /// Playlists gardées hors ligne (`offline.json`).
+    pub offline_playlists: HashSet<String>,
+    /// Morceaux présents dans le cache audio (lisibles sans réseau).
+    pub offline_ids: HashSet<String>,
+    /// Suivi des téléchargements hors ligne : morceaux attendus, et nombre de
+    /// relevés sans progrès (on arrête de regarder au bout d'un moment).
+    offline_watch: Vec<String>,
+    offline_stalled: u32,
     /// Historique d'écoute (page « Historique »).
     pub history: Option<Load<Vec<Track>>>,
     /// Rangées de l'accueil de YouTube Music.
@@ -177,6 +185,11 @@ pub enum Lib {
     ProfileLoaded(Result<Profile, String>),
     HomeLoaded(Result<Vec<HomeShelf>, String>),
     HistoryLoaded(Result<Vec<Track>, String>),
+    /// Garder / ne plus garder la playlist ouverte hors ligne.
+    ToggleOffline,
+    /// Relevé du cache audio (morceaux présents sur le disque).
+    OfflineScanned(HashSet<String>),
+    OfflineTick,
     /// Lecture de l'historique à partir de la ligne donnée.
     PlayHistory(usize),
     /// Morceau d'une rangée de l'accueil (rangée, carte).
@@ -273,6 +286,67 @@ impl App {
             .collect();
         let ids: Vec<_> = urls.iter().map(|u| self.url_cover(u.as_deref())).collect();
         Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)))
+    }
+
+    fn offline_file(&self) -> Option<PathBuf> {
+        self.lib.cache_dir.as_ref().map(|d| d.join("offline.json"))
+    }
+
+    /// Au lancement : playlists gardées hors ligne (leurs morceaux sont
+    /// redonnés au moteur, nouveaux compris) et relevé du cache audio.
+    pub fn load_offline(&mut self) -> Task<Message> {
+        self.lib.offline_playlists = self
+            .offline_file()
+            .and_then(|p| crate::collection::read_json(&p))
+            .unwrap_or_default();
+        let ids: Vec<String> = match &self.lib.cache_dir {
+            Some(dir) => self
+                .lib
+                .offline_playlists
+                .iter()
+                .filter_map(|id| read_playlist(dir, id))
+                .flat_map(|p| p.tracks.into_iter().map(|t| t.video_id))
+                .collect(),
+            None => Vec::new(),
+        };
+        let keep = if ids.is_empty() {
+            Task::none()
+        } else {
+            self.lib.offline_watch = ids.clone();
+            self.send(Command::KeepOffline {
+                video_ids: ids,
+                keep: true,
+            })
+        };
+        Task::batch([keep, self.scan_offline()])
+    }
+
+    /// Liste les morceaux présents dans le cache audio (en tâche de fond).
+    pub fn scan_offline(&self) -> Task<Message> {
+        let Some(dir) = self.settings.audio_dir.clone() else {
+            return Task::none();
+        };
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    std::fs::read_dir(&dir)
+                        .map(|entries| {
+                            entries
+                                .flatten()
+                                .map(|e| e.path())
+                                .filter(|p| p.extension().is_some_and(|x| x == "audio"))
+                                .filter_map(|p| {
+                                    p.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+                                })
+                                .collect::<HashSet<String>>()
+                        })
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default()
+            },
+            |ids| Message::Lib(Lib::OfflineScanned(ids)),
+        )
     }
 
     /// Page « Historique » : toujours redemandée (elle change à chaque écoute).
@@ -506,6 +580,23 @@ impl App {
 
     /// Version complète reçue : affichage, cache disque, likes.
     fn finish_playlist(&mut self, fresh: Playlist) -> Task<Message> {
+        let offline = if self.lib.offline_playlists.contains(&fresh.id) {
+            let ids: Vec<String> = fresh.tracks.iter().map(|t| t.video_id.clone()).collect();
+            self.lib.offline_watch = ids.clone();
+            Task::batch([
+                self.send(Command::KeepOffline {
+                    video_ids: ids,
+                    keep: true,
+                }),
+                self.scan_offline(),
+            ])
+        } else {
+            Task::none()
+        };
+        Task::batch([offline, self.finish_playlist_inner(fresh)])
+    }
+
+    fn finish_playlist_inner(&mut self, fresh: Playlist) -> Task<Message> {
         if let Some(dir) = &self.lib.cache_dir {
             write_playlist(dir, &fresh);
         }
@@ -661,6 +752,65 @@ impl App {
                     Task::none()
                 }
             },
+            Lib::ToggleOffline => {
+                let Some((id, Load::Ready(playlist))) = &self.lib.playlist else {
+                    return Task::none();
+                };
+                let id = id.clone();
+                let ids: Vec<String> = playlist.tracks.iter().map(|t| t.video_id.clone()).collect();
+                let keep = !self.lib.offline_playlists.contains(&id);
+                if keep {
+                    self.lib.offline_playlists.insert(id);
+                    self.lib.offline_watch = ids.clone();
+                    self.lib.offline_stalled = 0;
+                } else {
+                    self.lib.offline_playlists.remove(&id);
+                }
+                if let Some(path) = self.offline_file() {
+                    write_json(&path, &self.lib.offline_playlists);
+                }
+                let toast = self.show_toast(if keep {
+                    "Téléchargement pour l'écoute hors ligne…".into()
+                } else {
+                    "Playlist retirée du hors ligne".into()
+                });
+                Task::batch([
+                    toast,
+                    self.send(Command::KeepOffline {
+                        video_ids: ids,
+                        keep,
+                    }),
+                    self.scan_offline(),
+                ])
+            }
+            Lib::OfflineScanned(ids) => {
+                let before = self.lib.offline_ids.len();
+                self.lib.offline_ids = ids;
+                let missing = self
+                    .lib
+                    .offline_watch
+                    .iter()
+                    .filter(|v| !self.lib.offline_ids.contains(*v))
+                    .count();
+                if missing == 0 {
+                    self.lib.offline_watch.clear();
+                    return Task::none();
+                }
+                // Plus rien n'arrive depuis ~1 min (morceaux trop longs, indisponibles) : on arrête.
+                if self.lib.offline_ids.len() == before {
+                    self.lib.offline_stalled += 1;
+                } else {
+                    self.lib.offline_stalled = 0;
+                }
+                if self.lib.offline_stalled > 15 {
+                    self.lib.offline_watch.clear();
+                    return Task::none();
+                }
+                Task::perform(tokio::time::sleep(Duration::from_secs(4)), |()| {
+                    Message::Lib(Lib::OfflineTick)
+                })
+            }
+            Lib::OfflineTick => self.scan_offline(),
             Lib::PlayHistory(index) => match &self.lib.history {
                 Some(Load::Ready(tracks)) if index < tracks.len() => {
                     let tracks = tracks.clone();
@@ -1476,13 +1626,49 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             .into(),
         _ => Space::new().height(Length::Fixed(0.0)).into(),
     };
-    let mut actions = row![icon_tip(
-        Icon::Refresh,
-        17.0,
-        style::TEXT_DIM,
-        Message::Lib(Lib::Refresh),
-        "Mettre à jour depuis YouTube".into(),
-    )]
+    let pinned = app.lib.offline_playlists.contains(id);
+    let available = playlist
+        .tracks
+        .iter()
+        .filter(|t| app.lib.offline_ids.contains(&t.video_id))
+        .count();
+    let accent = app.accent;
+    let offline_label = if pinned {
+        format!("Hors ligne · {available} / {}", playlist.tracks.len())
+    } else {
+        "Hors ligne".to_owned()
+    };
+    let offline = button(
+        row![
+            icon(
+                Icon::Download,
+                14.0,
+                if pinned { accent } else { style::TEXT_DIM }
+            ),
+            text(offline_label).size(12).font(SEMIBOLD),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([5, 12]))
+    .style(move |theme, status| {
+        let mut s = style::pill_ghost(theme, status);
+        if pinned {
+            s.border.color = style::alpha(accent, 0.7);
+        }
+        s
+    })
+    .on_press(Message::Lib(Lib::ToggleOffline));
+    let mut actions = row![
+        icon_tip(
+            Icon::Refresh,
+            17.0,
+            style::TEXT_DIM,
+            Message::Lib(Lib::Refresh),
+            "Mettre à jour depuis YouTube".into(),
+        ),
+        offline,
+    ]
     .spacing(4)
     .align_y(Alignment::Center);
     if !liked && playlist.owned {

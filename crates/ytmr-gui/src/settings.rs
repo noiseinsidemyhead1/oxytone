@@ -7,11 +7,11 @@
 
 use std::path::{Path, PathBuf};
 
-use iced::widget::{Space, button, column, container, row, text, vertical_slider};
+use iced::widget::{Space, button, column, container, pick_list, row, text, vertical_slider};
 use iced::{Alignment, Color, Length, Padding, Task, color};
 use ytmr_core::Command;
-use ytmr_player::AudioEffects;
 use ytmr_player::effects::{EQ_BANDS, EQ_MAX_DB, EQ_PRESETS};
+use ytmr_player::{AudioEffects, QualityPreference};
 
 use crate::anim::Key;
 use crate::app::{App, Message};
@@ -29,6 +29,21 @@ pub enum Settings {
     CacheSize(u64),
     ClearCache,
     Notifications(bool),
+    Quality(QualityPreference),
+    AudioDevice(String),
+}
+
+/// Sortie audio dans la liste déroulante (nom lisible, identifiant mpv).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DeviceChoice {
+    name: String,
+    label: String,
+}
+
+impl std::fmt::Display for DeviceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -42,6 +57,15 @@ pub struct SettingsState {
 impl App {
     pub fn update_settings(&mut self, message: Settings) -> Task<Message> {
         match message {
+            Settings::Quality(quality) => {
+                // Affichée tout de suite ; le moteur confirme par son état.
+                self.state.quality_pref = quality;
+                self.send(Command::SetQuality(quality))
+            }
+            Settings::AudioDevice(name) => {
+                self.state.audio_device = name.clone();
+                self.send(Command::SetAudioDevice(name))
+            }
             Settings::Notifications(on) => {
                 self.notify
                     .enabled
@@ -132,13 +156,24 @@ fn dir_size(dir: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Vide le cache audio, sauf les morceaux gardés hors ligne.
 fn clear_audio(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let pinned: std::collections::HashSet<String> =
+        std::fs::read_to_string(dir.join("pinned.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
     for entry in entries.flatten() {
-        if entry.path().extension().is_some_and(|e| e == "audio") {
-            let _ = std::fs::remove_file(entry.path());
+        let path = entry.path();
+        let kept = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|id| pinned.contains(id));
+        if path.extension().is_some_and(|e| e == "audio") && !kept {
+            let _ = std::fs::remove_file(path);
         }
     }
 }
@@ -289,6 +324,80 @@ pub fn settings_page(app: &App) -> El<'_> {
         ),
         None => "Morceaux déjà écoutés gardés sur le disque.".to_owned(),
     };
+    // Qualité : trois choix, la description du choix courant en dessous.
+    let current = app.state.quality_pref;
+    let choice = |label: &'static str, value: QualityPreference| -> El<'_> {
+        let active = current == value;
+        button(text(label).size(13).font(SEMIBOLD))
+            .padding(Padding::from([7, 14]))
+            .style(move |theme, status| {
+                if active {
+                    style::pill(accent)(theme, status)
+                } else {
+                    style::pill_ghost(theme, status)
+                }
+            })
+            .on_press(Message::Settings(Settings::Quality(value)))
+            .into()
+    };
+    let quality = row![
+        column![
+            text("Qualité").size(15).font(SEMIBOLD),
+            muted(match current {
+                QualityPreference::Max => "La meilleure disponible (Opus ~256 kb/s avec Premium).",
+                QualityPreference::High => "Jusqu'à ~160 kb/s.",
+                QualityPreference::DataSaver => "Jusqu'à ~70 kb/s : économise les données mobiles.",
+            }),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+        row![
+            choice("Maximale", QualityPreference::Max),
+            choice("Haute", QualityPreference::High),
+            choice("Économe", QualityPreference::DataSaver),
+        ]
+        .spacing(6),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center);
+
+    // Sortie audio : la liste vient de mpv (mise à jour au branchement d'un casque…).
+    let devices: Vec<DeviceChoice> = app
+        .state
+        .audio_devices
+        .iter()
+        .map(|d| DeviceChoice {
+            name: d.name.clone(),
+            label: if d.name == "auto" {
+                "Sortie du système".to_owned()
+            } else {
+                d.description.clone()
+            },
+        })
+        .collect();
+    let wanted = if app.state.audio_device.is_empty() {
+        "auto"
+    } else {
+        app.state.audio_device.as_str()
+    };
+    let selected = devices.iter().find(|d| d.name == wanted).cloned();
+    let output = row![
+        column![
+            text("Sortie audio").size(15).font(SEMIBOLD),
+            muted("Haut-parleurs, casque, écran… « Sortie du système » suit celle de Windows."),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+        pick_list(devices, selected, |d: DeviceChoice| {
+            Message::Settings(Settings::AudioDevice(d.name))
+        })
+        .placeholder("Chargement…")
+        .text_size(13)
+        .width(Length::Fixed(280.0)),
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center);
+
     let cache = row![
         column![
             text("Cache audio").size(15).font(SEMIBOLD),
@@ -314,7 +423,7 @@ pub fn settings_page(app: &App) -> El<'_> {
                     .into()
             ),
             section_title("Son"),
-            card(normalize.into()),
+            card(column![normalize, quality, output].spacing(18).into()),
             section_title("Notifications"),
             card(
                 row![
