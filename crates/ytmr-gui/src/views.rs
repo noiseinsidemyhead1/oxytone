@@ -630,7 +630,10 @@ fn help_panel<'a>() -> El<'a> {
         ("Double-clic", "Lancer le morceau"),
         ("Glisser", "Vers la file ou une playlist de la bibliothèque"),
         ("F11", "Plein écran"),
-        ("Échap", "Fermer, désélectionner, remonter en haut de la page"),
+        (
+            "Échap",
+            "Fermer, désélectionner, remonter en haut de la page",
+        ),
     ];
     let mut list = column![].spacing(10);
     for (keys, what) in KEYS {

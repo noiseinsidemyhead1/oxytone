@@ -1837,7 +1837,8 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
         .filter(|s| !s.trim().is_empty() && s.trim() != "•")
         .collect::<Vec<_>>()
         .join(" · ");
-    let hovered = app.card_hover.as_deref() == Some(p.id.as_str());
+    let key = format!("tes:{}", p.id);
+    let hovered = app.card_hover.as_deref() == Some(key.as_str());
     let card = button(
         column![
             crate::views::cover_with_play(
@@ -1865,8 +1866,8 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
         .on_right_press(crate::context::open(crate::context::Target::Playlist(
             p.clone(),
         )))
-        .on_enter(Message::CardHover(p.id.clone()))
-        .on_exit(Message::CardUnhover(p.id.clone()))
+        .on_enter(Message::CardHover(key.clone()))
+        .on_exit(Message::CardUnhover(key))
         .into();
     // On peut y déposer des morceaux (playlists du compte seulement).
     if app.playlist_is_mine(p) {
@@ -2434,10 +2435,10 @@ fn home_open(item: &HomeItem, shelf: usize, index: usize) -> Message {
 fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> El<'a> {
     let id = app.url_cover(item.thumbnail_url.as_deref());
     let artist = item.kind == HomeKind::Artist;
-    let hovered = match &item.track {
-        Some(track) => app.hovered.as_deref() == Some(track.video_id.as_str()),
-        None => app.card_hover.as_deref() == Some(item.id.as_str()),
-    };
+    // Survol repéré par rangée : un même élément peut être dans deux rangées,
+    // seule la carte sous la souris s'allume.
+    let key = format!("{shelf}:{}", item.id);
+    let hovered = app.card_hover.as_deref() == Some(key.as_str());
     let play = match item.kind {
         HomeKind::Song => home_open(item, shelf, index),
         kind => Message::PlayItem(kind, item.id.clone()),
@@ -2471,8 +2472,15 @@ fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
         Some(track) => mouse_area(container(body).padding(8).style(style::card_box(hovered)))
             .on_double_click(home_open(item, shelf, index))
             .on_right_press(crate::context::open(home_target(item)))
-            .on_enter(Message::Hover(track.video_id.clone()))
-            .on_exit(Message::Unhover(track.video_id.clone()))
+            // Survol de la carte, et préchargement du morceau comme sur une ligne.
+            .on_enter(Message::Batch(vec![
+                Message::CardHover(key.clone()),
+                Message::Hover(track.video_id.clone()),
+            ]))
+            .on_exit(Message::Batch(vec![
+                Message::CardUnhover(key),
+                Message::Unhover(track.video_id.clone()),
+            ]))
             .interaction(iced::mouse::Interaction::Pointer)
             .into(),
         None => mouse_area(
@@ -2482,8 +2490,8 @@ fn home_card<'a>(app: &App, item: &'a HomeItem, shelf: usize, index: usize) -> E
                 .on_press(home_open(item, shelf, index)),
         )
         .on_right_press(crate::context::open(home_target(item)))
-        .on_enter(Message::CardHover(item.id.clone()))
-        .on_exit(Message::CardUnhover(item.id.clone()))
+        .on_enter(Message::CardHover(key.clone()))
+        .on_exit(Message::CardUnhover(key))
         .into(),
     }
 }
