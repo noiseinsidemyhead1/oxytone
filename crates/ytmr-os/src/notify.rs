@@ -66,10 +66,8 @@ pub(crate) fn track_started(track: &Track, settings: &NotifySettings, runtime: &
     let spawned = std::thread::Builder::new()
         .name("ytmr-notify".into())
         .spawn(move || {
-            let mut n = notify_rust::Notification::new();
-            n.summary(&title).body(&body).appname("ytmr");
             // Pochette : fichier du cache (téléchargé au besoin, 5 s au plus).
-            if let Some(covers) = covers {
+            let cover = covers.and_then(|covers| {
                 let id = covers.register(&cover_url);
                 let file = runtime.block_on(async {
                     tokio::time::timeout(
@@ -78,22 +76,43 @@ pub(crate) fn track_started(track: &Track, settings: &NotifySettings, runtime: &
                     )
                     .await
                 });
-                if let Ok(Ok(path)) = file {
-                    n.image_path(&path.to_string_lossy());
-                }
-            }
-            #[cfg(windows)]
-            {
-                register_app_id();
-                n.app_id(APP_ID);
-            }
-            if let Err(e) = n.show() {
+                file.ok()?.ok()
+            });
+            if let Err(e) = show(&title, &body, cover.as_deref()) {
                 tracing::debug!(error = %e, "notification");
             }
         });
     if let Err(e) = spawned {
         tracing::debug!(error = %e, "notification");
     }
+}
+
+/// Bulle compacte façon Discord : petite pochette à gauche (`appLogoOverride`),
+/// titre et artiste à droite, sans son (la musique joue déjà). notify-rust
+/// posait l'image en grand au-dessus du texte.
+#[cfg(windows)]
+fn show(title: &str, body: &str, cover: Option<&std::path::Path>) -> Result<(), String> {
+    use tauri_winrt_notification::{Duration, IconCrop, Toast};
+    register_app_id();
+    let mut toast = Toast::new(APP_ID)
+        .title(title)
+        .text1(body)
+        .sound(None)
+        .duration(Duration::Short);
+    if let Some(cover) = cover {
+        toast = toast.icon(cover, IconCrop::Square, "");
+    }
+    toast.show().map_err(|e| format!("{e:?}"))
+}
+
+#[cfg(not(windows))]
+fn show(title: &str, body: &str, cover: Option<&std::path::Path>) -> Result<(), String> {
+    let mut n = notify_rust::Notification::new();
+    n.summary(title).body(body).appname("ytmr");
+    if let Some(cover) = cover {
+        n.image_path(&cover.to_string_lossy());
+    }
+    n.show().map(|_| ()).map_err(|e| e.to_string())
 }
 
 /// `HKCU\Software\Classes\AppUserModelId\ytmr.player` → `DisplayName = ytmr` :

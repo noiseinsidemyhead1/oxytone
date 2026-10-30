@@ -6719,6 +6719,7 @@ version = "0.1.0"
 dependencies = [
  "notify-rust",
  "souvlaki",
+ "tauri-winrt-notification",
  "thiserror 2.0.21",
  "tokio",
  "tracing",

@@ -20,4 +20,6 @@ ytmr-core = { version = "0.1.0", path = "../ytmr-core" }
 ytmr-media = { version = "0.1.0", path = "../ytmr-media" }
 
 [target."cfg(windows)".dependencies]
+# Bulle compacte (pochette en petit à gauche) : notify-rust ne sait pas la poser ainsi.
+tauri-winrt-notification = "0.7.3"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_Registry"] }
