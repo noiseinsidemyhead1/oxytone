@@ -185,6 +185,7 @@ impl AudioCache {
                 let mut received = 0;
                 while let Some(bytes) = response.chunk().await.map_err(|e| e.to_string())? {
                     received += bytes.len() as u64;
+                    crate::traffic::add(bytes.len() as u64);
                     out.write_all(&bytes).await.map_err(|e| e.to_string())?;
                 }
                 done += received;

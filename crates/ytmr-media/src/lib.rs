@@ -173,6 +173,13 @@ fn source_url(url: &str, tier: Tier) -> String {
     url.to_owned()
 }
 
+/// Octets de jaquettes téléchargés depuis le lancement (Paramètres).
+static TRAFFIC: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn traffic_bytes() -> u64 {
+    TRAFFIC.load(Ordering::Relaxed)
+}
+
 pub struct Covers {
     dir: PathBuf,
     http: reqwest::Client,
@@ -344,6 +351,7 @@ impl Covers {
                 .await?
                 .to_vec(),
         };
+        TRAFFIC.fetch_add(data.len() as u64, Ordering::Relaxed);
         // Vérifie que c'est bien une image avant de la garder.
         image::load_from_memory(&data)?;
         write_atomic(&path, &data).await?;

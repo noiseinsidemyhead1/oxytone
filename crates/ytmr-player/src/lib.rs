@@ -10,6 +10,7 @@ pub mod effects;
 mod mpv;
 mod process;
 pub mod resolve;
+pub mod traffic;
 pub mod worker;
 
 use std::time::Duration;

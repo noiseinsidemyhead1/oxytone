@@ -371,12 +371,3 @@ fn ready<'a>(app: &App, found: &'a Found) -> El<'a> {
     )
     .into()
 }
-
-/// Bouton d'ouverture (en-tête de la bibliothèque).
-pub fn open_button<'a>() -> El<'a> {
-    button(text("Importer depuis Spotify").size(13).font(SEMIBOLD))
-        .padding(Padding::from([7, 14]))
-        .style(style::pill_ghost)
-        .on_press(Message::Import(Imp::Open))
-        .into()
-}

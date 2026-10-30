@@ -24,12 +24,15 @@ const POSITION_STEP: Duration = Duration::from_millis(250);
 const QUIT_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Propriétés mpv suivies, avec leur identifiant d'observation.
-const OBSERVED: [(u64, &str); 5] = [
+const OBSERVED: [(u64, &str); 7] = [
     (1, "pause"),
     (2, "time-pos"),
     (3, "duration"),
     (4, "volume"),
     (5, "audio-device-list"),
+    // Données reçues : taille des fichiers lus depuis Internet.
+    (6, "path"),
+    (7, "file-size"),
 ];
 
 pub struct MpvPlayer {
@@ -256,7 +259,12 @@ async fn translate_events(
     events: broadcast::Sender<PlayerEvent>,
 ) {
     let mut last_position: Option<Duration> = None;
+    // Compteur de données : chemin et taille du fichier en cours, comptés une
+    // fois par fichier quand il vient d'Internet (mpv le télécharge en entier
+    // dans son cache).
+    let mut traffic = Traffic::default();
     while let Some(msg) = raw.recv().await {
+        traffic.observe(&msg);
         let entry = msg
             .get("playlist_entry_id")
             .and_then(Value::as_u64)
@@ -281,6 +289,38 @@ async fn translate_events(
         }
     }
     let _ = events.send(PlayerEvent::Exited);
+}
+
+#[derive(Default)]
+struct Traffic {
+    remote: Option<bool>,
+    size: Option<u64>,
+    counted: bool,
+}
+
+impl Traffic {
+    fn observe(&mut self, msg: &Value) {
+        match msg.get("event").and_then(Value::as_str) {
+            Some("start-file") => *self = Self::default(),
+            Some("property-change") => {
+                let data = msg.get("data");
+                match msg.get("name").and_then(Value::as_str) {
+                    Some("path") => {
+                        self.remote = data
+                            .and_then(Value::as_str)
+                            .map(|p| p.starts_with("http://") || p.starts_with("https://"));
+                    }
+                    Some("file-size") => self.size = data.and_then(Value::as_u64),
+                    _ => return,
+                }
+                if let (Some(true), Some(size), false) = (self.remote, self.size, self.counted) {
+                    self.counted = true;
+                    crate::traffic::add(size);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 fn end_reason(msg: &Value) -> EndReason {

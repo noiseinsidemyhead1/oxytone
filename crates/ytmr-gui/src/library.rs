@@ -74,7 +74,6 @@ pub enum PlaylistSort {
 pub enum Overlay {
     /// Ajout d'un ou plusieurs morceaux à une playlist.
     AddTo(Vec<Track>),
-    NewPlaylist,
     ConfirmDelete {
         id: String,
         title: String,
@@ -230,6 +229,8 @@ pub enum Lib {
     NewNameInput(String),
     Create,
     Created(Result<(String, String), String>),
+    /// Playlist créée par « Nouvelle playlist » : on l'ouvre pour la nommer.
+    CreatedOpen(Result<(String, String), String>),
     /// Vérification différée de la liste après une création.
     ReloadPlaylists,
     FilterInput(String),
@@ -1238,10 +1239,46 @@ impl App {
                     iced::widget::operation::focus(NEW_PLAYLIST_INPUT),
                 ])
             }
+            // « Nouvelle playlist » : créée tout de suite (sans demander de nom)
+            // et ouverte, le nom prêt à être modifié.
             Lib::OpenNew => {
-                self.lib.new_name.clear();
-                self.lib.overlay = Some(Overlay::NewPlaylist);
-                iced::widget::operation::focus(NEW_PLAYLIST_INPUT)
+                let name = NEW_PLAYLIST_NAME.to_owned();
+                let op = self.lib.ready().map(|a| async move {
+                    let id = a.create_playlist(&name, Privacy::Private, &[]).await?;
+                    Ok((id, name))
+                });
+                call(op, Lib::CreatedOpen)
+            }
+            Lib::CreatedOpen(result) => {
+                let Ok((id, title)) = result.clone() else {
+                    return self.update(Message::Lib(Lib::Created(result)));
+                };
+                let listed = self.update(Message::Lib(Lib::Created(result)));
+                let playlist = Playlist {
+                    id: id.clone(),
+                    title,
+                    author: self
+                        .lib
+                        .profile
+                        .as_ref()
+                        .map(|p| p.name.clone())
+                        .unwrap_or_default(),
+                    description: None,
+                    duration_text: String::new(),
+                    thumbnail_url: None,
+                    tracks: Vec::new(),
+                    complete: true,
+                    owned: true,
+                };
+                // En cache : la page s'ouvre sans redemander à YouTube (qui ne
+                // la connaît pas encore).
+                if let Some(dir) = &self.lib.cache_dir {
+                    write_playlist(dir, &playlist);
+                }
+                self.lib.playlist = Some((id.clone(), Load::Ready(playlist)));
+                let open = self.go_to(Route::Playlist(id));
+                let rename = self.update(Message::Lib(Lib::RenameStart));
+                Task::batch([listed, open, rename])
             }
             Lib::CloseOverlay => {
                 self.lib.overlay = None;
@@ -1937,6 +1974,9 @@ pub(crate) fn download_pill<'a>(
         .into()
 }
 
+/// Nom d'une playlist créée par « Nouvelle playlist » (à renommer aussitôt).
+const NEW_PLAYLIST_NAME: &str = "Nouvelle playlist";
+
 /// Identifiant de la playlist « Téléchargés » (propre à ytmr).
 pub const DOWNLOADS_ID: &str = "ytmr-downloads";
 
@@ -2285,7 +2325,6 @@ pub fn overlay(app: &App) -> Option<El<'_>> {
         Some(panel) => panel,
         None => match app.lib.overlay.as_ref()? {
             Overlay::AddTo(tracks) => add_to_panel(app, Some(tracks)),
-            Overlay::NewPlaylist => add_to_panel(app, None),
             Overlay::ConfirmDelete { title, .. } => confirm_panel(title),
         },
     };

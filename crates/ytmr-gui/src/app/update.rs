@@ -650,6 +650,7 @@ impl App {
                     ytmr_os::tray::shutdown();
                 }
                 self.shutting_down = true;
+                self.save_traffic();
                 match std::mem::replace(&mut self.phase, Phase::Starting) {
                     Phase::Ready(backend) => {
                         Task::perform(backend.shutdown(), |()| Message::ShutdownDone)

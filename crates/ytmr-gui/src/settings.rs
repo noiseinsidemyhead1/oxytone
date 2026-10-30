@@ -26,7 +26,8 @@ pub enum Settings {
     Release,
     Preset([i8; 10]),
     Normalize(bool),
-    CacheSize(u64),
+    /// Place sur le disque : cache d'écoute, téléchargements (octets, titres).
+    CacheSize(AudioUsage),
     ClearCache,
     Notifications(bool),
     Quality(QualityPreference),
@@ -52,8 +53,22 @@ impl std::fmt::Display for DeviceChoice {
 pub struct SettingsState {
     /// Gains affichés pendant un glissement, avant envoi au moteur.
     pub draft: Option<[i8; 10]>,
-    pub audio_cache_bytes: Option<u64>,
+    pub audio_usage: Option<AudioUsage>,
     pub audio_dir: Option<PathBuf>,
+    /// Données Internet : total du mois (fichier), et part de cette session
+    /// déjà comptée dedans.
+    traffic_month: u64,
+    traffic_saved: u64,
+}
+
+/// Place prise par le son sur le disque.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct AudioUsage {
+    /// Cache d'écoute (vidable, limité en taille).
+    pub cache: u64,
+    /// Téléchargements (hors ligne : jamais effacés par « Vider »).
+    pub downloads: u64,
+    pub downloaded_tracks: usize,
 }
 
 impl App {
@@ -138,8 +153,8 @@ impl App {
                 normalize,
                 ..self.state.effects
             }),
-            Settings::CacheSize(bytes) => {
-                self.settings.audio_cache_bytes = Some(bytes);
+            Settings::CacheSize(usage) => {
+                self.settings.audio_usage = Some(usage);
                 Task::none()
             }
             Settings::ClearCache => {
@@ -150,12 +165,12 @@ impl App {
                     async move {
                         tokio::task::spawn_blocking(move || {
                             clear_audio(&dir);
-                            dir_size(&dir)
+                            audio_usage(&dir)
                         })
                         .await
-                        .unwrap_or(0)
+                        .unwrap_or_default()
                     },
-                    |bytes| Message::Settings(Settings::CacheSize(bytes)),
+                    |usage| Message::Settings(Settings::CacheSize(usage)),
                 )
             }
         }
@@ -167,32 +182,109 @@ impl App {
         self.send(Command::SetEffects(effects))
     }
 
-    /// À l'ouverture de la page : place prise par le cache audio.
+    /// À l'ouverture de la page : place prise par le son, données du mois.
     pub fn open_settings(&mut self) -> Task<Message> {
+        self.save_traffic();
         let Some(dir) = self.settings.audio_dir.clone() else {
             return Task::none();
         };
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || dir_size(&dir))
+                tokio::task::spawn_blocking(move || audio_usage(&dir))
                     .await
-                    .unwrap_or(0)
+                    .unwrap_or_default()
             },
-            |bytes| Message::Settings(Settings::CacheSize(bytes)),
+            |usage| Message::Settings(Settings::CacheSize(usage)),
         )
+    }
+
+    fn traffic_file(&self) -> Option<PathBuf> {
+        self.lib.cache_dir.as_ref().map(|d| d.join("traffic.json"))
+    }
+
+    /// Ajoute au total du mois ce que cette session a reçu depuis la dernière
+    /// fois (ouverture des Paramètres, fermeture de l'appli).
+    pub fn save_traffic(&mut self) {
+        let Some(path) = self.traffic_file() else {
+            return;
+        };
+        let session = session_traffic();
+        let mut months: std::collections::BTreeMap<String, u64> =
+            crate::collection::read_json(&path).unwrap_or_default();
+        let month = current_month();
+        let total = months.entry(month).or_default();
+        *total += session.saturating_sub(self.settings.traffic_saved);
+        self.settings.traffic_month = *total;
+        self.settings.traffic_saved = session;
+        crate::library::write_json(&path, &months);
     }
 }
 
-fn dir_size(dir: &Path) -> u64 {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| e.metadata().ok())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
+/// Octets reçus depuis le lancement : son (direct et téléchargé) et pochettes.
+fn session_traffic() -> u64 {
+    ytmr_player::traffic::audio_bytes() + ytmr_media::traffic_bytes()
+}
+
+/// « 2026-10 » (mois local).
+fn current_month() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    month_of_day((now + crate::views::utc_offset_secs()).div_euclid(86_400))
+}
+
+/// Jours depuis 1970 → « AAAA-MM » (date civile, algorithme de H. Hinnant).
+fn month_of_day(days: i64) -> String {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year}-{month:02}")
+}
+
+fn megabytes(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} Go", mb / 1024.0).replace('.', ",")
+    } else {
+        format!("{mb:.0} Mo")
+    }
+}
+
+/// Cache d'écoute et téléchargements (morceaux gardés : `pinned.json`).
+fn audio_usage(dir: &Path) -> AudioUsage {
+    let pinned: std::collections::HashSet<String> =
+        std::fs::read_to_string(dir.join("pinned.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default();
+    let mut usage = AudioUsage::default();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return usage;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "audio") {
+            continue;
+        }
+        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+        let kept = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .is_some_and(|id| pinned.contains(id));
+        if kept {
+            usage.downloads += size;
+            usage.downloaded_tracks += 1;
+        } else {
+            usage.cache += size;
+        }
+    }
+    usage
 }
 
 /// Vide le cache audio, sauf les morceaux gardés hors ligne.
@@ -356,13 +448,30 @@ pub fn settings_page(app: &App) -> El<'_> {
     .spacing(16)
     .align_y(Alignment::Center);
 
-    let cache_text = match app.settings.audio_cache_bytes {
-        Some(bytes) => format!(
-            "{:.0} Mo utilisés. Les morceaux déjà écoutés repartent sans attendre.",
-            bytes as f64 / 1_048_576.0
+    let usage = app.settings.audio_usage;
+    let cache_text = match usage {
+        Some(u) => format!(
+            "{} utilisés. Les morceaux déjà écoutés repartent sans attendre ; les plus anciens partent d'eux-mêmes.",
+            megabytes(u.cache)
         ),
         None => "Morceaux déjà écoutés gardés sur le disque.".to_owned(),
     };
+    let downloads_text = match usage {
+        Some(u) if u.downloaded_tracks > 0 => format!(
+            "{} · {} titres gardés pour l'écoute hors ligne (jamais effacés par « Vider »).",
+            megabytes(u.downloads),
+            u.downloaded_tracks
+        ),
+        Some(_) => "Aucun titre téléchargé.".to_owned(),
+        None => "Titres gardés pour l'écoute hors ligne.".to_owned(),
+    };
+    let session = session_traffic();
+    let month = app.settings.traffic_month + session.saturating_sub(app.settings.traffic_saved);
+    let traffic_text = format!(
+        "Ce mois-ci : {} · depuis le lancement : {}",
+        megabytes(month),
+        megabytes(session)
+    );
     // Qualité : trois choix, la description du choix courant en dessous.
     let current = app.state.quality_pref;
     let choice = |label: &'static str, value: QualityPreference| -> El<'_> {
@@ -437,20 +546,36 @@ pub fn settings_page(app: &App) -> El<'_> {
     .spacing(16)
     .align_y(Alignment::Center);
 
-    let cache = row![
-        column![
-            text("Cache audio").size(15).font(SEMIBOLD),
-            muted(cache_text),
+    let cache = column![
+        row![
+            column![
+                text("Cache d'écoute").size(15).font(SEMIBOLD),
+                muted(cache_text),
+            ]
+            .spacing(4)
+            .width(Length::Fill),
+            button(text("Vider").size(13).font(SEMIBOLD))
+                .padding(Padding::from([7, 16]))
+                .style(style::pill_ghost)
+                .on_press(Message::Settings(Settings::ClearCache)),
         ]
-        .spacing(4)
-        .width(Length::Fill),
-        button(text("Vider").size(13).font(SEMIBOLD))
-            .padding(Padding::from([7, 16]))
-            .style(style::pill_ghost)
-            .on_press(Message::Settings(Settings::ClearCache)),
+        .spacing(16)
+        .align_y(Alignment::Center),
+        column![
+            text("Téléchargements").size(15).font(SEMIBOLD),
+            muted(downloads_text),
+        ]
+        .spacing(4),
+        column![
+            text("Données Internet").size(15).font(SEMIBOLD),
+            muted(traffic_text),
+            text("Son (écouté et téléchargé) et pochettes.")
+                .size(12)
+                .color(style::TEXT_FAINT),
+        ]
+        .spacing(4),
     ]
-    .spacing(16)
-    .align_y(Alignment::Center);
+    .spacing(18);
 
     page_scroll(
         column![
@@ -532,20 +657,39 @@ pub fn settings_page(app: &App) -> El<'_> {
             card(cache.into()),
             section_title("Compte"),
             card(
-                row![
-                    column![
-                        text("Historique d'écoute").size(15).font(SEMIBOLD),
-                        muted("Tous les titres écoutés récemment, à relancer d'un clic."),
+                column![
+                    row![
+                        column![
+                            text("Historique d'écoute").size(15).font(SEMIBOLD),
+                            muted("Tous les titres écoutés récemment, à relancer d'un clic."),
+                        ]
+                        .spacing(4)
+                        .width(Length::Fill),
+                        button(text("Ouvrir").size(13).font(SEMIBOLD))
+                            .padding(Padding::from([7, 16]))
+                            .style(style::pill_ghost)
+                            .on_press(Message::Navigate(crate::app::Route::History)),
                     ]
-                    .spacing(4)
-                    .width(Length::Fill),
-                    button(text("Ouvrir").size(13).font(SEMIBOLD))
-                        .padding(Padding::from([7, 16]))
-                        .style(style::pill_ghost)
-                        .on_press(Message::Navigate(crate::app::Route::History)),
+                    .spacing(16)
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Importer depuis Spotify").size(15).font(SEMIBOLD),
+                            muted("Une playlist Spotify (lien public ou export CSV) recréée sur ton compte YouTube Music."),
+                        ]
+                        .spacing(4)
+                        .width(Length::Fill),
+                        button(text("Importer").size(13).font(SEMIBOLD))
+                            .padding(Padding::from([7, 16]))
+                            .style(style::pill_ghost)
+                            .on_press_maybe(app.lib.ready().map(|_| {
+                                Message::Import(crate::import::Imp::Open)
+                            })),
+                    ]
+                    .spacing(16)
+                    .align_y(Alignment::Center),
                 ]
-                .spacing(16)
-                .align_y(Alignment::Center)
+                .spacing(18)
                 .into()
             ),
         ]
@@ -557,4 +701,18 @@ pub fn settings_page(app: &App) -> El<'_> {
             left: 28.0,
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn months_from_days() {
+        assert_eq!(month_of_day(0), "1970-01");
+        // 30 octobre 2026 = 20 756 jours après le 1er janvier 1970.
+        assert_eq!(month_of_day(20_756), "2026-10");
+        assert_eq!(month_of_day(20_759), "2026-11");
+        assert_eq!(month_of_day(11_016), "2000-02");
+    }
 }

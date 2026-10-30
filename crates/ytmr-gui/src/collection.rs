@@ -429,12 +429,6 @@ fn pill<'a>(app: &App, label: &'a str, active: bool, message: Message) -> El<'a>
 pub fn library_page(app: &App) -> El<'_> {
     let header = row![
         text("Bibliothèque").size(30).font(BOLD).width(Length::Fill),
-        // Import Spotify : seulement connecté (la playlist est créée sur le compte).
-        if app.lib.ready().is_some() {
-            crate::import::open_button()
-        } else {
-            Space::new().into()
-        },
         button(
             row![
                 icon(Icon::Plus, 16.0, style::BG),
