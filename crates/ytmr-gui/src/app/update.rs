@@ -844,6 +844,8 @@ impl App {
             Message::Lib(message) => self.update_library(message),
             Message::Settings(message) => self.update_settings(message),
             Message::Stats(message) => self.update_stats(message),
+            Message::Import(message) => self.update_import(message),
+            Message::Toast(message) => self.show_toast(message),
             Message::Coll(message) => self.update_collection(message),
             Message::Window(action) => self.update_window(action),
             Message::Noop => Task::none(),

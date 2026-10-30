@@ -13,6 +13,7 @@ mod chrome;
 mod collection;
 mod context;
 mod icons;
+mod import;
 mod library;
 mod settings;
 mod smooth;

@@ -8,6 +8,7 @@ pub mod account;
 pub mod home;
 pub mod lyrics;
 mod raw;
+pub mod spotify;
 
 pub use raw::normalize_query;
 

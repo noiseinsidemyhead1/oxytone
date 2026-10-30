@@ -2270,10 +2270,15 @@ fn sort_pills(app: &App) -> El<'_> {
 
 /// Fenêtre par-dessus la page (ajout à une playlist, confirmation).
 pub fn overlay(app: &App) -> Option<El<'_>> {
-    let panel: El<'_> = match app.lib.overlay.as_ref()? {
-        Overlay::AddTo(tracks) => add_to_panel(app, Some(tracks)),
-        Overlay::NewPlaylist => add_to_panel(app, None),
-        Overlay::ConfirmDelete { title, .. } => confirm_panel(title),
+    let import = crate::import::panel(app);
+    let importing = import.is_some();
+    let panel: El<'_> = match import {
+        Some(panel) => panel,
+        None => match app.lib.overlay.as_ref()? {
+            Overlay::AddTo(tracks) => add_to_panel(app, Some(tracks)),
+            Overlay::NewPlaylist => add_to_panel(app, None),
+            Overlay::ConfirmDelete { title, .. } => confirm_panel(title),
+        },
     };
     let dim = mouse_area(
         container(Space::new())
@@ -2284,8 +2289,12 @@ pub fn overlay(app: &App) -> Option<El<'_>> {
                 ..Default::default()
             }),
     )
-    .on_press(Message::Lib(Lib::CloseOverlay));
-    let wide = matches!(app.lib.overlay, Some(Overlay::AddTo(_)));
+    .on_press(if importing {
+        Message::Import(crate::import::Imp::Close)
+    } else {
+        Message::Lib(Lib::CloseOverlay)
+    });
+    let wide = importing || matches!(app.lib.overlay, Some(Overlay::AddTo(_)));
     let centered = container(
         // Le panneau capture les clics : ils ne ferment pas la fenêtre.
         mouse_area(

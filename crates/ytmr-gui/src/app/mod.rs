@@ -302,6 +302,8 @@ pub enum Message {
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
     CloseRequested,
+    Import(crate::import::Imp),
+    Toast(String),
     SearchTab(SearchTab),
     /// Relancer une recherche récente.
     SearchRecent(String),
@@ -428,6 +430,8 @@ pub struct App {
     /// Onglet des résultats, et recherches récentes (les plus récentes d'abord).
     pub search_tab: SearchTab,
     pub recent_searches: Vec<String>,
+    /// Fenêtre « Importer depuis Spotify » ouverte.
+    pub import: Option<crate::import::Import>,
     /// Résultats reçus, en attente de leurs pochettes (au plus ~0,7 s).
     search_pending: Option<(u64, String, SearchAll)>,
     search_inflight: bool,
@@ -569,6 +573,7 @@ impl App {
             search_shown: String::new(),
             search_tab: SearchTab::All,
             recent_searches: Vec::new(),
+            import: None,
             search_pending: None,
             search_inflight: false,
             fullscreen: false,
@@ -708,6 +713,15 @@ impl App {
                 iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
                     iced::mouse::Button::Left,
                 )) => Some(Message::QueueDrag(QueueDrag::Release)),
+                _ => None,
+            }));
+        }
+        // Fichier CSV déposé sur la fenêtre pendant un import Spotify.
+        if self.import.is_some() {
+            subscriptions.push(iced::event::listen_with(|event, _, _| match event {
+                iced::Event::Window(window::Event::FileDropped(path)) => {
+                    Some(Message::Import(crate::import::Imp::File(path)))
+                }
                 _ => None,
             }));
         }
