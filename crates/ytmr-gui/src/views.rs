@@ -1081,11 +1081,12 @@ fn now_playing(app: &App) -> El<'_> {
             let eased = t * t * (3.0 - 2.0 * t);
             stack![
                 cover(art(previous.as_deref()), side, 14.0),
-                faded_cover(art(id.as_deref()), side, 14.0, eased),
+                faded_cover(art(app.np_art.as_deref()), side, 14.0, eased),
             ]
             .into()
         }
-        None => cover(art(id.as_deref()), side, 14.0),
+        // La pochette prête (l'ancienne tant que la nouvelle charge).
+        None => cover(art(app.np_art.as_deref().or(id.as_deref())), side, 14.0),
     };
     let big = container(shown).style(style::cover_frame);
     let mut info = column![

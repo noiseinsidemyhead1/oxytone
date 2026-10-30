@@ -51,6 +51,9 @@ pub const HERO: u32 = 512;
 pub const BIG: u32 = 1200;
 /// Fondu entre deux pochettes dans le mode focus.
 pub const NP_FADE: Duration = Duration::from_millis(700);
+/// Attente maximale de la pochette en pleine définition avant de se contenter
+/// de la 512 px.
+pub const NP_HD_WAIT: Duration = Duration::from_secs(3);
 /// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
 const COVER_BUDGET: u64 = 64 << 20;
 
@@ -451,6 +454,8 @@ pub struct App {
     /// Icône dans la zone de notification (Windows) : fermer cache la fenêtre.
     pub tray: bool,
     pub np_fade: Option<(std::time::Instant, Option<String>)>,
+    /// Nouveau morceau dont la pochette n'est pas encore prête (depuis quand).
+    pub np_waiting: Option<std::time::Instant>,
     /// Ligne survolée dans la file d'attente.
     pub queue_hover: Option<usize>,
     queue_hover_video: Option<String>,
@@ -585,6 +590,7 @@ impl App {
             np_art: None,
             tray: false,
             np_fade: None,
+            np_waiting: None,
             queue_hover: None,
             queue_hover_video: None,
             visible_covers: std::collections::HashSet::new(),
@@ -731,6 +737,7 @@ impl App {
             || self.fps_meter.is_some()
             || self.controls_anim.is_some()
             || self.np_fade.is_some()
+            || (self.route == Route::NowPlaying && self.np_waiting.is_some())
             || self.anims.is_running()
             || self.queue_fade.is_some()
             || self.is_loading()

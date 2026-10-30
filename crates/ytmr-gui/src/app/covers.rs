@@ -163,7 +163,15 @@ impl App {
         if used <= COVER_BUDGET {
             return;
         }
-        let keep: Vec<Option<String>> = vec![self.current_cover(), self.page_cover()];
+        let mut keep: Vec<Option<String>> = vec![
+            self.current_cover(),
+            self.page_cover(),
+            // Pochettes du mode focus encore à l'écran (pendant l'attente, le fondu).
+            self.np_art.clone(),
+        ];
+        if let Some((_, previous)) = &self.np_fade {
+            keep.push(previous.clone());
+        }
         // Jamais une pochette à l'écran : libérée, elle restait un carré vide
         // (seule celle du morceau en cours revenait).
         let mut loaded: Vec<((String, u32), u64)> = self

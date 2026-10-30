@@ -2060,7 +2060,6 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
             .color(style::TEXT_DIM)
             .wrapping(iced::widget::text::Wrapping::None),
         title_or_edit,
-        actions
     ]
     .spacing(6);
 
@@ -2085,28 +2084,37 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
                 Message::Lib(Lib::PlayAt(0)),
                 Message::Lib(Lib::PlayShuffled),
             )),
-            // Playlist d'un autre : on peut l'enregistrer dans sa bibliothèque.
-            extra: (!liked && !playlist.owned).then(|| {
-                let saved = app.playlist_saved(id);
-                crate::collection::heart(
-                    app,
-                    saved,
-                    Message::Coll(crate::collection::Coll::SavePlaylist(
-                        PlaylistSummary {
-                            id: playlist.id.clone(),
-                            title: playlist.title.clone(),
-                            tracks_text: format!("{} titres", playlist.tracks.len()),
-                            author: playlist.author.clone(),
-                            thumbnail_url: playlist.thumbnail_url.clone(),
+            // Sur la même ligne que Lecture / Aléatoire : le cœur (playlist
+            // d'un autre, à enregistrer), puis télécharger, mettre à jour…
+            extra: Some({
+                let heart: El<'_> = if !liked && !playlist.owned {
+                    let saved = app.playlist_saved(id);
+                    crate::collection::heart(
+                        app,
+                        saved,
+                        Message::Coll(crate::collection::Coll::SavePlaylist(
+                            PlaylistSummary {
+                                id: playlist.id.clone(),
+                                title: playlist.title.clone(),
+                                tracks_text: format!("{} titres", playlist.tracks.len()),
+                                author: playlist.author.clone(),
+                                thumbnail_url: playlist.thumbnail_url.clone(),
+                            },
+                            !saved,
+                        )),
+                        if saved {
+                            "Retirer de la bibliothèque"
+                        } else {
+                            "Ajouter à la bibliothèque"
                         },
-                        !saved,
-                    )),
-                    if saved {
-                        "Retirer de la bibliothèque"
-                    } else {
-                        "Ajouter à la bibliothèque"
-                    },
-                )
+                    )
+                } else {
+                    Space::new().into()
+                };
+                row![heart, actions]
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .into()
             }),
         },
     );

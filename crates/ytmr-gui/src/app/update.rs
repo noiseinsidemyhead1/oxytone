@@ -31,12 +31,24 @@ impl App {
                 .anims
                 .aim(Key::Seek, self.state.position.as_secs_f32(), f32::INFINITY),
         }
-        // Mode focus : quand la pochette du nouveau morceau est prête, fondu
-        // depuis l'ancienne.
+        // Mode focus : l'ancienne pochette reste affichée jusqu'à ce que la
+        // nouvelle soit là en pleine définition, puis fondu. La 512 px ne sert
+        // que si la grande a échoué, ou après NP_HD_WAIT.
         if self.route == Route::NowPlaying {
             let current = self.current_cover();
+            if current == self.np_art {
+                self.np_waiting = None;
+            } else {
+                let since = *self.np_waiting.get_or_insert_with(std::time::Instant::now);
+                if since.elapsed() >= NP_HD_WAIT {
+                    self.np_waiting = None;
+                }
+            }
             let ready = current.as_deref().is_some_and(|id| {
-                self.cover(Some(id), BIG).is_some() || self.cover(Some(id), HERO).is_some()
+                let big_failed = !self.covers.contains_key(&(id.to_owned(), BIG));
+                let waited = self.np_waiting.is_none();
+                self.cover(Some(id), BIG).is_some()
+                    || ((big_failed || waited) && self.cover(Some(id), HERO).is_some())
             });
             if ready && current != self.np_art {
                 let previous = std::mem::replace(&mut self.np_art, current);
