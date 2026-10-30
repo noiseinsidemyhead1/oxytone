@@ -1742,11 +1742,19 @@ mod tests {
         until("chargement", || !player.calls().is_empty()).await;
         player.emit(PlayerEvent::Started(EntryId(1)));
 
-        until("anticipation", || resolver.background().len() >= 10).await;
-        let mut warmed = resolver.background();
-        warmed.sort();
-        let mut expected: Vec<String> = (2..12).map(|n| format!("v{n}")).collect();
-        expected.sort();
+        // On attend que *tous* les attendus soient là (et non « 10 résolutions » :
+        // sous charge, une résolution relancée comptait deux fois et la
+        // comparaison partait trop tôt), puis on compare sans les doublons.
+        let expected: std::collections::BTreeSet<String> =
+            (2..12).map(|n| format!("v{n}")).collect();
+        until("anticipation", || {
+            let warmed: std::collections::BTreeSet<String> =
+                resolver.background().into_iter().collect();
+            warmed.is_superset(&expected)
+        })
+        .await;
+        let warmed: std::collections::BTreeSet<String> =
+            resolver.background().into_iter().collect();
         assert_eq!(
             warmed, expected,
             "v1 est préchargé en urgent, v12+ hors fenêtre"

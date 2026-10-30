@@ -52,10 +52,13 @@ impl Dependencies {
                     hint: install_hint("yt-dlp"),
                 })?;
 
-        let js_runtime = if probe(Path::new("deno")).await.is_some() {
-            Some(JsRuntime::Deno)
-        } else if probe(Path::new("node")).await.is_some() {
+        // node d'abord : mesuré un peu plus rapide que deno pour les défis de
+        // YouTube (1,45 s contre 1,64 s par morceau, 2026-10-30). yt-dlp
+        // n'active que deno de lui-même : node est alors demandé explicitement.
+        let js_runtime = if probe(Path::new("node")).await.is_some() {
             Some(JsRuntime::Node)
+        } else if probe(Path::new("deno")).await.is_some() {
+            Some(JsRuntime::Deno)
         } else {
             tracing::warn!(
                 "ni deno ni node trouvé : yt-dlp risque d'échouer sur YouTube (installer deno)"
