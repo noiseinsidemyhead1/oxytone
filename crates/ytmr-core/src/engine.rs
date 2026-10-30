@@ -348,6 +348,7 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         current_entry: None,
         pending: None,
         preloading: None,
+        preload_failed: None,
         awaiting_preload: None,
         load_generation: 0,
         paused: false,
@@ -427,6 +428,9 @@ struct Engine<P, R, C> {
     pending: Option<Pending>,
     /// Résolution de préchargement en cours, et depuis quand.
     preloading: Option<(QueueId, Instant)>,
+    /// Préchargement échoué pour cette entrée : pas de nouvel essai avant le
+    /// prochain changement de morceau.
+    preload_failed: Option<QueueId>,
     /// Démarrage en attente du préchargement en cours (génération de chargement).
     awaiting_preload: Option<u64>,
     load_generation: u64,
@@ -766,6 +770,10 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     }
 
     fn pump_warm(&mut self) {
+        // Un morceau démarre à froid : rien ne doit lui prendre le processeur.
+        if self.current_entry.is_none() && self.state.status == Status::Loading {
+            return;
+        }
         if self.state.offline {
             self.warm_wanted.clear();
             self.offline_wanted.clear();
@@ -910,9 +918,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         if self.resume_at.is_some_and(|(r, _)| r != id) {
             self.resume_at = None;
         }
+        self.preload_failed = None;
         // File presque vide : la radio peut se préparer pendant le chargement.
         self.maybe_fetch_radio();
-        self.refresh_lookahead();
 
         if let Some(pending) = self.pending.take_if(|p| p.id == id) {
             // Déjà chargé dans le lecteur : passage instantané.
@@ -920,6 +928,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             self.current_entry = Some(pending.entry);
             self.state.quality = Some(pending.quality);
             self.state.next_ready = false;
+            self.refresh_lookahead();
             return Ok(());
         }
 
@@ -932,8 +941,14 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         }
 
         if let Some(source) = self.resolver.cached(&track.video_id) {
-            return self.load_source(&source).await;
+            let loaded = self.load_source(&source).await;
+            self.refresh_lookahead();
+            return loaded;
         }
+        // Démarrage à froid : le morceau demandé passe seul. Les suivants ne sont
+        // préparés qu'une fois qu'il joue (`on_started`) : avant, les 10 suivants
+        // partaient en même temps dans le même yt-dlp et le ralentissaient
+        // (4-5 s au lieu de ~1,5 s).
         if self
             .preloading
             .is_some_and(|(p, since)| p == id && since.elapsed() >= PRELOAD_WAIT_THRESHOLD)
@@ -1028,6 +1043,11 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             .filter(|s| s.quality == StreamQuality::High)
         {
             self.enqueue_pending(id, &source).await;
+            return;
+        }
+        // Déjà échoué (ou hors ligne sans fichier) : il démarrera à froid ; le
+        // réessayer à chaque évènement faisait des centaines d'essais par seconde.
+        if self.preload_failed == Some(id) || self.state.offline {
             return;
         }
         self.preloading = Some((id, Instant::now()));
@@ -1172,7 +1192,10 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                         }
                     }
                     // Pas grave : le morceau démarrera à froid.
-                    Err(e) => tracing::warn!(error = %e, "préchargement échoué"),
+                    Err(e) => {
+                        self.preload_failed = Some(id);
+                        tracing::warn!(error = %e, "préchargement échoué");
+                    }
                 }
             }
             TaskDone::Warmed { video_id } => {
@@ -2009,6 +2032,31 @@ mod tests {
             warmed, expected,
             "v1 est préchargé en urgent, v12+ hors fenêtre"
         );
+    }
+
+    #[tokio::test]
+    async fn cold_start_runs_alone_until_the_track_plays() {
+        let player = FakePlayer::new();
+        let resolver = Arc::new(FakeResolver::default());
+        let core = start_full(&player, false, vec![], Arc::clone(&resolver), None);
+        core.send(Command::PlayTracks {
+            tracks: tracks(0..15),
+            start: 0,
+        })
+        .await
+        .unwrap();
+        // Le morceau est chargé dans le lecteur mais n'a pas encore démarré.
+        until("chargement", || !player.calls().is_empty()).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            resolver.background().is_empty(),
+            "rien en fond pendant le démarrage à froid"
+        );
+        player.emit(PlayerEvent::Started(EntryId(1)));
+        until("anticipation après le démarrage", || {
+            !resolver.background().is_empty()
+        })
+        .await;
     }
 
     #[tokio::test]
