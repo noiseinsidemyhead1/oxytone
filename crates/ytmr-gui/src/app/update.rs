@@ -31,6 +31,14 @@ impl App {
                 .anims
                 .aim(Key::Seek, self.state.position.as_secs_f32(), f32::INFINITY),
         }
+        // Mode focus : paroles synchronisées arrivées (ou parties) → glissement.
+        if self.route == Route::NowPlaying {
+            let target = if self.np_synced() { 1.0 } else { 0.0 };
+            if target != self.np_split_target {
+                self.np_split_target = target;
+                self.np_split_anim = Some((std::time::Instant::now(), self.np_split));
+            }
+        }
         // Mode focus : l'ancienne pochette reste affichée jusqu'à ce que la
         // nouvelle soit là en pleine définition, puis fondu. La 512 px ne sert
         // que si la grande a échoué, ou après NP_HD_WAIT.
@@ -787,6 +795,16 @@ impl App {
                     .is_some_and(|(since, _)| now.saturating_duration_since(*since) >= NP_FADE)
                 {
                     self.np_fade = None;
+                }
+                if let Some((since, from)) = self.np_split_anim {
+                    let t = (now.saturating_duration_since(since).as_secs_f32()
+                        / NP_SPLIT.as_secs_f32())
+                    .min(1.0);
+                    let eased = t * t * (3.0 - 2.0 * t);
+                    self.np_split = from + (self.np_split_target - from) * eased;
+                    if t >= 1.0 {
+                        self.np_split_anim = None;
+                    }
                 }
                 if let Some((since, from)) = self.controls_anim {
                     let t = (now.saturating_duration_since(since).as_secs_f32()

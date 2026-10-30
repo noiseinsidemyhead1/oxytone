@@ -151,6 +151,7 @@ impl App {
                 // Pas de fondu à l'ouverture : la pochette est déjà là.
                 self.np_art = self.current_cover();
                 self.np_fade = None;
+                self.np_split_snap();
                 let big = self.want_cover(self.current_cover(), BIG);
                 Task::batch([self.want_lyrics(), big])
             }

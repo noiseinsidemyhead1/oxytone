@@ -54,6 +54,8 @@ pub const NP_FADE: Duration = Duration::from_millis(700);
 /// Attente maximale de la pochette en pleine définition avant de se contenter
 /// de la 512 px.
 pub const NP_HD_WAIT: Duration = Duration::from_secs(3);
+/// Mode focus : la pochette glisse vers la gauche et les paroles apparaissent.
+pub const NP_SPLIT: Duration = Duration::from_millis(650);
 /// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
 const COVER_BUDGET: u64 = 64 << 20;
 
@@ -456,6 +458,11 @@ pub struct App {
     pub np_fade: Option<(std::time::Instant, Option<String>)>,
     /// Nouveau morceau dont la pochette n'est pas encore prête (depuis quand).
     pub np_waiting: Option<std::time::Instant>,
+    /// Paroles du mode focus : 0 = pochette seule au centre, 1 = paroles à
+    /// droite ; animé de `from` vers la cible depuis l'instant donné.
+    pub np_split: f32,
+    np_split_target: f32,
+    np_split_anim: Option<(std::time::Instant, f32)>,
     /// Ligne survolée dans la file d'attente.
     pub queue_hover: Option<usize>,
     queue_hover_video: Option<String>,
@@ -591,6 +598,9 @@ impl App {
             tray: false,
             np_fade: None,
             np_waiting: None,
+            np_split: 0.0,
+            np_split_target: 0.0,
+            np_split_anim: None,
             queue_hover: None,
             queue_hover_video: None,
             visible_covers: std::collections::HashSet::new(),
@@ -737,6 +747,7 @@ impl App {
             || self.fps_meter.is_some()
             || self.controls_anim.is_some()
             || self.np_fade.is_some()
+            || self.np_split_anim.is_some()
             || (self.route == Route::NowPlaying && self.np_waiting.is_some())
             || self.anims.is_running()
             || self.queue_fade.is_some()

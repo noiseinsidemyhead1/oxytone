@@ -31,6 +31,24 @@ impl App {
         self.show_queue && self.right_panel == RightPanel::Lyrics
     }
 
+    /// Le morceau en cours a des paroles synchronisées (affichées en mode focus).
+    pub(crate) fn np_synced(&self) -> bool {
+        self.state.current.as_ref().is_some_and(|e| {
+            matches!(
+                self.lyrics.get(&e.track.video_id),
+                Some(Load::Ready(Some(l))) if matches!(l.body, ytmr_catalog::lyrics::LyricsBody::Synced(_))
+            )
+        })
+    }
+
+    /// À l'ouverture du mode focus : la mise en page est tout de suite la bonne.
+    pub(crate) fn np_split_snap(&mut self) {
+        let target = if self.np_synced() { 1.0 } else { 0.0 };
+        self.np_split = target;
+        self.np_split_target = target;
+        self.np_split_anim = None;
+    }
+
     /// Largeur du texte des paroles dans la vue « En cours ».
     pub(crate) fn np_lyrics_text_width(&self) -> f32 {
         (self.window_width - 2.0 * NP_PAD - self.np_cover() - NP_GAP - 4.0)

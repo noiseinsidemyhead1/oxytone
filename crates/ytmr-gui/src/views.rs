@@ -1114,52 +1114,43 @@ fn now_playing(app: &App) -> El<'_> {
     }
     // Paroles seulement si elles suivent le son (synchronisées) ; sinon la
     // pochette et le titre seuls, au centre.
-    let synced = matches!(
-        app.lyrics.get(&track.video_id),
-        Some(Load::Ready(Some(l))) if matches!(l.body, ytmr_catalog::lyrics::LyricsBody::Synced(_))
-    );
-    if !synced {
-        let alone = container(
-            column![big, info]
-                .spacing(24)
-                .width(Length::Fixed(side))
-                .align_x(Alignment::Center),
-        )
-        .center(Length::Fill);
-        return mouse_area(
-            container(alone)
-                .padding(Padding {
-                    top: NP_PAD,
-                    right: NP_PAD,
-                    bottom: 110.0,
-                    left: NP_PAD,
-                })
-                .width(Length::Fill)
-                .height(Length::Fill)
-                .style(style::hero(app.accent)),
-        )
-        .on_press(Message::ToggleControls)
-        .into();
-    }
-    // Pochette et titre centrés en hauteur à gauche, paroles en grand à droite ;
-    // l'ensemble est centré dans la fenêtre (rien ne reste collé à gauche).
+    // Pochette et titre centrés en hauteur ; les paroles synchronisées
+    // arrivent à droite : la pochette glisse vers la gauche pendant qu'elles
+    // apparaissent en fondu (`np_split` de 0 à 1). L'ensemble reste centré.
+    let split = app.np_split;
+    let lyrics_w = app.np_lyrics_text_width() + 4.0;
     let left = container(column![big, info].spacing(24).width(Length::Fixed(side)))
         .height(Length::Fill)
         .align_y(Alignment::Center);
-    let lyrics = container(lyrics_body(
-        app,
-        NP_LYRICS_SCROLL,
-        app.np_lyrics_text_width(),
-        app.np_lyrics_view.height,
-        false,
-        NP_LYRIC_SIZE,
-    ))
-    .width(Length::Fixed(app.np_lyrics_text_width() + 4.0))
-    .height(Length::Fill);
-    let main = container(row![left, lyrics].spacing(NP_GAP).height(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .align_x(Alignment::Center);
+    // Largeur qui grandit, contenu de largeur fixe : le texte ne se recompose
+    // pas pendant le glissement.
+    let lyrics = container(
+        container(lyrics_body(
+            app,
+            NP_LYRICS_SCROLL,
+            app.np_lyrics_text_width(),
+            app.np_lyrics_view.height,
+            false,
+            NP_LYRIC_SIZE,
+            split,
+        ))
+        .width(Length::Fixed(lyrics_w))
+        .height(Length::Fill),
+    )
+    .width(Length::Fixed(lyrics_w * split))
+    .height(Length::Fill)
+    .clip(true);
+    let main = container(
+        row![
+            left,
+            Space::new().width(Length::Fixed(NP_GAP * split)),
+            lyrics
+        ]
+        .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
+    .align_x(Alignment::Center);
 
     // Mode focus : rien n'apparaît tout seul ; un clic n'importe où affiche
     // ou masque les contrôles (Échap pour revenir). La marge du bas laisse la
@@ -1212,6 +1203,7 @@ fn lyrics_side(app: &App) -> El<'_> {
         app.lyrics_view.height,
         true,
         LYRIC_SIZE,
+        1.0,
     );
     let footer = text(
         lyrics
@@ -1253,6 +1245,8 @@ fn lyrics_body<'a>(
     view_height: f32,
     interactive: bool,
     size: f32,
+    // Opacité d'ensemble (apparition des paroles du mode focus).
+    alpha: f32,
 ) -> El<'a> {
     use ytmr_catalog::lyrics::LyricsBody;
     let current = app.state.current.as_ref();
@@ -1261,9 +1255,13 @@ fn lyrics_body<'a>(
         _ => None,
     });
     let message = |m: &'static str| -> El<'_> {
-        container(text(m).size(15).color(style::alpha(Color::WHITE, 0.6)))
-            .center(Length::Fill)
-            .into()
+        container(
+            text(m)
+                .size(15)
+                .color(style::alpha(Color::WHITE, 0.6 * alpha)),
+        )
+        .center(Length::Fill)
+        .into()
     };
     match (current, lyrics) {
         (None, _) => message("Rien en lecture."),
@@ -1305,7 +1303,7 @@ fn lyrics_body<'a>(
                                 .width(Length::Fill)
                                 .padding(Padding::from([0, 2]))
                                 .style(move |_| iced::widget::container::Style {
-                                    text_color: Some(style::alpha(Color::WHITE, rest)),
+                                    text_color: Some(style::alpha(Color::WHITE, rest * alpha)),
                                     ..Default::default()
                                 }),
                         );
@@ -1341,7 +1339,7 @@ fn lyrics_body<'a>(
                         .size(19)
                         .font(SEMIBOLD)
                         .line_height(1.6)
-                        .color(style::alpha(Color::WHITE, 0.85)),
+                        .color(style::alpha(Color::WHITE, 0.85 * alpha)),
                 )
                 .padding(Padding {
                     top: LYRICS_TOP,
