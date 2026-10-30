@@ -542,14 +542,11 @@ pub(crate) fn downloaded_badge<'a>(accent: Color) -> El<'a> {
 /// Nom d'un morceau : un clic ouvre sa page (album ou single), s'il en a une.
 pub(crate) fn track_title<'a>(track: &'a Track, size: u32, color: Color) -> El<'a> {
     let label = line(&track.title, size).font(SEMIBOLD).color(color);
-    match &track.album_id {
-        Some(album) => button(label)
-            .padding(0)
-            .style(style::link)
-            .on_press(Message::Navigate(Route::Album(album.clone())))
-            .into(),
-        None => label.into(),
-    }
+    button(label)
+        .padding(0)
+        .style(style::link)
+        .on_press(Message::OpenAlbumOf(track.clone()))
+        .into()
 }
 
 /// Morceaux affichés dans les résultats de recherche.
@@ -1917,12 +1914,7 @@ fn player_bar(app: &App) -> El<'_> {
             let title = button(line(&track.title, 14).font(SEMIBOLD))
                 .padding(0)
                 .style(style::link)
-                .on_press_maybe(
-                    track
-                        .album_id
-                        .clone()
-                        .map(|id| Message::Navigate(Route::Album(id))),
-                );
+                .on_press(Message::OpenAlbumOf(track.clone()));
             row![
                 button(track_cover(app, track, 56.0))
                     .padding(0)

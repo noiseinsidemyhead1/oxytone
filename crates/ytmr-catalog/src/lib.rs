@@ -231,6 +231,23 @@ impl Catalog {
         })
     }
 
+    /// Album d'un morceau qui n'en dit rien (radio, accueil) : recherche
+    /// « titre artiste », même vidéo d'abord, sinon la même chanson.
+    pub async fn album_of(&self, track: &Track) -> Result<Option<String>, CatalogError> {
+        let results = self
+            .search_songs(&format!("{} {}", track.title, track.artist))
+            .await?;
+        let found = results
+            .iter()
+            .find(|t| t.video_id == track.video_id && t.album_id.is_some())
+            .or_else(|| {
+                results
+                    .iter()
+                    .find(|t| t.album_id.is_some() && t.same_song(track))
+            });
+        Ok(found.and_then(|t| t.album_id.clone()))
+    }
+
     /// Page d'artiste correspondant à un nom (morceaux de radio sans identifiant).
     pub async fn find_artist(&self, name: &str) -> Result<Option<String>, CatalogError> {
         let results = self
@@ -552,6 +569,27 @@ mod tests {
         let first = &tracks[0];
         assert_eq!(first.video_id.len(), 11);
         assert!(first.duration.is_some());
+    }
+
+    #[tokio::test]
+    #[ignore = "nécessite le réseau"]
+    async fn finds_the_album_of_a_home_card_song() {
+        // Carte de l'accueil : ni album, ni durée.
+        let catalog = Catalog::new_unauthenticated().await.unwrap();
+        let track = Track {
+            video_id: "eFASApYWua8".into(),
+            title: "Wonderpunch".into(),
+            artist: "Xtrullor".into(),
+            artist_id: None,
+            album: None,
+            album_id: None,
+            duration: None,
+            thumbnail_url: None,
+            unavailable: false,
+            plays: None,
+        };
+        let album = catalog.album_of(&track).await.unwrap();
+        assert_eq!(album.as_deref(), Some("MPREb_8uNAcv5ViIT"));
     }
 
     #[tokio::test]

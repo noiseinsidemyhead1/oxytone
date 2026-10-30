@@ -324,7 +324,10 @@ impl App {
                 .as_deref()
                 .and_then(|dir| crate::collection::read_json(&dir.join("home.json")));
             self.lib.home = Some(match cached {
-                Some(shelves) => Load::Ready(shelves),
+                Some(mut shelves) => {
+                    ytmr_catalog::home::repair(&mut shelves);
+                    Load::Ready(shelves)
+                }
                 None => Load::Loading,
             });
             tasks.push(self.want_home_covers());
@@ -1902,23 +1905,24 @@ pub(crate) fn download_pill<'a>(
         "Télécharger".to_owned()
     };
     // Téléchargé : pastille pleine, texte seul. Avant : petite icône.
+    // Même taille que « Lecture » et « Aléatoire » à côté.
     let content: El<'a> = if complete {
-        text(label).size(12).font(SEMIBOLD).into()
+        text(label).size(14).font(SEMIBOLD).into()
     } else {
         row![
             icon(
                 Icon::Download,
-                14.0,
-                if pinned { accent } else { style::TEXT_DIM }
+                16.0,
+                if pinned { accent } else { style::TEXT }
             ),
-            text(label).size(12).font(SEMIBOLD),
+            text(label).size(14).font(SEMIBOLD),
         ]
-        .spacing(6)
+        .spacing(8)
         .align_y(Alignment::Center)
         .into()
     };
     button(content)
-        .padding(Padding::from([5, 12]))
+        .padding(Padding::from([10, 20]))
         .style(move |theme, status| {
             if complete {
                 return style::pill(accent)(theme, status);

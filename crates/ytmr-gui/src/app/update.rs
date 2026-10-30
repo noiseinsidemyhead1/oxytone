@@ -369,6 +369,29 @@ impl App {
                 }
                 Task::none()
             }
+            Message::OpenAlbumOf(track) => match track.album_id {
+                Some(id) => self.navigate(Route::Album(id)),
+                None => {
+                    let Some(catalog) = self.catalog() else {
+                        return Task::none();
+                    };
+                    self.loading_since
+                        .get_or_insert_with(std::time::Instant::now);
+                    self.search_inflight = true;
+                    Task::perform(
+                        async move { catalog.album_of(&track).await.map_err(|e| e.to_string()) },
+                        Message::AlbumOfFound,
+                    )
+                }
+            },
+            Message::AlbumOfFound(result) => {
+                self.search_inflight = false;
+                match result {
+                    Ok(Some(id)) => self.navigate(Route::Album(id)),
+                    Ok(None) => self.show_toast("Album introuvable pour ce titre".to_owned()),
+                    Err(e) => self.show_toast(format!("Recherche de l'album impossible : {e}")),
+                }
+            }
             Message::ArtistFound(result) => {
                 self.search_inflight = false;
                 match result {

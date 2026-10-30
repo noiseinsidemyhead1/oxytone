@@ -80,9 +80,9 @@ impl App {
                 self.save_ui();
                 self.apply_offline_mode();
                 let toast = self.show_toast(if on {
-                    "Mode hors ligne : seulement ce qui est téléchargé".into()
+                    "Hors ligne activé".into()
                 } else {
-                    "Mode hors ligne désactivé".into()
+                    "Hors ligne désactivé".into()
                 });
                 let reload = if on {
                     Task::none()

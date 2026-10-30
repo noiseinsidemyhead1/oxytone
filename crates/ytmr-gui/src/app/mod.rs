@@ -264,6 +264,9 @@ pub enum Message {
     /// Clic sur le nom de l'artiste : (page connue, nom à chercher sinon).
     OpenArtist(Option<String>, String),
     ArtistFound(Result<Option<String>, String>),
+    /// Clic sur le nom d'un morceau : sa page d'album (cherchée s'il le faut).
+    OpenAlbumOf(Track),
+    AlbumOfFound(Result<Option<String>, String>),
     /// Handle natif de la fenêtre, pour l'overlay média du système.
     NativeWindow(Option<usize>),
     /// Vue « En cours » : un clic affiche ou masque les contrôles.

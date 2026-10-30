@@ -197,6 +197,26 @@ fn two_row_item(r: &Value) -> Option<HomeItem> {
     })
 }
 
+/// Accueil lu depuis le cache d'une version précédente : l'étiquette de type
+/// (« Titre ») y avait été prise pour l'artiste. Corrigé d'après le sous-titre.
+pub fn repair(shelves: &mut [HomeShelf]) {
+    for item in shelves.iter_mut().flat_map(|s| s.items.iter_mut()) {
+        let Some(track) = item.track.as_mut() else {
+            continue;
+        };
+        if !is_type_label(&track.artist) {
+            continue;
+        }
+        let groups: Vec<&str> = item
+            .subtitle
+            .split(" • ")
+            .filter(|g| !is_type_label(g))
+            .collect();
+        track.artist = groups.first().map(|g| (*g).to_owned()).unwrap_or_default();
+        item.subtitle = groups.join(" • ");
+    }
+}
+
 /// Étiquette de type placée devant le sous-titre d'une carte (pas un nom).
 fn is_type_label(text: &str) -> bool {
     matches!(
