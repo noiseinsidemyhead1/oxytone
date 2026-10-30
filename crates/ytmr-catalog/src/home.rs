@@ -139,28 +139,51 @@ fn two_row_item(r: &Value) -> Option<HomeItem> {
         });
     }
     let video_id = nav.pointer("/watchEndpoint/videoId")?.as_str()?.to_owned();
-    // « Artiste • 164 k vues » : l'artiste est le premier groupe.
+    // « Titre • Artiste • Album » ou « Artiste • 164 k vues » : YouTube préfixe
+    // parfois le type (« Titre » = morceau en français), qui n'est pas l'artiste.
     let runs = r
         .pointer("/subtitle/runs")
         .and_then(Value::as_array)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let artist: String = runs
+    let text = |group: &[Value]| -> String {
+        group
+            .iter()
+            .filter_map(|x| x.get("text").and_then(Value::as_str))
+            .collect()
+    };
+    let groups: Vec<&[Value]> = runs
         .split(|x| x.get("text").and_then(Value::as_str) == Some(" • "))
-        .next()
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|x| x.get("text").and_then(Value::as_str))
+        .filter(|g| !is_type_label(&text(g)))
         .collect();
+    let links_to = |g: &&[Value], prefix: &str| {
+        g.iter()
+            .any(|x| crate::raw::browse_id(x).is_some_and(|b| b.starts_with(prefix)))
+    };
+    let artist_group = groups
+        .iter()
+        .find(|g| links_to(g, "UC"))
+        .or_else(|| groups.first());
+    let album_run = runs
+        .iter()
+        .find(|x| crate::raw::browse_id(x).is_some_and(|b| b.starts_with("MPRE")));
+    let subtitle = groups
+        .iter()
+        .map(|g| text(g))
+        .collect::<Vec<_>>()
+        .join(" • ");
     let track = Track {
         unavailable: false,
         plays: None,
         video_id: video_id.clone(),
         title: title.clone(),
-        artist,
+        artist: artist_group.map(|g| text(g)).unwrap_or_default(),
         artist_id: artist_id(runs),
-        album: None,
-        album_id: None,
+        album: album_run
+            .and_then(|x| x.get("text"))
+            .and_then(Value::as_str)
+            .map(str::to_owned),
+        album_id: album_run.and_then(crate::raw::browse_id).map(str::to_owned),
         duration: None,
         thumbnail_url: thumbnail_url.clone(),
     };
@@ -172,6 +195,14 @@ fn two_row_item(r: &Value) -> Option<HomeItem> {
         thumbnail_url,
         track: Some(track),
     })
+}
+
+/// Étiquette de type placée devant le sous-titre d'une carte (pas un nom).
+fn is_type_label(text: &str) -> bool {
+    matches!(
+        text.trim(),
+        "Titre" | "Morceau" | "Chanson" | "Song" | "Vidéo" | "Video" | "Single" | "EP" | "Album"
+    )
 }
 
 /// Ligne de morceau (« Sélection rapide »).
@@ -228,5 +259,26 @@ mod tests {
         assert_eq!(song.artist, "Daft Punk");
         assert_eq!(song.artist_id.as_deref(), Some("UCabc"));
         assert_eq!(items[3].thumbnail_url.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn type_label_is_not_the_artist() {
+        // Constaté sur « Wonderpunch » (Xtrullor) : « Titre • Xtrullor • The 1st Era ».
+        let item = json!({
+            "title": {"runs": [{"text": "Wonderpunch"}]},
+            "subtitle": {"runs": [
+                {"text": "Titre"}, {"text": " • "},
+                {"text": "Xtrullor", "navigationEndpoint": {"browseEndpoint": {"browseId": "UCx"}}},
+                {"text": " • "},
+                {"text": "The 1st Era", "navigationEndpoint": {"browseEndpoint": {"browseId": "MPREb_era"}}}
+            ]},
+            "navigationEndpoint": {"watchEndpoint": {"videoId": "eFASApYWua8"}}
+        });
+        let card = two_row_item(&item).unwrap();
+        let song = card.track.unwrap();
+        assert_eq!(song.artist, "Xtrullor");
+        assert_eq!(song.album.as_deref(), Some("The 1st Era"));
+        assert_eq!(song.album_id.as_deref(), Some("MPREb_era"));
+        assert_eq!(card.subtitle, "Xtrullor • The 1st Era");
     }
 }
