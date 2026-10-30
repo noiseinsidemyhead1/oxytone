@@ -780,7 +780,15 @@ pub(crate) fn track_row<'a>(
         .current
         .as_ref()
         .is_some_and(|e| e.track.video_id == track.video_id);
-    let title_color = if playing { app.accent } else { style::TEXT };
+    // Grisé par YouTube, ou pas téléchargé en mode hors ligne : en gris, jamais lancé.
+    let playable = app.lib.playable(track);
+    let title_color = if playing {
+        app.accent
+    } else if playable {
+        style::TEXT
+    } else {
+        style::TEXT_FAINT
+    };
     let leading: El<'a> = match number {
         Some(n) => container(text(n.to_string()).size(14).color(style::TEXT_FAINT))
             .width(Length::Fixed(28.0))
@@ -797,7 +805,11 @@ pub(crate) fn track_row<'a>(
         container(
             column![
                 track_title(track, 14, title_color),
-                line(subtitle, 13).color(style::TEXT_DIM),
+                line(subtitle, 13).color(if playable {
+                    style::TEXT_DIM
+                } else {
+                    style::TEXT_FAINT
+                }),
             ]
             .spacing(2),
         )
@@ -810,6 +822,15 @@ pub(crate) fn track_row<'a>(
             Space::new().into()
         })
         .width(Length::Fixed(14.0)),
+        // Écoutes selon YouTube (pages d'album et d'artiste).
+        match &track.plays {
+            Some(plays) => El::from(
+                container(text(plays).size(12).color(style::TEXT_FAINT))
+                    .width(Length::Fixed(150.0))
+                    .align_x(Alignment::End),
+            ),
+            None => Space::new().into(),
+        },
         text(fmt_opt(track.duration))
             .size(13)
             .color(style::TEXT_FAINT),
@@ -835,7 +856,7 @@ pub(crate) fn track_row<'a>(
                 )),
         )
         .on_press(Message::Select(track.video_id.clone(), index))
-        .on_double_click(on_play)
+        .on_double_click(if playable { on_play } else { Message::Noop })
         .interaction(iced::mouse::Interaction::Pointer)
         .on_enter(Message::Hover(track.video_id.clone()))
         .on_exit(Message::Unhover(track.video_id.clone()))
@@ -931,6 +952,22 @@ pub(crate) fn error_box(message: &str) -> El<'_> {
 // ----- pages -----
 
 fn home(app: &App) -> El<'_> {
+    if app.lib.offline_mode {
+        return page_scroll(
+            column![
+                text("Hors ligne").size(34).font(BOLD),
+                muted("Seulement ce qui est téléchargé sur cet appareil. Le mode se coupe dans les Paramètres."),
+                crate::collection::offline_cards(app),
+            ]
+            .spacing(20)
+            .padding(Padding {
+                top: 28.0,
+                right: 28.0,
+                bottom: 32.0,
+                left: 28.0,
+            }),
+        );
+    }
     let greeting = column![
         text(greeting(app)).size(34).font(BOLD),
         muted("Reprends là où tu t'étais arrêté, ou cherche quelque chose."),
@@ -1023,6 +1060,7 @@ fn now_playing(app: &App) -> El<'_> {
         NP_LYRICS_SCROLL,
         app.np_lyrics_text_width(),
         app.np_lyrics_view.height,
+        false,
     ))
     .width(Length::Fill)
     .height(Length::Fill);
@@ -1032,65 +1070,17 @@ fn now_playing(app: &App) -> El<'_> {
     // ou masque les contrôles (Échap pour revenir). La marge du bas laisse la
     // place à la barre de contrôles : rien ne bouge quand elle apparaît.
     mouse_area(
-        container(
-            column![main, upcoming_strip(app)]
-                .spacing(24)
-                .padding(Padding {
-                    top: NP_PAD,
-                    right: NP_PAD,
-                    bottom: 110.0,
-                    left: NP_PAD,
-                }),
-        )
+        container(column![main].padding(Padding {
+            top: NP_PAD,
+            right: NP_PAD,
+            bottom: 110.0,
+            left: NP_PAD,
+        }))
         .width(Length::Fill)
         .height(Length::Fill)
         .style(style::hero(app.accent)),
     )
     .on_press(Message::ToggleControls)
-    .into()
-}
-
-/// « À suivre » sous la grande vue : les prochains morceaux (double-clic = lancer).
-fn upcoming_strip(app: &App) -> El<'_> {
-    const SHOWN: usize = 6;
-    let next: Vec<&ytmr_core::QueuedTrack> = app.queue.entries.iter().skip(1).take(SHOWN).collect();
-    if next.is_empty() {
-        return Space::new().into();
-    }
-    let cards = row(next.into_iter().map(|e| {
-        let id = app.track_cover(&e.track);
-        mouse_area(
-            container(
-                row![
-                    cover(app.cover(id.as_deref(), THUMB), 44.0, 6.0),
-                    column![
-                        text(ellipsize(&e.track.title, 22).into_owned())
-                            .size(13)
-                            .font(SEMIBOLD)
-                            .wrapping(iced::widget::text::Wrapping::None),
-                        text(ellipsize(&e.track.artist, 26).into_owned())
-                            .size(12)
-                            .color(style::TEXT_DIM)
-                            .wrapping(iced::widget::text::Wrapping::None),
-                    ]
-                    .spacing(2),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            )
-            .width(Length::FillPortion(1))
-            .clip(true),
-        )
-        .on_double_click(Message::JumpTo(e.id))
-        .interaction(iced::mouse::Interaction::Pointer)
-        .into()
-    }))
-    .spacing(16);
-    column![
-        text("À suivre").size(13).font(BOLD).color(style::TEXT_DIM),
-        cards
-    ]
-    .spacing(10)
     .into()
 }
 
@@ -1125,6 +1115,7 @@ fn lyrics_side(app: &App) -> El<'_> {
         LYRICS_SCROLL,
         crate::app::lyrics_text_width(app.queue_width),
         app.lyrics_view.height,
+        true,
     );
     let footer = text(
         lyrics
@@ -1157,11 +1148,14 @@ fn lyrics_side(app: &App) -> El<'_> {
 
 /// Paroles du morceau en cours (synchronisées ou texte simple) pour la
 /// liste défilante `scroll`, dont le texte fait `text_width` de large.
+/// `interactive` faux (mode focus) : ni clic sur une ligne, ni barre de
+/// défilement ; l'appli fait défiler seule.
 fn lyrics_body<'a>(
     app: &'a App,
     scroll: &'static str,
     text_width: f32,
     view_height: f32,
+    interactive: bool,
 ) -> El<'a> {
     use ytmr_catalog::lyrics::LyricsBody;
     let current = app.state.current.as_ref();
@@ -1200,35 +1194,46 @@ fn lyrics_body<'a>(
                     } else {
                         line.text.as_str()
                     };
+                    let words = container(text(words).size(LYRIC_SIZE).font(BOLD))
+                        .height(Length::Fixed(height))
+                        .align_y(Alignment::Center);
+                    if !interactive {
+                        list = list.push(
+                            container(words)
+                                .width(Length::Fill)
+                                .padding(Padding::from([0, 2]))
+                                .style(move |_| iced::widget::container::Style {
+                                    text_color: Some(style::alpha(Color::WHITE, rest)),
+                                    ..Default::default()
+                                }),
+                        );
+                        continue;
+                    }
                     list = list.push(
-                        button(
-                            container(text(words).size(LYRIC_SIZE).font(BOLD))
-                                .height(Length::Fixed(height))
-                                .align_y(Alignment::Center),
-                        )
-                        .width(Length::Fill)
-                        .padding(Padding::from([0, 2]))
-                        .style(move |_, status| button::Style {
-                            background: None,
-                            text_color: style::alpha(
-                                Color::WHITE,
-                                match status {
-                                    button::Status::Hovered | button::Status::Pressed => {
-                                        f32::max(rest, 0.85)
-                                    }
-                                    _ => rest,
-                                },
-                            ),
-                            ..button::Style::default()
-                        })
-                        .on_press(Message::SeekTo(line.at)),
+                        button(words)
+                            .width(Length::Fill)
+                            .padding(Padding::from([0, 2]))
+                            .style(move |_, status| button::Style {
+                                background: None,
+                                text_color: style::alpha(
+                                    Color::WHITE,
+                                    match status {
+                                        button::Status::Hovered | button::Status::Pressed => {
+                                            f32::max(rest, 0.85)
+                                        }
+                                        _ => rest,
+                                    },
+                                ),
+                                ..button::Style::default()
+                            })
+                            .on_press(Message::SeekTo(line.at)),
                     );
                 }
                 // Marge du bas : la dernière ligne peut remonter comme les autres.
                 list = list.push(Space::new().height(Length::Fixed(view_height)));
-                smooth_scroll(list, scroll)
+                lyrics_scroll(list, scroll, interactive)
             }
-            LyricsBody::Plain(body) => smooth_scroll(
+            LyricsBody::Plain(body) => lyrics_scroll(
                 container(
                     text(body)
                         .size(19)
@@ -1242,9 +1247,29 @@ fn lyrics_body<'a>(
                     ..Padding::ZERO
                 }),
                 scroll,
+                interactive,
             ),
         },
     }
+}
+
+/// Défilement des paroles ; sans barre en mode focus (la molette y est ignorée).
+fn lyrics_scroll<'a>(content: impl Into<El<'a>>, id: &'static str, interactive: bool) -> El<'a> {
+    if interactive {
+        return smooth_scroll(content, id);
+    }
+    wheel(
+        scrollable(content)
+            .id(id)
+            .on_scroll(move |viewport| Message::Scrolled(id, viewport))
+            .direction(scrollable::Direction::Vertical(
+                scrollable::Scrollbar::new().width(0).scroller_width(0),
+            ))
+            .height(Length::Fill)
+            .style(style::scroll),
+        move |lines| Message::Wheel(id, lines),
+    )
+    .into()
 }
 
 /// « Bonjour, <prénom> » selon l'heure locale.

@@ -22,6 +22,14 @@ pub struct Track {
     pub duration: Option<Duration>,
     /// URL de la plus grande jaquette connue.
     pub thumbnail_url: Option<String>,
+    /// Grisé par YouTube (supprimé, bloqué dans le pays…) : affiché en gris,
+    /// jamais lancé.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unavailable: bool,
+    /// Nombre d'écoutes affiché par YouTube (« 12 M de lectures »), sur les
+    /// pages d'album et d'artiste.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plays: Option<String>,
 }
 
 impl Track {
@@ -113,6 +121,8 @@ mod tests {
 
     fn song(id: &str, title: &str, artist: &str) -> Track {
         Track {
+            unavailable: false,
+            plays: None,
             video_id: id.into(),
             title: title.into(),
             artist: artist.into(),

@@ -23,6 +23,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -136,6 +137,9 @@ pub trait Resolver: Send + Sync + 'static {
     fn set_quality(&self, _quality: QualityPreference) {}
     /// Garde (`true`) ou non des morceaux sur le disque, à l'abri de la limite du cache.
     fn keep_offline(&self, _video_ids: &[String], _keep: bool) {}
+    /// Mode hors ligne : seuls les fichiers déjà sur le disque sont lus, rien
+    /// n'est résolu ni téléchargé.
+    fn set_offline(&self, _offline: bool) {}
     /// Résout (ou relit le cache). Ne rend la main que quand l'URL est utilisable.
     fn resolve(
         &self,
@@ -180,6 +184,7 @@ pub struct YtDlpResolver {
     urgent: Semaphore,
     background: Semaphore,
     quality: Mutex<QualityPreference>,
+    offline: AtomicBool,
 }
 
 impl YtDlpResolver {
@@ -213,6 +218,7 @@ impl YtDlpResolver {
             urgent: Semaphore::new(MAX_URGENT),
             background: Semaphore::new(MAX_BACKGROUND),
             quality: Mutex::new(QualityPreference::default()),
+            offline: AtomicBool::new(false),
         }
     }
 
@@ -433,7 +439,7 @@ impl Resolver for YtDlpResolver {
             return;
         };
         audio.keep(video_ids, keep);
-        if !keep {
+        if !keep || self.offline.load(Ordering::Relaxed) {
             return;
         }
         // Adresse déjà connue mais fichier pas encore gardé : on le télécharge.
@@ -455,10 +461,19 @@ impl Resolver for YtDlpResolver {
         }
     }
 
+    fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::Relaxed);
+        tracing::info!(offline, "mode hors ligne");
+    }
+
     fn cached(&self, video_id: &str) -> Option<MediaSource> {
         // Déjà sur le disque : rien à résoudre, rien à télécharger.
         if let Some(local) = self.audio.as_ref().and_then(|a| a.get(video_id)) {
             return Some(local);
+        }
+        // Hors ligne, une adresse (même valide) exigerait le réseau.
+        if self.offline.load(Ordering::Relaxed) {
+            return None;
         }
         let mut cache = lock(&self.cache);
         match cache.get(video_id) {
@@ -482,6 +497,11 @@ impl Resolver for YtDlpResolver {
             if mode == StartMode::Fast || source.quality == StreamQuality::High {
                 return Ok(source);
             }
+        }
+        if self.offline.load(Ordering::Relaxed) {
+            return Err(PlayerError::Resolve(
+                "mode hors ligne : morceau non téléchargé".into(),
+            ));
         }
 
         // Déjà en cours ailleurs : on attend ce résultat plutôt que de relancer yt-dlp.

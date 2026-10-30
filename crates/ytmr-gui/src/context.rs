@@ -196,6 +196,7 @@ fn link_track(t: &Track) -> String {
 fn item_icon(label: &str) -> Icon {
     match label {
         "Lancer la radio" => Icon::Radio,
+        "Télécharger" | "Retirer des téléchargements" => Icon::Download,
         "Lire ensuite" => Icon::PlayNext,
         "Ajouter à la file" => Icon::Queue,
         "Ajouter à une playlist" => Icon::PlaylistAdd,
@@ -241,6 +242,24 @@ fn items(app: &App, target: &Target) -> Vec<(&'static str, Message)> {
                     crate::views::main_artist(&t.artist).to_owned(),
                 )),
             ));
+            let downloaded = app.lib.downloads.iter().any(|d| d.video_id == t.video_id);
+            out.push(if downloaded {
+                (
+                    "Retirer des téléchargements",
+                    close_then(Message::Lib(crate::library::Lib::Download(
+                        vec![t.clone()],
+                        false,
+                    ))),
+                )
+            } else {
+                (
+                    "Télécharger",
+                    close_then(Message::Lib(crate::library::Lib::Download(
+                        vec![t.clone()],
+                        true,
+                    ))),
+                )
+            });
             out.push(("Copier le lien", Message::Context(Ctx::Copy(link_track(t)))));
         }
         Target::Tracks(tracks) => {
@@ -251,6 +270,13 @@ fn items(app: &App, target: &Target) -> Vec<(&'static str, Message)> {
             out.push((
                 "Ajouter à la file",
                 close_then(Message::EnqueueAll(tracks.clone())),
+            ));
+            out.push((
+                "Télécharger",
+                close_then(Message::Lib(crate::library::Lib::Download(
+                    tracks.clone(),
+                    true,
+                ))),
             ));
             if connected {
                 out.push((

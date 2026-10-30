@@ -362,6 +362,8 @@ impl Radio for Catalog {
 
 fn track_from_watch(t: WatchPlaylistTrack) -> Track {
     Track {
+        unavailable: false,
+        plays: None,
         video_id: t.video_id.get_raw().to_owned(),
         title: t.title,
         artist: t.author,
@@ -376,6 +378,7 @@ fn track_from_watch(t: WatchPlaylistTrack) -> Track {
 /// Les morceaux d'un album n'ont pas de vignette propre : ils prennent la pochette.
 fn track_from_album_song(song: AlbumSong, album: &Album) -> Track {
     Track {
+        unavailable: false,
         video_id: song.video_id.get_raw().to_owned(),
         title: song.title,
         artist: album.artist.clone(),
@@ -384,11 +387,22 @@ fn track_from_album_song(song: AlbumSong, album: &Album) -> Track {
         album_id: Some(album.id.clone()),
         duration: parse_duration(&song.duration),
         thumbnail_url: album.thumbnail_url.clone(),
+        plays: plays_text(&song.plays),
     }
+}
+
+/// « 1,2 M de lectures » tel quel ; rien si YouTube ne donne pas de nombre.
+pub(crate) fn plays_text(text: &str) -> Option<String> {
+    let text = text.trim();
+    text.chars()
+        .any(|c| c.is_ascii_digit())
+        .then(|| text.to_owned())
 }
 
 fn track_from_artist_song(song: ArtistSong) -> Track {
     Track {
+        unavailable: false,
+        plays: plays_text(&song.plays),
         video_id: song.video_id.get_raw().to_owned(),
         title: song.title,
         artist: join_artists(&song.artists),

@@ -180,6 +180,8 @@ pub(crate) fn search_song(item: &Value) -> Option<Track> {
     });
     let duration = groups.last().and_then(|g| parse_duration(&text(g)));
     Some(Track {
+        unavailable: false,
+        plays: None,
         video_id,
         title,
         artist_id: groups.first().and_then(|g| artist_id(g)),
@@ -224,7 +226,16 @@ pub(crate) fn artist_page(id: &str, page: &Value) -> Option<crate::Artist> {
             items
                 .iter()
                 .filter_map(|i| i.get("musicResponsiveListItemRenderer"))
-                .filter_map(search_song)
+                .filter_map(|item| {
+                    // 3e colonne des titres populaires : « 12 M de lectures ».
+                    let mut t = search_song(item)?;
+                    t.plays = flex_runs(item, 2)
+                        .and_then(|r| r.first())
+                        .and_then(|r| r.get("text"))
+                        .and_then(Value::as_str)
+                        .and_then(crate::plays_text);
+                    Some(t)
+                })
                 .map(|mut t| {
                     if t.artist.trim().is_empty() {
                         t.artist = name.clone();

@@ -155,7 +155,7 @@ impl App {
         if query == self.search_shown && matches!(self.search, Some(Load::Ready(_))) {
             return Task::none();
         }
-        let Some(catalog) = self.backend().map(|b| Arc::clone(&b.catalog)) else {
+        let Some(catalog) = self.catalog() else {
             return Task::none();
         };
         self.search_seq += 1;
@@ -249,6 +249,10 @@ impl App {
                     async move { catalog.artist(&id).await.map(|a| a.songs) },
                     done,
                 )
+            }
+            HomeKind::Playlist if id == crate::library::DOWNLOADS_ID => {
+                let tracks = self.lib.downloads.clone();
+                self.update(Message::PlayFetched(Ok(tracks)))
             }
             HomeKind::Playlist => {
                 // Déjà ouverte ou en cache : tout de suite.

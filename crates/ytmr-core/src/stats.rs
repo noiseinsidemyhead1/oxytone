@@ -1,7 +1,7 @@
 //! Statistiques d'écoute, calculées en local.
 //!
-//! En clair : chaque morceau écouté assez longtemps (30 s, ou la moitié s'il
-//! est court) ajoute une ligne au fichier `plays.jsonl` du dossier de données.
+//! En clair : chaque morceau écouté aux trois quarts au moins ajoute une ligne
+//! au fichier `plays.jsonl` du dossier de données.
 //! La page « Statistiques » relit ce fichier et en tire les artistes et titres
 //! les plus écoutés, le temps d'écoute et son évolution jour par jour. Rien ne
 //! quitte la machine.
@@ -15,8 +15,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::Track;
 
-/// Durée d'écoute qui fait compter un morceau.
+/// Durée d'écoute qui fait compter un morceau dont on ne connaît pas la durée.
 pub const COUNT_AFTER: Duration = Duration::from_secs(30);
+/// Part du morceau à écouter pour qu'il compte (demande de l'utilisateur).
+const COUNT_SHARE: f64 = 0.75;
 /// Durée comptée au plus par écoute (mix d'une heure, podcast…).
 const MAX_COUNTED: u64 = 15 * 60;
 
@@ -46,11 +48,11 @@ impl Play {
     }
 }
 
-/// Seuil d'écoute pour un morceau de `duration` : 30 s, ou la moitié s'il est court.
+/// Seuil d'écoute : 75 % du morceau (30 s si sa durée est inconnue).
 pub fn threshold(duration: Option<Duration>) -> Duration {
     match duration {
-        Some(d) if d < COUNT_AFTER * 2 => d / 2,
-        _ => COUNT_AFTER,
+        Some(d) => d.mul_f64(COUNT_SHARE),
+        None => COUNT_AFTER,
     }
 }
 
@@ -220,6 +222,8 @@ mod tests {
 
     fn track(id: &str, artist: &str) -> Track {
         Track {
+            unavailable: false,
+            plays: None,
             video_id: id.into(),
             title: format!("titre {id}"),
             artist: artist.into(),
@@ -259,12 +263,15 @@ mod tests {
     }
 
     #[test]
-    fn short_tracks_count_after_half() {
+    fn counts_after_three_quarters() {
         assert_eq!(
             threshold(Some(Duration::from_secs(40))),
-            Duration::from_secs(20)
+            Duration::from_secs(30)
         );
-        assert_eq!(threshold(Some(Duration::from_secs(300))), COUNT_AFTER);
+        assert_eq!(
+            threshold(Some(Duration::from_secs(200))),
+            Duration::from_secs(150)
+        );
         assert_eq!(threshold(None), COUNT_AFTER);
     }
 

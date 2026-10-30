@@ -9,9 +9,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use iced::widget::{Space, button, column, container, row, text};
+use iced::widget::{Space, button, column, container, mouse_area, row, text};
 use iced::{Alignment, Length, Padding, Task};
 use ytmr_catalog::account::{LIKED_ID, PlaylistSummary};
+use ytmr_catalog::home::HomeKind;
 use ytmr_catalog::{AlbumSummary, ArtistSummary};
 
 use crate::app::{App, CARD, Load, Message, Route};
@@ -210,7 +211,7 @@ impl App {
 
     fn backend_catalog(&self) -> Option<Arc<ytmr_catalog::Catalog>> {
         match &self.phase {
-            crate::app::Phase::Ready(b) => Some(Arc::clone(&b.catalog)),
+            crate::app::Phase::Ready(b) if !self.lib.offline_mode => Some(Arc::clone(&b.catalog)),
             _ => None,
         }
     }
@@ -336,6 +337,9 @@ pub fn heart<'a>(app: &App, on: bool, message: Message, tip: &str) -> El<'a> {
 
 /// Carte avec un cœur à côté du titre (survol comme les autres cartes).
 /// Le titre est coupé avant le cœur : il ne passe plus dessous.
+/// Carte de la bibliothèque. `play` : (identifiant de survol, message) du
+/// bouton lecture qui apparaît sur la pochette au survol, comme à l'accueil.
+#[allow(clippy::too_many_arguments)]
 fn card<'a>(
     app: &App,
     url: Option<&str>,
@@ -344,6 +348,7 @@ fn card<'a>(
     subtitle: String,
     open: Message,
     like: Option<El<'a>>,
+    play: (String, Message),
 ) -> El<'a> {
     let id = app.url_cover(url);
     let max = if like.is_some() { 16 } else { 20 };
@@ -362,8 +367,17 @@ fn card<'a>(
     if let Some(like) = like {
         title_row = title_row.push(like);
     }
-    let body = column![
+    let (key, play) = play;
+    let hovered = app.card_hover.as_deref() == Some(key.as_str());
+    let art = crate::views::cover_with_play(
+        app,
         cover(app.cover(id.as_deref(), CARD), 164.0, radius),
+        164.0,
+        hovered,
+        play,
+    );
+    let body = column![
+        art,
         container(title_row).width(Length::Fixed(164.0)),
         text(crate::views::ellipsize(&subtitle, 26).into_owned())
             .size(12)
@@ -373,10 +387,9 @@ fn card<'a>(
     ]
     .spacing(6);
     // Le cœur est un bouton dans le bouton : il garde son clic pour lui.
-    button(body)
-        .padding(10)
-        .style(style::card)
-        .on_press(open)
+    mouse_area(button(body).padding(10).style(style::card).on_press(open))
+        .on_enter(Message::CardHover(key.clone()))
+        .on_exit(Message::CardUnhover(key))
         .into()
 }
 
@@ -458,7 +471,7 @@ pub fn library_page(app: &App) -> El<'_> {
         ),
         pill(
             app,
-            "A → Z",
+            "A–Z",
             sort == LibSort::Name,
             Message::Coll(Coll::Sort(LibSort::Name))
         ),
@@ -498,14 +511,20 @@ fn playlists_tab(app: &App) -> El<'_> {
         None | Some(Load::Loading) => loading("Chargement de tes playlists…"),
         Some(Load::Failed(e)) => error_box(e),
         Some(Load::Ready(list)) => {
-            let mut tiles = vec![library::liked_tile(app)];
+            let mut tiles = vec![library::downloads_tile(app)];
+            if !app.lib.offline_mode {
+                tiles.insert(0, library::liked_tile(app));
+            }
             for p in sorted(
                 list,
                 app.coll.sort,
                 |p| p.title.as_str(),
                 |p| p.author.as_str(),
             ) {
-                if p.id == LIKED_ID {
+                // Hors ligne : seulement les playlists téléchargées.
+                if p.id == LIKED_ID
+                    || (app.lib.offline_mode && !app.lib.offline_playlists.contains(&p.id))
+                {
                     continue;
                 }
                 let subtitle = [p.tracks_text.as_str(), p.author.as_str()]
@@ -530,6 +549,10 @@ fn playlists_tab(app: &App) -> El<'_> {
                     subtitle,
                     Message::Navigate(Route::Playlist(p.id.clone())),
                     like,
+                    (
+                        p.id.clone(),
+                        Message::PlayItem(HomeKind::Playlist, p.id.clone()),
+                    ),
                 );
                 tiles.push(if app.playlist_is_mine(p) {
                     crate::views::drop_zone(tile, crate::app::DropTarget::Playlist(p.id.clone()))
@@ -542,7 +565,36 @@ fn playlists_tab(app: &App) -> El<'_> {
     }
 }
 
+/// Accueil du mode hors ligne : « Téléchargés » et les playlists téléchargées.
+pub(crate) fn offline_cards(app: &App) -> El<'_> {
+    let mut tiles = vec![library::downloads_tile(app)];
+    if let Some(Load::Ready(list)) = &app.lib.playlists {
+        for p in list
+            .iter()
+            .filter(|p| app.lib.offline_playlists.contains(&p.id))
+        {
+            tiles.push(card(
+                app,
+                p.thumbnail_url.as_deref(),
+                8.0,
+                &p.title,
+                p.author.clone(),
+                Message::Navigate(Route::Playlist(p.id.clone())),
+                None,
+                (
+                    p.id.clone(),
+                    Message::PlayItem(HomeKind::Playlist, p.id.clone()),
+                ),
+            ));
+        }
+    }
+    cards(tiles)
+}
+
 fn albums_tab(app: &App) -> El<'_> {
+    if app.lib.offline_mode {
+        return muted("Les albums ne sont pas disponibles hors ligne.");
+    }
     match &app.coll.albums {
         None | Some(Load::Loading) => loading("Chargement de tes albums…"),
         Some(Load::Failed(e)) => error_box(e),
@@ -574,6 +626,10 @@ fn albums_tab(app: &App) -> El<'_> {
                         Message::Coll(Coll::SaveAlbum(a.clone(), None, false)),
                         "Retirer de la bibliothèque",
                     )),
+                    (
+                        a.id.clone(),
+                        Message::PlayItem(HomeKind::Album, a.id.clone()),
+                    ),
                 )
             })
             .collect(),
@@ -582,6 +638,9 @@ fn albums_tab(app: &App) -> El<'_> {
 }
 
 fn artists_tab(app: &App) -> El<'_> {
+    if app.lib.offline_mode {
+        return muted("Les artistes ne sont pas disponibles hors ligne.");
+    }
     match &app.coll.artists {
         None | Some(Load::Loading) => loading("Chargement de tes artistes…"),
         Some(Load::Failed(e)) => error_box(e),
@@ -609,6 +668,10 @@ fn artists_tab(app: &App) -> El<'_> {
                                 Message::Coll(Coll::FollowArtist(a.clone(), false)),
                                 "Ne plus suivre",
                             )),
+                            (
+                                a.id.clone(),
+                                Message::PlayItem(HomeKind::Artist, a.id.clone()),
+                            ),
                         )
                     })
                     .collect(),

@@ -36,6 +36,8 @@ impl App {
             .aim(Key::Normalize, on(self.state.effects.normalize), 0.0);
         self.anims
             .aim(Key::Notifications, on(self.notifications_on()), 0.0);
+        self.anims
+            .aim(Key::OfflineMode, on(self.lib.offline_mode), 0.0);
     }
 
     pub(super) fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -50,7 +52,11 @@ impl App {
                         self.lib.liked_count = Some(liked.tracks.len());
                     }
                     self.lib.cache_dir = Some(cache_dir);
+                    // Pochette des notifications : même cache que l'interface.
+                    let _ = self.notify.covers.set(Arc::clone(&backend.covers));
                     self.phase = Phase::Ready(backend);
+                    self.apply_offline_mode();
+                    let offline_mode = self.send(Command::SetOffline(self.lib.offline_mode));
                     // Comme une mise à jour : charge aussi la jaquette d'une session reprise.
                     let initial = self.on_core(CoreUpdate::State(core.state()));
                     // Touches média et overlay du système : il faut la fenêtre native.
@@ -61,6 +67,7 @@ impl App {
                         initial,
                         account,
                         offline,
+                        offline_mode,
                         Task::stream(core_updates(core)),
                         native.map(Message::NativeWindow),
                     ])
@@ -113,6 +120,10 @@ impl App {
                 } else {
                     Task::none()
                 }
+            }
+            Message::SearchSubmit if self.lib.offline_mode => {
+                self.suggestions.clear();
+                self.show_toast("Recherche indisponible en mode hors ligne".into())
             }
             Message::SearchSubmit => {
                 self.suggestions.clear();
@@ -284,7 +295,7 @@ impl App {
                 Some(id) => self.navigate(Route::Artist(id)),
                 // Pas d'identifiant (morceau de radio) : on cherche l'artiste par son nom.
                 None => {
-                    let Some(catalog) = self.backend().map(|b| Arc::clone(&b.catalog)) else {
+                    let Some(catalog) = self.catalog() else {
                         return Task::none();
                     };
                     self.loading_since
@@ -538,8 +549,10 @@ impl App {
                     _ => iced::exit(),
                 }
             }
+            // Mode focus : les paroles défilent seules, la molette n'y fait rien.
+            Message::Wheel(NP_LYRICS_SCROLL, _) => Task::none(),
             Message::Wheel(id, lines) => {
-                if id == LYRICS_SCROLL || id == NP_LYRICS_SCROLL {
+                if id == LYRICS_SCROLL {
                     // On lit plus loin : le suivi reprend 4 s après le dernier cran.
                     self.lyrics_manual_until =
                         Some(std::time::Instant::now() + Duration::from_secs(4));

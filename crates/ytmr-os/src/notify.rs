@@ -1,12 +1,13 @@
 //! Notification système au changement de morceau.
 //!
 //! En clair : quand un nouveau titre commence et que ytmr n'est pas au premier
-//! plan, une petite bulle du système affiche le titre et l'artiste (Windows :
-//! centre de notifications ; Linux : le démon de notifications du bureau).
+//! plan, une petite bulle du système affiche sa pochette, le titre et l'artiste
+//! (Windows : centre de notifications ; Linux : le démon de notifications du bureau).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use tokio::runtime::Handle;
 use ytmr_core::Track;
 
 /// Identifiant d'application des notifications Windows (enregistré au premier
@@ -15,12 +16,24 @@ use ytmr_core::Track;
 const APP_ID: &str = "ytmr.player";
 
 /// Réglages partagés avec l'interface.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct NotifySettings {
     /// Notifications activées (Paramètres).
     pub enabled: Arc<AtomicBool>,
     /// Fenêtre au premier plan : inutile de notifier, le titre est déjà sous les yeux.
     pub focused: Arc<AtomicBool>,
+    /// Cache de jaquettes (la pochette de la bulle), fourni une fois le backend prêt.
+    pub covers: Arc<std::sync::OnceLock<Arc<ytmr_media::Covers>>>,
+}
+
+// À la main : le cache de jaquettes n'a pas de `Debug`.
+impl std::fmt::Debug for NotifySettings {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotifySettings")
+            .field("enabled", &self.enabled)
+            .field("focused", &self.focused)
+            .finish_non_exhaustive()
+    }
 }
 
 impl NotifySettings {
@@ -28,6 +41,7 @@ impl NotifySettings {
         Self {
             enabled: Arc::new(AtomicBool::new(enabled)),
             focused: Arc::new(AtomicBool::new(true)),
+            covers: Arc::default(),
         }
     }
 
@@ -36,9 +50,15 @@ impl NotifySettings {
     }
 }
 
+/// Taille de la pochette de la bulle.
+const COVER_PX: u32 = 192;
+
 /// Affiche la bulle sans bloquer l'appelant.
-pub(crate) fn track_started(track: &Track) {
+pub(crate) fn track_started(track: &Track, settings: &NotifySettings, runtime: &Handle) {
     let title = track.title.clone();
+    let covers = settings.covers.get().cloned();
+    let cover_url = track.cover_url();
+    let runtime = runtime.clone();
     let body = match &track.album {
         Some(album) => format!("{} · {album}", track.artist),
         None => track.artist.clone(),
@@ -48,6 +68,20 @@ pub(crate) fn track_started(track: &Track) {
         .spawn(move || {
             let mut n = notify_rust::Notification::new();
             n.summary(&title).body(&body).appname("ytmr");
+            // Pochette : fichier du cache (téléchargé au besoin, 5 s au plus).
+            if let Some(covers) = covers {
+                let id = covers.register(&cover_url);
+                let file = runtime.block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        covers.jpeg_file(&id, COVER_PX),
+                    )
+                    .await
+                });
+                if let Ok(Ok(path)) = file {
+                    n.image_path(&path.to_string_lossy());
+                }
+            }
             #[cfg(windows)]
             {
                 register_app_id();

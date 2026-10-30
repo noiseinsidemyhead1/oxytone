@@ -49,6 +49,7 @@ pub enum Icon {
     Link,
     Download,
     Chart,
+    Check,
 }
 
 const STROKE: &str =
@@ -92,6 +93,7 @@ fn source(icon: Icon) -> String {
         Icon::Link => format!(r#"<g {STROKE}><path d="M10 13a5 5 0 0 0 7.07 0l3-3a5 5 0 0 0-7.07-7.07l-1.5 1.5"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.5-1.5"/></g>"#),
         Icon::Download => format!(r#"<g {STROKE}><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></g>"#),
         Icon::Chart => format!(r#"<g {STROKE}><path d="M4 20h16"/><path d="M7 16v-5"/><path d="M12 16V6"/><path d="M17 16v-8"/></g>"#),
+        Icon::Check => format!(r#"<g {STROKE}><path d="M5 12.5l4.5 4.5L19 7.5"/></g>"#),
         Icon::Radio => format!(r#"<g {STROKE}><circle cx="12" cy="12" r="2"/><path d="M16.2 7.8a6 6 0 0 1 0 8.5"/><path d="M7.8 16.2a6 6 0 0 1 0-8.5"/><path d="M19.1 4.9a10 10 0 0 1 0 14.2"/><path d="M4.9 19.1a10 10 0 0 1 0-14.2"/></g>"#),
     };
     format!(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">{body}</svg>"#)
@@ -137,6 +139,7 @@ static HANDLES: LazyLock<Vec<svg::Handle>> = LazyLock::new(|| {
         Link,
         Download,
         Chart,
+        Check,
     ]
     .into_iter()
     .map(|icon| svg::Handle::from_memory(source(icon).into_bytes()))

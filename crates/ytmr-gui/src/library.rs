@@ -101,6 +101,11 @@ pub struct LibraryState {
     pub profile: Option<Profile>,
     /// Playlists gardées hors ligne (`offline.json`).
     pub offline_playlists: HashSet<String>,
+    /// Morceaux téléchargés un par un (`downloads.json`), playlist « Téléchargés ».
+    pub downloads: Vec<Track>,
+    /// Mode hors ligne (Paramètres) : aucun accès au réseau, seulement ce qui
+    /// est téléchargé.
+    pub offline_mode: bool,
     /// Morceaux présents dans le cache audio (lisibles sans réseau).
     pub offline_ids: HashSet<String>,
     /// Suivi des téléchargements hors ligne : morceaux attendus, et nombre de
@@ -134,6 +139,10 @@ pub struct Streaming {
 
 impl LibraryState {
     pub fn ready(&self) -> Option<Arc<Account>> {
+        // Mode hors ligne : le compte n'est pas utilisé (aucune requête).
+        if self.offline_mode {
+            return None;
+        }
         match &self.account {
             AccountView::Ready(a) => Some(Arc::clone(a)),
             _ => None,
@@ -144,9 +153,32 @@ impl LibraryState {
         self.liked.contains(video_id)
     }
 
+    /// Lisible maintenant : pas grisé par YouTube et, hors ligne, téléchargé.
+    pub fn playable(&self, track: &Track) -> bool {
+        !track.unavailable && (!self.offline_mode || self.offline_ids.contains(&track.video_id))
+    }
+
+    /// Playlist « Téléchargés » : les morceaux téléchargés un par un.
+    pub fn downloads_playlist(&self) -> Playlist {
+        Playlist {
+            id: DOWNLOADS_ID.to_owned(),
+            title: "Téléchargés".to_owned(),
+            author: "Sur cet appareil".to_owned(),
+            description: None,
+            duration_text: String::new(),
+            thumbnail_url: self.downloads.first().and_then(|t| t.thumbnail_url.clone()),
+            tracks: self.downloads.clone(),
+            complete: true,
+            owned: false,
+        }
+    }
+
     fn playlist_title(&self, id: &str) -> String {
         if id == LIKED_ID {
             return "Titres likés".into();
+        }
+        if id == DOWNLOADS_ID {
+            return "Téléchargés".into();
         }
         match &self.playlists {
             Some(Load::Ready(list)) => list
@@ -203,6 +235,8 @@ pub enum Lib {
     HistoryLoaded(Result<Vec<Track>, String>),
     /// Garder / ne plus garder la playlist ouverte hors ligne.
     ToggleOffline,
+    /// Télécharger (`true`) ou retirer des téléchargements des morceaux.
+    Download(Vec<Track>, bool),
     /// Relevé du cache audio (morceaux présents sur le disque).
     OfflineScanned(HashSet<String>),
     OfflineTick,
@@ -308,6 +342,13 @@ impl App {
         self.lib.cache_dir.as_ref().map(|d| d.join("offline.json"))
     }
 
+    fn downloads_file(&self) -> Option<PathBuf> {
+        self.lib
+            .cache_dir
+            .as_ref()
+            .map(|d| d.join("downloads.json"))
+    }
+
     /// Au lancement : playlists gardées hors ligne (leurs morceaux sont
     /// redonnés au moteur, nouveaux compris) et relevé du cache audio.
     pub fn load_offline(&mut self) -> Task<Message> {
@@ -315,7 +356,11 @@ impl App {
             .offline_file()
             .and_then(|p| crate::collection::read_json(&p))
             .unwrap_or_default();
-        let ids: Vec<String> = match &self.lib.cache_dir {
+        self.lib.downloads = self
+            .downloads_file()
+            .and_then(|p| crate::collection::read_json(&p))
+            .unwrap_or_default();
+        let mut ids: Vec<String> = match &self.lib.cache_dir {
             Some(dir) => self
                 .lib
                 .offline_playlists
@@ -325,6 +370,7 @@ impl App {
                 .collect(),
             None => Vec::new(),
         };
+        ids.extend(self.lib.downloads.iter().map(|t| t.video_id.clone()));
         let keep = if ids.is_empty() {
             Task::none()
         } else {
@@ -434,6 +480,10 @@ impl App {
         if !matches!(&self.lib.playlist, Some((cur, _)) if *cur == id) {
             self.lib.filter.clear();
         }
+        if id == DOWNLOADS_ID {
+            self.lib.playlist = Some((id, Load::Ready(self.lib.downloads_playlist())));
+            return Task::none();
+        }
         let shown = matches!(&self.lib.playlist, Some((cur, Load::Ready(_))) if *cur == id);
         let mut tasks = Vec::new();
         if !shown {
@@ -447,8 +497,17 @@ impl App {
                     tasks.push(self.show_playlist_extras(&cached));
                     self.lib.playlist = Some((id.clone(), Load::Ready(cached)));
                 }
+                None if self.lib.offline_mode => {
+                    self.lib.playlist = Some((
+                        id.clone(),
+                        Load::Failed("Cette playlist n'est pas disponible hors ligne.".into()),
+                    ));
+                }
                 None => self.lib.playlist = Some((id.clone(), Load::Loading)),
             }
+        }
+        if self.lib.offline_mode {
+            return Task::batch(tasks);
         }
         let on_screen = matches!(&self.lib.playlist, Some((_, Load::Ready(_))));
         let fresh = self
@@ -712,7 +771,8 @@ impl App {
             Lib::PlayAt(index) => match &self.lib.playlist {
                 Some((_, Load::Ready(playlist))) if index < playlist.tracks.len() => {
                     // Lecture dans l'ordre affiché (tri), toute la playlist.
-                    let order = sorted_order(playlist, self.lib.sort, self.lib.sort_reversed);
+                    let mut order = sorted_order(playlist, self.lib.sort, self.lib.sort_reversed);
+                    order.retain(|&i| self.lib.playable(&playlist.tracks[i]));
                     let start = order.iter().position(|&i| i == index).unwrap_or(0);
                     let tracks = order.iter().map(|&i| playlist.tracks[i].clone()).collect();
                     self.send(Command::PlayTracks { tracks, start })
@@ -799,6 +859,48 @@ impl App {
                     "Téléchargement pour l'écoute hors ligne…".into()
                 } else {
                     "Playlist retirée du hors ligne".into()
+                });
+                Task::batch([
+                    toast,
+                    self.send(Command::KeepOffline {
+                        video_ids: ids,
+                        keep,
+                    }),
+                    self.scan_offline(),
+                ])
+            }
+            Lib::Download(tracks, keep) => {
+                let ids: Vec<String> = tracks.iter().map(|t| t.video_id.clone()).collect();
+                if keep {
+                    for track in tracks {
+                        if !self
+                            .lib
+                            .downloads
+                            .iter()
+                            .any(|t| t.video_id == track.video_id)
+                        {
+                            self.lib.downloads.insert(0, track);
+                        }
+                    }
+                    self.lib.offline_watch = ids.clone();
+                    self.lib.offline_stalled = 0;
+                } else {
+                    self.lib.downloads.retain(|t| !ids.contains(&t.video_id));
+                }
+                if let Some(path) = self.downloads_file() {
+                    write_json(&path, &self.lib.downloads);
+                }
+                // La playlist « Téléchargés » ouverte suit.
+                if matches!(&self.lib.playlist, Some((id, _)) if id == DOWNLOADS_ID) {
+                    self.lib.playlist = Some((
+                        DOWNLOADS_ID.to_owned(),
+                        Load::Ready(self.lib.downloads_playlist()),
+                    ));
+                }
+                let toast = self.show_toast(match (keep, ids.len()) {
+                    (true, 1) => "Téléchargement…".into(),
+                    (true, n) => format!("Téléchargement de {n} titres…"),
+                    (false, _) => "Retiré des téléchargements".into(),
                 });
                 Task::batch([
                     toast,
@@ -1492,6 +1594,57 @@ pub fn cached_liked(dir: &Path) -> Option<Playlist> {
 
 // ----- vues -----
 
+/// Tuile « Téléchargés » de la bibliothèque (morceaux gardés un par un).
+pub(crate) fn downloads_tile<'a>(app: &App) -> El<'a> {
+    let count = match app.lib.downloads.len() {
+        1 => "1 titre".to_owned(),
+        n => format!("{n} titres"),
+    };
+    let accent = app.accent;
+    let hovered = app.card_hover.as_deref() == Some(DOWNLOADS_ID);
+    let tile = button(
+        column![
+            crate::views::cover_with_play(
+                app,
+                container(icon(Icon::Download, 54.0, Color::WHITE))
+                    .center(Length::Fixed(164.0))
+                    .style(move |_| iced::widget::container::Style {
+                        background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+                            iced::gradient::Linear::new(std::f32::consts::FRAC_PI_4)
+                                .add_stop(0.0, style::shade(accent, 0.25))
+                                .add_stop(1.0, style::shade(accent, 0.7)),
+                        ))),
+                        border: iced::Border {
+                            radius: 8.0.into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .into(),
+                164.0,
+                hovered,
+                Message::PlayItem(HomeKind::Playlist, DOWNLOADS_ID.to_owned()),
+            ),
+            text("Téléchargés")
+                .size(14)
+                .font(SEMIBOLD)
+                .width(Length::Fixed(164.0)),
+            text(count)
+                .size(12)
+                .color(style::TEXT_DIM)
+                .width(Length::Fixed(164.0)),
+        ]
+        .spacing(6),
+    )
+    .padding(10)
+    .style(style::card)
+    .on_press(Message::Navigate(Route::Playlist(DOWNLOADS_ID.to_owned())));
+    mouse_area(tile)
+        .on_enter(Message::CardHover(DOWNLOADS_ID.to_owned()))
+        .on_exit(Message::CardUnhover(DOWNLOADS_ID.to_owned()))
+        .into()
+}
+
 pub(crate) fn liked_tile<'a>(app: &App) -> El<'a> {
     let count = app
         .lib
@@ -1592,7 +1745,15 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
     }
 }
 
+/// Identifiant de la playlist « Téléchargés » (propre à ytmr).
+pub const DOWNLOADS_ID: &str = "ytmr-downloads";
+
 pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
+    if app.lib.offline_mode
+        || matches!(&app.lib.playlist, Some((id, _)) if id == DOWNLOADS_ID && app.route == Route::Playlist(DOWNLOADS_ID.to_owned()))
+    {
+        return None;
+    }
     let message = match &app.lib.account {
         AccountView::Ready(_) => return None,
         AccountView::Connecting => "Connexion à ton compte YouTube…".to_owned(),
@@ -1659,17 +1820,31 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         .filter(|t| app.lib.offline_ids.contains(&t.video_id))
         .count();
     let accent = app.accent;
-    let offline_label = if pinned {
-        format!("Hors ligne · {available} / {}", playlist.tracks.len())
+    let playable = playlist.tracks.iter().filter(|t| !t.unavailable).count();
+    // Tout est sur l'appareil : le bouton devient une pastille pleine.
+    let complete = pinned && playable > 0 && available >= playable;
+    let (offline_icon, offline_label) = if complete {
+        (Icon::Check, "Téléchargée".to_owned())
+    } else if pinned {
+        (
+            Icon::Download,
+            format!("Téléchargement · {available} / {playable}"),
+        )
     } else {
-        "Hors ligne".to_owned()
+        (Icon::Download, "Télécharger".to_owned())
     };
     let offline = button(
         row![
             icon(
-                Icon::Download,
+                offline_icon,
                 14.0,
-                if pinned { accent } else { style::TEXT_DIM }
+                if complete {
+                    Color::WHITE
+                } else if pinned {
+                    accent
+                } else {
+                    style::TEXT_DIM
+                }
             ),
             text(offline_label).size(12).font(SEMIBOLD),
         ]
@@ -1678,6 +1853,9 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     )
     .padding(Padding::from([5, 12]))
     .style(move |theme, status| {
+        if complete {
+            return style::pill(accent)(theme, status);
+        }
         let mut s = style::pill_ghost(theme, status);
         if pinned {
             s.border.color = style::alpha(accent, 0.7);
@@ -1697,7 +1875,11 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
     ]
     .spacing(4)
     .align_y(Alignment::Center);
-    if !liked && playlist.owned {
+    // « Téléchargés » et mode hors ligne : rien à mettre à jour depuis YouTube.
+    if id == DOWNLOADS_ID || app.lib.offline_mode {
+        actions = row![];
+    }
+    if !liked && playlist.owned && !app.lib.offline_mode {
         actions = actions
             .push(icon_tip(
                 Icon::Edit,
@@ -1879,7 +2061,11 @@ pub(crate) fn sorted_order(playlist: &Playlist, sort: PlaylistSort, reversed: bo
 
 /// Ordre affiché : trié, puis filtré par la recherche dans la playlist.
 pub(crate) fn view_order(app: &App, playlist: &Playlist) -> Vec<usize> {
-    let order = sorted_order(playlist, app.lib.sort, app.lib.sort_reversed);
+    let mut order = sorted_order(playlist, app.lib.sort, app.lib.sort_reversed);
+    // Hors ligne : seulement ce qui est sur l'appareil.
+    if app.lib.offline_mode {
+        order.retain(|&i| app.lib.offline_ids.contains(&playlist.tracks[i].video_id));
+    }
     let needle = fold(app.lib.filter.trim());
     if needle.is_empty() {
         return order;
@@ -1902,12 +2088,15 @@ fn sort_pills(app: &App) -> El<'_> {
     let accent = app.accent;
     let pill = |label: &'static str, sort: PlaylistSort| -> El<'_> {
         let active = app.lib.sort == sort;
-        let arrow = match (active, app.lib.sort_reversed) {
-            (true, false) if sort != PlaylistSort::Original => " ↑",
-            (true, true) => " ↓",
-            _ => "",
+        // Sens du tri écrit en clair (pas de flèches) : A–Z / Z–A, courts / longs.
+        let way = match (active, sort, app.lib.sort_reversed) {
+            (false, ..) | (true, PlaylistSort::Original, _) => "",
+            (true, PlaylistSort::Duration, false) => " · courts",
+            (true, PlaylistSort::Duration, true) => " · longs",
+            (true, _, false) => " · A–Z",
+            (true, _, true) => " · Z–A",
         };
-        button(text(format!("{label}{arrow}")).size(12).font(SEMIBOLD))
+        button(text(format!("{label}{way}")).size(12).font(SEMIBOLD))
             .padding(Padding::from([6, 11]))
             .style(move |theme, status| {
                 if active {

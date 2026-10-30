@@ -199,6 +199,17 @@ impl Player for MpvPlayer {
             .map(drop)
     }
 
+    async fn audio_devices(&self) -> Result<Vec<crate::AudioDevice>, PlayerError> {
+        let data = self
+            .ipc
+            .command(json!(["get_property", "audio-device-list"]))
+            .await?;
+        serde_json::from_value(data).map_err(|e| PlayerError::Command {
+            command: "get_property audio-device-list".into(),
+            message: e.to_string(),
+        })
+    }
+
     async fn set_audio_device(&self, name: &str) -> Result<(), PlayerError> {
         self.set("audio-device", json!(name)).await
     }

@@ -134,6 +134,11 @@ pub trait Player: Send + Sync + 'static {
     fn set_gain(&self, _db: f32) -> impl Future<Output = Result<(), PlayerError>> + Send {
         async { Ok(()) }
     }
+    /// Sorties audio disponibles, demandées directement. (Leur premier envoi par
+    /// mpv arrive avant que le moteur écoute : il est perdu.)
+    fn audio_devices(&self) -> impl Future<Output = Result<Vec<AudioDevice>, PlayerError>> + Send {
+        async { Ok(Vec::new()) }
+    }
     /// Sortie audio (`auto` = celle du système).
     fn set_audio_device(
         &self,

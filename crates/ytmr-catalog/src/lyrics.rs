@@ -513,6 +513,8 @@ mod tests {
     async fn finds_synced_lyrics() {
         let catalog = Catalog::new();
         let track = Track {
+            unavailable: false,
+            plays: None,
             video_id: "5NV6Rdv1a3I".into(),
             title: "Get Lucky (feat. Pharrell Williams & Nile Rodgers)".into(),
             artist: "Daft Punk".into(),

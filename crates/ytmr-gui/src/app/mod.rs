@@ -342,6 +342,8 @@ struct UiSettings {
     /// Notification système à chaque nouveau morceau.
     #[serde(default = "yes")]
     notifications: bool,
+    /// Mode hors ligne (aucun accès au réseau).
+    offline_mode: bool,
 }
 
 fn yes() -> bool {
@@ -355,6 +357,7 @@ impl Default for UiSettings {
             queue_width: RIGHT_DEFAULT,
             show_queue: true,
             notifications: true,
+            offline_mode: false,
         }
     }
 }
@@ -700,7 +703,11 @@ impl App {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Catalogue YouTube Music ; aucun en mode hors ligne (pas de réseau).
     pub(crate) fn catalog(&self) -> Option<Arc<ytmr_catalog::Catalog>> {
+        if self.lib.offline_mode {
+            return None;
+        }
         self.backend().map(|b| Arc::clone(&b.catalog))
     }
 
@@ -746,6 +753,14 @@ impl App {
         self.notify
             .enabled
             .store(settings.notifications, std::sync::atomic::Ordering::Relaxed);
+        self.lib.offline_mode = settings.offline_mode;
+    }
+
+    /// Mode hors ligne côté interface : plus de jaquettes téléchargées.
+    pub(crate) fn apply_offline_mode(&self) {
+        if let Some(backend) = self.backend() {
+            backend.covers.set_offline(self.lib.offline_mode);
+        }
     }
 
     pub(crate) fn save_ui(&self) {
@@ -757,6 +772,7 @@ impl App {
             queue_width: self.queue_width,
             show_queue: self.show_queue,
             notifications: self.notifications_on(),
+            offline_mode: self.lib.offline_mode,
         };
         if let Ok(json) = serde_json::to_vec(&settings) {
             let _ = std::fs::write(path, json);

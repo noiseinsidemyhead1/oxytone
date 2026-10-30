@@ -96,6 +96,9 @@ pub struct PlaybackState {
     /// Sorties audio disponibles, et celle choisie (`auto` ou vide = système).
     pub audio_devices: Vec<AudioDevice>,
     pub audio_device: String,
+    /// Mode hors ligne : seuls les morceaux téléchargés sont lus, sans réseau
+    /// (ni radio, ni volume homogène venu de YouTube).
+    pub offline: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -147,6 +150,7 @@ pub enum Command {
     SetEffects(AudioEffects),
     SetQuality(QualityPreference),
     SetAudioDevice(String),
+    SetOffline(bool),
     /// Garde (`true`) ou non des morceaux sur le disque pour l'écoute hors
     /// ligne ; gardés, ils sont téléchargés en tâche de fond.
     KeepOffline {
@@ -471,6 +475,10 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             tracing::warn!(error = %e, "effets audio de la session précédente");
         }
         self.resolver.set_quality(self.state.quality_pref);
+        match self.player.audio_devices().await {
+            Ok(devices) => self.state.audio_devices = devices,
+            Err(e) => tracing::warn!(error = %e, "liste des sorties audio"),
+        }
         if !self.state.audio_device.is_empty()
             && self.state.audio_device != "auto"
             && let Err(e) = self.player.set_audio_device(&self.state.audio_device).await
@@ -523,7 +531,12 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         // Une action de l'utilisateur relance le compteur d'erreurs.
         self.consecutive_errors = 0;
         match command {
-            Command::PlayTracks { tracks, start } => {
+            Command::PlayTracks { mut tracks, start } => {
+                // Les morceaux grisés par YouTube ne sont jamais lancés : le
+                // départ glisse sur le suivant disponible.
+                let skipped = tracks.iter().take(start).filter(|t| t.unavailable).count();
+                let start = start - skipped;
+                tracks.retain(|t| !t.unavailable);
                 let id = self
                     .queue
                     .replace(tracks, start)
@@ -531,7 +544,8 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.queue_dirty = true;
                 self.start(id).await
             }
-            Command::PlayShuffled(tracks) => {
+            Command::PlayShuffled(mut tracks) => {
+                tracks.retain(|t| !t.unavailable);
                 let id = self
                     .queue
                     .replace_shuffled(tracks)
@@ -539,11 +553,13 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.queue_dirty = true;
                 self.start(id).await
             }
-            Command::Enqueue(tracks) => {
+            Command::Enqueue(mut tracks) => {
+                tracks.retain(|t| !t.unavailable);
                 let ids = self.queue.append(tracks);
                 self.after_insert(ids).await
             }
-            Command::PlayNext(tracks) => {
+            Command::PlayNext(mut tracks) => {
+                tracks.retain(|t| !t.unavailable);
                 let ids = self.queue.insert_next(tracks);
                 self.after_insert(ids).await
             }
@@ -638,6 +654,16 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 self.state.audio_device = name;
                 Ok(())
             }
+            Command::SetOffline(offline) => {
+                self.resolver.set_offline(offline);
+                self.state.offline = offline;
+                if offline {
+                    // Rien à résoudre sans réseau : les files de fond sont vidées.
+                    self.warm_wanted.clear();
+                    self.offline_wanted.clear();
+                }
+                Ok(())
+            }
             Command::KeepOffline { video_ids, keep } => {
                 self.resolver.keep_offline(&video_ids, keep);
                 if keep {
@@ -710,6 +736,11 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     }
 
     fn pump_warm(&mut self) {
+        if self.state.offline {
+            self.warm_wanted.clear();
+            self.offline_wanted.clear();
+            return;
+        }
         while self.warming.len() < MAX_WARMING {
             // L'écoute en cours d'abord, puis les téléchargements hors ligne.
             let Some(video_id) = self
@@ -996,6 +1027,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
 
     fn maybe_fetch_radio(&mut self) {
         if !self.state.autoplay
+            || self.state.offline
             || self.queue.repeat() != Repeat::Off
             || self.radio_inflight
             || self.queue.upcoming_len() >= RADIO_LOW_WATER
@@ -1254,6 +1286,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     /// Demande le gain d'un morceau (volume homogène actif seulement).
     fn want_gain(&mut self, video_id: &str) {
         if !self.state.effects.normalize
+            || self.state.offline
             || self.gains.contains_key(video_id)
             || !self.gains_pending.insert(video_id.to_owned())
         {
@@ -1568,6 +1601,8 @@ mod tests {
 
     fn track(n: u32) -> Track {
         Track {
+            unavailable: false,
+            plays: None,
             video_id: format!("v{n}"),
             title: format!("t{n}"),
             artist: "a".into(),

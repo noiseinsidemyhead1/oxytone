@@ -719,7 +719,14 @@ fn track_from_raw(item: &Value) -> Option<Track> {
         .and_then(|t| t.get("url"))
         .and_then(Value::as_str)
         .map(str::to_owned);
+    // YouTube grise les morceaux supprimés ou bloqués (comme sur son site).
+    let unavailable = item
+        .get("musicItemRendererDisplayPolicy")
+        .and_then(Value::as_str)
+        == Some("MUSIC_ITEM_RENDERER_DISPLAY_POLICY_GREY_OUT");
     Some(Track {
+        unavailable,
+        plays: None,
         video_id,
         title,
         artist,

@@ -100,6 +100,7 @@ fn run(
     let mut rx = core.watch_state();
     let mut shown = Shown {
         notify,
+        runtime: Some(runtime.clone()),
         ..Shown::default()
     };
     loop {
@@ -119,6 +120,7 @@ struct Shown {
     /// Instant et position du dernier envoi, pour repérer un saut (seek).
     anchor: Option<(std::time::Instant, Duration)>,
     notify: NotifySettings,
+    runtime: Option<Handle>,
     /// Dernier morceau notifié (une bulle par morceau, même après une pause).
     notified: Option<String>,
 }
@@ -160,8 +162,9 @@ impl Shown {
         {
             if let Some(entry) = &state.current
                 && self.notify.wanted()
+                && let Some(runtime) = &self.runtime
             {
-                notify::track_started(&entry.track);
+                notify::track_started(&entry.track, &self.notify, runtime);
             }
             self.notified = self.video_id.clone();
         }

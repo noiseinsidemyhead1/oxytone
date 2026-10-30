@@ -172,6 +172,7 @@ impl From<MediaError> for ApiError {
             MediaError::InvalidSize(_) => StatusCode::BAD_REQUEST,
             MediaError::Download(_) | MediaError::Decode(_) => StatusCode::BAD_GATEWAY,
             MediaError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            MediaError::Offline => StatusCode::SERVICE_UNAVAILABLE,
         };
         Self(status, e.to_string())
     }

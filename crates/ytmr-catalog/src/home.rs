@@ -153,6 +153,8 @@ fn two_row_item(r: &Value) -> Option<HomeItem> {
         .filter_map(|x| x.get("text").and_then(Value::as_str))
         .collect();
     let track = Track {
+        unavailable: false,
+        plays: None,
         video_id: video_id.clone(),
         title: title.clone(),
         artist,

@@ -31,6 +31,7 @@ pub enum Settings {
     Notifications(bool),
     Quality(QualityPreference),
     AudioDevice(String),
+    OfflineMode(bool),
 }
 
 /// Sortie audio dans la liste déroulante (nom lisible, identifiant mpv).
@@ -65,6 +66,28 @@ impl App {
             Settings::AudioDevice(name) => {
                 self.state.audio_device = name.clone();
                 self.send(Command::SetAudioDevice(name))
+            }
+            Settings::OfflineMode(on) => {
+                self.lib.offline_mode = on;
+                self.save_ui();
+                self.apply_offline_mode();
+                let toast = self.show_toast(if on {
+                    "Mode hors ligne : seulement ce qui est téléchargé".into()
+                } else {
+                    "Mode hors ligne désactivé".into()
+                });
+                let reload = if on {
+                    Task::none()
+                } else {
+                    // Retour du réseau : compte et playlists se remettent à jour.
+                    self.load_playlists()
+                };
+                Task::batch([
+                    toast,
+                    reload,
+                    self.send(Command::SetOffline(on)),
+                    self.scan_offline(),
+                ])
             }
             Settings::Notifications(on) => {
                 self.notify
@@ -391,7 +414,7 @@ pub fn settings_page(app: &App) -> El<'_> {
         pick_list(devices, selected, |d: DeviceChoice| {
             Message::Settings(Settings::AudioDevice(d.name))
         })
-        .placeholder("Chargement…")
+        .placeholder("Sortie du système")
         .text_size(13)
         .width(Length::Fixed(280.0)),
     ]
@@ -424,6 +447,25 @@ pub fn settings_page(app: &App) -> El<'_> {
             ),
             section_title("Son"),
             card(column![normalize, quality, output].spacing(18).into()),
+            section_title("Hors ligne"),
+            card(
+                row![
+                    column![
+                        text("Mode hors ligne").size(15).font(SEMIBOLD),
+                        muted("ytmr n'accède plus à Internet : seuls les morceaux et playlists téléchargés sont affichés et lus."),
+                    ]
+                    .spacing(4)
+                    .width(Length::Fill),
+                    switch(
+                        app.anims.get(Key::OfflineMode, 0.0),
+                        accent,
+                        Message::Settings(Settings::OfflineMode(!app.lib.offline_mode)),
+                    ),
+                ]
+                .spacing(16)
+                .align_y(Alignment::Center)
+                .into()
+            ),
             section_title("Notifications"),
             card(
                 row![

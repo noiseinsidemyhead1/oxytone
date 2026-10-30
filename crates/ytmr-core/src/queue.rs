@@ -525,6 +525,8 @@ mod tests {
 
     fn track(n: u32) -> Track {
         Track {
+            unavailable: false,
+            plays: None,
             video_id: format!("vid{n:08}"),
             title: format!("titre {n}"),
             artist: "artiste".into(),

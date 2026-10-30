@@ -6724,6 +6724,7 @@ dependencies = [
  "tracing",
  "windows 0.62.2",
  "ytmr-core",
+ "ytmr-media",
 ]
 
 [[package]]

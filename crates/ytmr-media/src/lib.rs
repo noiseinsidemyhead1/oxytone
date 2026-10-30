@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use image::codecs::jpeg::JpegEncoder;
@@ -55,6 +56,8 @@ pub enum MediaError {
     Decode(#[from] image::ImageError),
     #[error("cache disque : {0}")]
     Io(#[from] std::io::Error),
+    #[error("mode hors ligne")]
+    Offline,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +179,8 @@ pub struct Covers {
     urls: Mutex<HashMap<String, String>>,
     downloads: Semaphore,
     decodes: Semaphore,
+    /// Mode hors ligne : seules les jaquettes déjà sur le disque.
+    offline: AtomicBool,
 }
 
 impl Covers {
@@ -189,7 +194,13 @@ impl Covers {
             urls: Mutex::default(),
             downloads: Semaphore::new(MAX_CONCURRENT_DOWNLOADS),
             decodes: Semaphore::new(MAX_CONCURRENT_DECODES),
+            offline: AtomicBool::new(false),
         })
+    }
+
+    /// Mode hors ligne : plus aucun téléchargement.
+    pub fn set_offline(&self, offline: bool) {
+        self.offline.store(offline, Ordering::Relaxed);
     }
 
     /// Mémorise l'URL d'une jaquette et rend son identifiant.
@@ -218,6 +229,13 @@ impl Covers {
         let data = self.blocking(move || render(&source, size, format)).await?;
         write_atomic(&variant, &data).await?;
         Ok(data.into())
+    }
+
+    /// Fichier JPEG de la jaquette en `size` px (créé au besoin), pour les
+    /// programmes qui veulent un chemin (notifications du système).
+    pub async fn jpeg_file(&self, id: &str, size: u32) -> Result<PathBuf, MediaError> {
+        self.get(id, size, CoverFormat::Jpeg).await?;
+        Ok(self.dir.join(format!("{id}_{size}.jpg")))
     }
 
     /// Jaquette décodée en pixels RGBA (`size * size * 4` octets), prête à
@@ -289,6 +307,9 @@ impl Covers {
         // Un autre appel l'a peut-être téléchargée pendant qu'on attendait.
         if let Ok(data) = tokio::fs::read(&path).await {
             return Ok(data);
+        }
+        if self.offline.load(Ordering::Relaxed) {
+            return Err(MediaError::Offline);
         }
         let response = self
             .http

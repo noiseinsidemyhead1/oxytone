@@ -26,6 +26,7 @@ pub enum Key {
     Seek,
     Normalize,
     Notifications,
+    OfflineMode,
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -157,6 +157,8 @@ impl TrackDto {
         }
         let thumbnail_url = self.thumbnail_url.filter(|u| is_allowed_image_url(u));
         Ok(Track {
+            unavailable: false,
+            plays: None,
             video_id: self.video_id,
             title: self.title,
             artist: self.artist,
