@@ -13,6 +13,8 @@ pub mod fullscreen;
 mod notify;
 #[cfg(windows)]
 pub mod taskbar;
+#[cfg(windows)]
+pub mod tray;
 
 pub use notify::NotifySettings;
 

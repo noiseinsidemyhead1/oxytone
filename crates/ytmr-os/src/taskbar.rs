@@ -89,6 +89,15 @@ pub fn install(hwnd: usize) {
     }
     WINDOW.store(hwnd as isize, Ordering::Relaxed);
     add_buttons(window);
+    crate::tray::restore(window);
+}
+
+/// Fenêtre principale, une fois connue.
+pub(crate) fn window() -> Option<HWND> {
+    match WINDOW.load(Ordering::Relaxed) {
+        0 => None,
+        hwnd => Some(HWND(hwnd as *mut _)),
+    }
 }
 
 /// Branche les clics sur le moteur (appelé par [`crate::start`]).
@@ -164,14 +173,19 @@ fn update_buttons(window: HWND, playing: bool) {
 }
 
 fn on_click(id: u32) {
-    let Some((core, runtime)) = CORE.get() else {
-        return;
-    };
     let command = match id {
         ID_PREV => Command::Previous,
         ID_TOGGLE => Command::TogglePause,
         ID_NEXT => Command::Next,
         _ => return,
+    };
+    send(command);
+}
+
+/// Envoie une commande au moteur (boutons de la barre, menu de l'icône).
+pub(crate) fn send(command: Command) {
+    let Some((core, runtime)) = CORE.get() else {
+        return;
     };
     let core = core.clone();
     runtime.spawn(async move {
@@ -204,8 +218,12 @@ unsafe extern "system" fn subclass(
         update_buttons(hwnd, wparam.0 != 0);
         return LRESULT(0);
     }
+    if crate::tray::on_message(hwnd, msg, wparam, lparam) {
+        return LRESULT(0);
+    }
     if msg == taskbar_created() {
         add_buttons(hwnd);
+        crate::tray::restore(hwnd);
     }
     unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
 }

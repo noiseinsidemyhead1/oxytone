@@ -12,7 +12,7 @@ Client YouTube Music natif en Rust (CachyOS + Windows 11). Le plan de référenc
 - N'inventer aucune API de crate : `cargo add`, puis vérifier les signatures dans `~/.cargo/registry/src` ou sur docs.rs (critique pour ytmapi-rs, souvlaki, iced et `windows`).
 - Pas de `unwrap()`/`expect()` hors tests (lint clippy du workspace). `thiserror` dans les libs, `anyhow` dans les binaires, logs avec `tracing`.
 - `#[cfg(windows)]` / `#[cfg(unix)]` uniquement là où c'est inévitable (IPC mpv, intégration Windows de `ytmr-os`). Chemins via `directories` (`ytmr_core::AppPaths`).
-- `unsafe` interdit au workspace (`unsafe_code = "deny"`), autorisé seulement module par module avec `#![allow(unsafe_code)]` et un commentaire : `set_var` au démarrage, `ytmr_os::taskbar`, `ytmr_os::fullscreen`, registre des notifications.
+- `unsafe` interdit au workspace (`unsafe_code = "deny"`), autorisé seulement module par module avec `#![allow(unsafe_code)]` et un commentaire : `set_var` au démarrage, `ytmr_os::taskbar`, `ytmr_os::tray`, `ytmr_os::fullscreen`, registre des notifications.
 - Chaque module non trivial commence par un commentaire `//!` qui explique son rôle en langage simple (« En clair : … »).
 - API : `127.0.0.1:26540` par défaut ; token Bearer obligatoire hors localhost ; pas de CORS permissif ; bornes strictes (volume 0-100, seek, jaquette ≤ 320 px).
 - **Ne jamais simuler clavier/souris quand l'utilisateur se sert de l'appli**, ni fermer / relancer son instance sans son accord. Ne pas modifier son compte YouTube (likes, abonnements, playlists) pour tester sans son accord : la lecture seule est libre.
@@ -160,6 +160,7 @@ Sécurité (`security.rs`) : `Host` limité aux noms de loopback en mode local (
 - **Barre des tâches Windows** (`taskbar.rs`) : boutons précédent / lecture-pause / suivant sous l'aperçu (`ITaskbarList3::ThumbBarAddButtons`) + sous-classement de la fenêtre (`SetWindowSubclass`, sur le fil de la fenêtre : depuis `native_handle`) ; le fil de `ytmr-os` poste `WM_APP+0x31` pour changer lecture / pause. Icônes dessinées en code. Reposées sur `TaskbarButtonCreated`.
 - **Notifications** (`notify-rust`) : avec la pochette (fichier JPEG du cache, `Covers::jpeg_file`, cache passé par `NotifySettings::covers`), à chaque nouveau morceau si la fenêtre n'a pas le focus (réglable, `ui.json`). Windows : AUMID `ytmr.player` déclaré dans `HKCU\Software\Classes\AppUserModelId` (sinon la bulle porte le nom de PowerShell).
 - **Plein écran Windows** : `fullscreen.rs` (voir GUI).
+- **Zone de notification** (`tray.rs`, réglage « Arrière-plan », `ui.json` `tray`) : `Shell_NotifyIconW` sur la fenêtre principale ; ses messages (`WM_APP+0x40`) passent par le sous-classement de `taskbar.rs`. Clic = afficher, clic droit = menu (lecture / pause, suivant, précédent, afficher, quitter). Icône dessinée en code (rond rouge, triangle blanc). Fermer la fenêtre avec l'icône active = `ShowWindow(SW_HIDE)` ; « Quitter » pose `QUIT` puis poste `WM_CLOSE` (arrêt normal de mpv). Reposée sur `TaskbarButtonCreated`. Windows seulement.
 
 ## Emplacements à l'exécution
 
@@ -180,5 +181,5 @@ Sécurité (`security.rs`) : `Host` limité aux noms de loopback en mode local (
 | 4 — GUI native iced | validée sous Windows ; largement étendue depuis (voir GUI) |
 | 5 — Firmware CYD | à faire (`/api/v1/like` répond encore 501) |
 | 6 — Authentification et bibliothèque (playlists, likes) | faite sous Windows (lecture vérifiée sur un vrai compte ; modifications à confirmer par l'utilisateur) |
-| 7 — Intégration OS | Windows : touches média, overlay, boutons de la barre des tâches, notifications, plein écran ; Linux : MPRIS et notifications à vérifier sous CachyOS ; pas d'icône de zone de notification |
+| 7 — Intégration OS | Windows : touches média, overlay, boutons de la barre des tâches, notifications, plein écran, icône de la zone de notification ; Linux : MPRIS et notifications à vérifier sous CachyOS |
 | 8 — Packaging | à faire |

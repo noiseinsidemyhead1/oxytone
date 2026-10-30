@@ -351,6 +351,8 @@ struct UiSettings {
     notifications: bool,
     /// Mode hors ligne (aucun accès au réseau).
     offline_mode: bool,
+    /// Icône dans la zone de notification ; fermer la fenêtre la cache.
+    tray: bool,
 }
 
 fn yes() -> bool {
@@ -365,6 +367,7 @@ impl Default for UiSettings {
             show_queue: true,
             notifications: true,
             offline_mode: false,
+            tray: false,
         }
     }
 }
@@ -421,6 +424,8 @@ pub struct App {
     controls_anim: Option<(std::time::Instant, f32)>,
     /// Mode focus : pochette affichée, et fondu depuis la précédente.
     pub np_art: Option<String>,
+    /// Icône dans la zone de notification (Windows) : fermer cache la fenêtre.
+    pub tray: bool,
     pub np_fade: Option<(std::time::Instant, Option<String>)>,
     /// Ligne survolée dans la file d'attente.
     pub queue_hover: Option<usize>,
@@ -551,6 +556,7 @@ impl App {
             anims: crate::anim::Anims::default(),
             controls_anim: None,
             np_art: None,
+            tray: false,
             np_fade: None,
             queue_hover: None,
             queue_hover_video: None,
@@ -767,6 +773,9 @@ impl App {
             .enabled
             .store(settings.notifications, std::sync::atomic::Ordering::Relaxed);
         self.lib.offline_mode = settings.offline_mode;
+        self.tray = settings.tray;
+        #[cfg(windows)]
+        ytmr_os::tray::set_enabled(self.tray);
     }
 
     /// Mode hors ligne côté interface : plus de jaquettes téléchargées.
@@ -786,6 +795,7 @@ impl App {
             show_queue: self.show_queue,
             notifications: self.notifications_on(),
             offline_mode: self.lib.offline_mode,
+            tray: self.tray,
         };
         if let Ok(json) = serde_json::to_vec(&settings) {
             let _ = std::fs::write(path, json);

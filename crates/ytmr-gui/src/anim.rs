@@ -27,6 +27,7 @@ pub enum Key {
     Normalize,
     Notifications,
     OfflineMode,
+    Tray,
 }
 
 #[derive(Debug, Clone, Copy)]

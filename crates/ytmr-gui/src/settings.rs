@@ -32,6 +32,7 @@ pub enum Settings {
     Quality(QualityPreference),
     AudioDevice(String),
     OfflineMode(bool),
+    Tray(bool),
 }
 
 /// Sortie audio dans la liste déroulante (nom lisible, identifiant mpv).
@@ -96,6 +97,13 @@ impl App {
                     self.send(Command::SetOffline(on)),
                     self.scan_offline(),
                 ])
+            }
+            Settings::Tray(on) => {
+                self.tray = on;
+                #[cfg(windows)]
+                ytmr_os::tray::set_enabled(on);
+                self.save_ui();
+                Task::none()
             }
             Settings::Notifications(on) => {
                 self.notify
@@ -493,6 +501,33 @@ pub fn settings_page(app: &App) -> El<'_> {
                 .align_y(Alignment::Center)
                 .into()
             ),
+            if cfg!(windows) {
+                column![
+                    section_title("Arrière-plan"),
+                    card(
+                        row![
+                            column![
+                                text("Icône dans la zone de notification").size(15).font(SEMIBOLD),
+                                muted("Fermer la fenêtre la cache : la musique continue. Clic droit sur l'icône pour quitter."),
+                            ]
+                            .spacing(4)
+                            .width(Length::Fill),
+                            switch(
+                                app.anims.get(Key::Tray, 0.0),
+                                accent,
+                                Message::Settings(Settings::Tray(!app.tray)),
+                            ),
+                        ]
+                        .spacing(16)
+                        .align_y(Alignment::Center)
+                        .into()
+                    ),
+                ]
+                .spacing(16)
+                .into()
+            } else {
+                El::from(Space::new())
+            },
             section_title("Stockage"),
             card(cache.into()),
             section_title("Compte"),

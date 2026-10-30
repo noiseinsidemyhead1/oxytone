@@ -52,6 +52,7 @@ impl App {
             .aim(Key::Notifications, on(self.notifications_on()), 0.0);
         self.anims
             .aim(Key::OfflineMode, on(self.lib.offline_mode), 0.0);
+        self.anims.aim(Key::Tray, on(self.tray), 0.0);
     }
 
     pub(super) fn update_inner(&mut self, message: Message) -> Task<Message> {
@@ -577,6 +578,16 @@ impl App {
             Message::CloseRequested => {
                 if self.shutting_down {
                     return Task::none();
+                }
+                // Icône active : la fenêtre se cache, la musique continue
+                // (« Quitter » dans le menu de l'icône ferme pour de bon).
+                #[cfg(windows)]
+                {
+                    if self.tray && !ytmr_os::tray::quit_requested() {
+                        ytmr_os::tray::hide_window();
+                        return Task::none();
+                    }
+                    ytmr_os::tray::shutdown();
                 }
                 self.shutting_down = true;
                 match std::mem::replace(&mut self.phase, Phase::Starting) {
