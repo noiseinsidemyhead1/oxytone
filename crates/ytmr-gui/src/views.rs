@@ -565,6 +565,15 @@ pub(crate) fn track_title<'a>(track: &'a Track, size: u32, color: Color) -> El<'
 /// Morceaux affichés dans les résultats de recherche.
 pub(crate) const SEARCH_SONGS: usize = 10;
 
+/// Morceaux affichés : 10 dans « Tout », tous dans « Titres ».
+pub(crate) fn search_songs_shown(app: &App) -> usize {
+    if app.search_tab == crate::app::SearchTab::Songs {
+        usize::MAX
+    } else {
+        SEARCH_SONGS
+    }
+}
+
 /// Zone où l'on peut déposer des morceaux glissés (file, playlist).
 pub(crate) fn drop_zone<'a>(content: El<'a>, target: crate::app::DropTarget) -> El<'a> {
     mouse_area(content)
@@ -1418,10 +1427,13 @@ fn search_page(app: &App) -> El<'_> {
         .into()
     };
     if query.is_empty() {
-        return invite(
-            "Que veux-tu écouter ?",
-            "Tape un titre, un artiste ou un album dans la barre de recherche.",
-        );
+        if app.recent_searches.is_empty() {
+            return invite(
+                "Que veux-tu écouter ?",
+                "Tape un titre, un artiste ou un album dans la barre de recherche.",
+            );
+        }
+        return recent_searches(app);
     }
     // Les résultats précédents restent affichés pendant la recherche suivante
     // (barre de chargement en haut) : pas de page « Chargement… ».
@@ -1441,15 +1453,112 @@ fn search_page(app: &App) -> El<'_> {
             bottom: 12.0,
             ..Padding::ZERO
         }),
+        search_tabs(app),
         body
     ])
 }
 
+/// Onglets des résultats.
+fn search_tabs(app: &App) -> El<'_> {
+    use crate::app::SearchTab;
+    let accent = app.accent;
+    let tab = |label: &'static str, which: SearchTab| -> El<'_> {
+        let active = app.search_tab == which;
+        button(text(label).size(13).font(SEMIBOLD))
+            .padding(Padding::from([7, 16]))
+            .style(move |theme, status| {
+                if active {
+                    style::pill(accent)(theme, status)
+                } else {
+                    style::pill_ghost(theme, status)
+                }
+            })
+            .on_press(Message::SearchTab(which))
+            .into()
+    };
+    container(
+        row![
+            tab("Tout", SearchTab::All),
+            tab("Titres", SearchTab::Songs),
+            tab("Albums", SearchTab::Albums),
+            tab("Artistes", SearchTab::Artists),
+        ]
+        .spacing(8),
+    )
+    .padding(Padding {
+        bottom: 20.0,
+        ..Padding::ZERO
+    })
+    .into()
+}
+
+/// Champ vide : les recherches récentes, à relancer d'un clic.
+fn recent_searches(app: &App) -> El<'_> {
+    let mut list = column![].spacing(2);
+    for query in &app.recent_searches {
+        list = list.push(
+            container(
+                row![
+                    button(
+                        row![
+                            icon(Icon::Search, 15.0, style::TEXT_DIM),
+                            text(query).size(15),
+                        ]
+                        .spacing(14)
+                        .align_y(Alignment::Center),
+                    )
+                    .width(Length::Fill)
+                    .padding(Padding::from([10, 12]))
+                    .style(style::card)
+                    .on_press(Message::SearchRecent(query.clone())),
+                    icon_btn(
+                        Icon::Close,
+                        14.0,
+                        style::TEXT_FAINT,
+                        Message::SearchForget(query.clone()),
+                    ),
+                ]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            )
+            .max_width(720),
+        );
+    }
+    scroll_page(column![
+        container(
+            row![
+                text("Recherches récentes").size(26).font(BOLD),
+                Space::new().width(Length::Fill),
+                button(text("Tout effacer").size(13).font(SEMIBOLD))
+                    .padding(Padding::from([7, 14]))
+                    .style(style::pill_ghost)
+                    .on_press(Message::SearchClearRecent),
+            ]
+            .align_y(Alignment::Center)
+            .width(Length::Fixed(720.0)),
+        )
+        .padding(Padding {
+            top: 28.0,
+            bottom: 16.0,
+            ..Padding::ZERO
+        }),
+        list
+    ])
+}
+
 fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
+    use crate::app::SearchTab;
+    let tab = app.search_tab;
+    let show = |which: SearchTab| tab == SearchTab::All || tab == which;
+    // « Tout » : un aperçu de chaque ; un onglet : tout ce qui est arrivé.
+    let (albums_max, artists_max) = match tab {
+        SearchTab::All => (12, 8),
+        _ => (usize::MAX, usize::MAX),
+    };
     let mut page = column![].spacing(28);
-    if !r.songs.is_empty() {
+    if show(SearchTab::Songs) && !r.songs.is_empty() {
         let mut songs = column![section_title("Morceaux")].spacing(4);
-        for (i, track) in r.songs.iter().take(SEARCH_SONGS).enumerate() {
+        for (i, track) in r.songs.iter().take(search_songs_shown(app)).enumerate() {
             // Un morceau seul : la radio prend le relais, comme sur YouTube Music.
             songs = songs.push(track_row(
                 app,
@@ -1462,14 +1571,14 @@ fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
         }
         page = page.push(songs);
     }
-    if !r.albums.is_empty() {
+    if show(SearchTab::Albums) && !r.albums.is_empty() {
         page = page.push(
             column![
                 section_title("Albums"),
                 cards(
                     r.albums
                         .iter()
-                        .take(12)
+                        .take(albums_max)
                         .map(|a| album_card(app, a))
                         .collect()
                 )
@@ -1477,14 +1586,14 @@ fn search_results<'a>(app: &'a App, r: &'a SearchAll) -> El<'a> {
             .spacing(10),
         );
     }
-    if !r.artists.is_empty() {
+    if show(SearchTab::Artists) && !r.artists.is_empty() {
         page = page.push(
             column![
                 section_title("Artistes"),
                 cards(
                     r.artists
                         .iter()
-                        .take(8)
+                        .take(artists_max)
                         .map(|a| artist_card(app, a))
                         .collect()
                 )

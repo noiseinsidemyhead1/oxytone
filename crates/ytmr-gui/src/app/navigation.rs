@@ -13,6 +13,10 @@ impl App {
     }
 
     pub(super) fn navigate(&mut self, route: Route) -> Task<Message> {
+        // Un résultat ouvert depuis la recherche : elle entre dans les récentes.
+        if self.route == Route::Search && route != Route::Search {
+            self.remember_search();
+        }
         if self.route == route {
             // Re-cliquer sur la pochette en grand ramène à la page d'avant.
             return if route == Route::NowPlaying {
@@ -182,6 +186,57 @@ impl App {
             async move { catalog.search_all(&query).await.map_err(|e| e.to_string()) },
             move |r| Message::SearchDone(seq, r),
         )
+    }
+
+    fn recent_file(&self) -> Option<std::path::PathBuf> {
+        self.lib
+            .cache_dir
+            .as_ref()
+            .map(|d| d.join("recent_searches.json"))
+    }
+
+    /// Recherches récentes, relues au démarrage.
+    pub(crate) fn load_recent_searches(&mut self) {
+        self.recent_searches = self
+            .recent_file()
+            .and_then(|p| crate::collection::read_json(&p))
+            .unwrap_or_default();
+    }
+
+    fn save_recent_searches(&self) {
+        if let Some(path) = self.recent_file() {
+            crate::library::write_json(&path, &self.recent_searches);
+        }
+    }
+
+    /// La recherche affichée devient la plus récente (Entrée, ou résultat choisi).
+    pub(crate) fn remember_search(&mut self) {
+        let query = self.search_shown.trim().to_owned();
+        if query.is_empty() {
+            return;
+        }
+        self.recent_searches
+            .retain(|q| !q.eq_ignore_ascii_case(&query));
+        self.recent_searches.insert(0, query);
+        self.recent_searches.truncate(RECENT_SEARCHES);
+        self.save_recent_searches();
+    }
+
+    /// Entrée : le texte tapé entre dans les récentes (avant même les résultats).
+    pub(crate) fn remember_search_query(&mut self) {
+        let typed = ytmr_catalog::normalize_query(&self.search_query);
+        if !typed.is_empty() {
+            self.search_shown = typed;
+            self.remember_search();
+        }
+    }
+
+    pub(crate) fn forget_search(&mut self, query: Option<&str>) {
+        match query {
+            Some(q) => self.recent_searches.retain(|r| r != q),
+            None => self.recent_searches.clear(),
+        }
+        self.save_recent_searches();
     }
 
     /// Lecture d'une liste, dans l'ordre ou en aléatoire.

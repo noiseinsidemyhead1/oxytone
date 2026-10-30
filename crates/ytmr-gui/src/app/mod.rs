@@ -88,6 +88,18 @@ pub const NP_LYRIC_SIZE: f32 = 32.0;
 /// Marge au-dessus de la première ligne de paroles.
 pub const LYRICS_TOP: f32 = 24.0;
 
+/// Onglets de la page de recherche.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTab {
+    All,
+    Songs,
+    Albums,
+    Artists,
+}
+
+/// Recherches récentes gardées.
+pub const RECENT_SEARCHES: usize = 12;
+
 /// Où l'on peut déposer des morceaux glissés.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropTarget {
@@ -290,6 +302,11 @@ pub enum Message {
     /// Clic à absorber (panneau d'une fenêtre par-dessus la page).
     Noop,
     CloseRequested,
+    SearchTab(SearchTab),
+    /// Relancer une recherche récente.
+    SearchRecent(String),
+    SearchForget(String),
+    SearchClearRecent,
     ShutdownDone,
 }
 
@@ -408,6 +425,9 @@ pub struct App {
     page_fade: Fade,
     /// Requête dont les résultats sont affichés.
     pub search_shown: String,
+    /// Onglet des résultats, et recherches récentes (les plus récentes d'abord).
+    pub search_tab: SearchTab,
+    pub recent_searches: Vec<String>,
     /// Résultats reçus, en attente de leurs pochettes (au plus ~0,7 s).
     search_pending: Option<(u64, String, SearchAll)>,
     search_inflight: bool,
@@ -547,6 +567,8 @@ impl App {
             page_accent: style::DEFAULT_ACCENT,
             page_fade: Fade::new(style::DEFAULT_ACCENT),
             search_shown: String::new(),
+            search_tab: SearchTab::All,
+            recent_searches: Vec::new(),
             search_pending: None,
             search_inflight: false,
             fullscreen: false,

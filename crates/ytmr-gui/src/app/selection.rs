@@ -77,7 +77,11 @@ impl App {
                 _ => Vec::new(),
             },
             Route::Search => match &self.search {
-                Some(Load::Ready(r)) => r.songs.iter().take(crate::views::SEARCH_SONGS).collect(),
+                Some(Load::Ready(r)) => r
+                    .songs
+                    .iter()
+                    .take(crate::views::search_songs_shown(self))
+                    .collect(),
                 _ => Vec::new(),
             },
             _ => Vec::new(),

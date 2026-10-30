@@ -67,6 +67,7 @@ impl App {
                         self.lib.liked_count = Some(liked.tracks.len());
                     }
                     self.lib.cache_dir = Some(cache_dir);
+                    self.load_recent_searches();
                     // Pochette des notifications : même cache que l'interface.
                     let _ = self.notify.covers.set(Arc::clone(&backend.covers));
                     self.phase = Phase::Ready(backend);
@@ -141,6 +142,7 @@ impl App {
                 self.show_toast("Recherche indisponible en mode hors ligne".into())
             }
             Message::SearchSubmit => {
+                self.remember_search_query();
                 self.suggestions.clear();
                 if self.route != Route::Search {
                     let previous = std::mem::replace(&mut self.route, Route::Search);
@@ -427,7 +429,31 @@ impl App {
                 self.update_page_accent();
                 Task::none()
             }
-            Message::Play(tracks, start) => self.send(Command::PlayTracks { tracks, start }),
+            Message::Play(tracks, start) => {
+                if self.route == Route::Search {
+                    self.remember_search();
+                }
+                self.send(Command::PlayTracks { tracks, start })
+            }
+            Message::SearchTab(tab) => {
+                self.search_tab = tab;
+                self.scroll_page_top()
+            }
+            Message::SearchRecent(query) => {
+                self.search_query = query;
+                self.search_tab = SearchTab::All;
+                let submit = self.update(Message::SearchSubmit);
+                self.remember_search_query();
+                submit
+            }
+            Message::SearchForget(query) => {
+                self.forget_search(Some(&query));
+                Task::none()
+            }
+            Message::SearchClearRecent => {
+                self.forget_search(None);
+                Task::none()
+            }
             Message::PlayShuffled(tracks) => {
                 if tracks.is_empty() {
                     return Task::none();
