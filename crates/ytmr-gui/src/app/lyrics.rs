@@ -29,9 +29,36 @@ impl App {
         self.show_queue && self.right_panel == RightPanel::Lyrics
     }
 
-    /// Fait glisser les paroles jusqu'à la ligne chantée (quand elle change).
+    /// Largeur du texte des paroles dans la vue « En cours ».
+    pub(crate) fn np_lyrics_text_width(&self) -> f32 {
+        (self.window_width - 2.0 * NP_PAD - NP_COVER - NP_GAP - 4.0).max(200.0)
+    }
+
+    /// Où les paroles sont affichées : (défilement, largeur du texte, hauteur visible).
+    fn lyrics_surfaces(&self) -> Vec<(&'static str, f32, f32)> {
+        let mut out = Vec::new();
+        if self.lyrics_shown() {
+            out.push((
+                LYRICS_SCROLL,
+                lyrics_text_width(self.queue_width),
+                self.lyrics_view.height,
+            ));
+        }
+        if self.route == Route::NowPlaying {
+            out.push((
+                NP_LYRICS_SCROLL,
+                self.np_lyrics_text_width(),
+                self.np_lyrics_view.height,
+            ));
+        }
+        out
+    }
+
+    /// Fait glisser les paroles jusqu'à la ligne chantée (quand elle change),
+    /// dans le panneau de droite et dans la vue « En cours ».
     pub(super) fn follow_lyrics(&mut self) {
-        if !self.lyrics_shown() {
+        let surfaces = self.lyrics_surfaces();
+        if surfaces.is_empty() {
             return;
         }
         let Some(entry) = &self.state.current else {
@@ -52,20 +79,20 @@ impl App {
         let ytmr_catalog::lyrics::LyricsBody::Synced(lines) = &lyrics.body else {
             return;
         };
-        let heights = lyric_heights(
-            lines.iter().map(|l| l.text.chars().count()),
-            lyrics_text_width(self.queue_width),
-        );
-        let index = line.unwrap_or(0).min(heights.len().saturating_sub(1));
-        let above: f32 = heights[..index].iter().sum();
-        let middle = heights.get(index).copied().unwrap_or(0.0) / 2.0;
-        let target = LYRICS_TOP + above + middle - self.lyrics_view.height * 0.4;
-        self.scrolling.glide_to(LYRICS_SCROLL, target);
+        let lengths: Vec<usize> = lines.iter().map(|l| l.text.chars().count()).collect();
+        for (scroll, width, view_height) in surfaces {
+            let heights = lyric_heights(lengths.iter().copied(), width);
+            let index = line.unwrap_or(0).min(heights.len().saturating_sub(1));
+            let above: f32 = heights[..index].iter().sum();
+            let middle = heights.get(index).copied().unwrap_or(0.0) / 2.0;
+            let target = LYRICS_TOP + above + middle - view_height * 0.4;
+            self.scrolling.glide_to(scroll, target);
+        }
     }
 
-    /// Paroles du morceau en cours, quand la grande vue est ouverte.
+    /// Paroles du morceau en cours, quand le panneau ou la vue « En cours » les montre.
     pub(super) fn want_lyrics(&mut self) -> Task<Message> {
-        if !self.lyrics_shown() {
+        if self.lyrics_surfaces().is_empty() {
             return Task::none();
         }
         let Some(track) = self.state.current.as_ref().map(|e| e.track.clone()) else {

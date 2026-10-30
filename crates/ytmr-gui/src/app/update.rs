@@ -539,7 +539,7 @@ impl App {
                 }
             }
             Message::Wheel(id, lines) => {
-                if id == LYRICS_SCROLL {
+                if id == LYRICS_SCROLL || id == NP_LYRICS_SCROLL {
                     // On lit plus loin : le suivi reprend 4 s après le dernier cran.
                     self.lyrics_manual_until =
                         Some(std::time::Instant::now() + Duration::from_secs(4));
@@ -571,6 +571,8 @@ impl App {
                     self.queue_view = view;
                 } else if id == LYRICS_SCROLL {
                     self.lyrics_view = view;
+                } else if id == NP_LYRICS_SCROLL {
+                    self.np_lyrics_view = view;
                 }
                 self.covers_seq += 1;
                 let seq = self.covers_seq;

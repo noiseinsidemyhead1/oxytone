@@ -14,8 +14,9 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, PAGE_SCROLL, Panel,
-    Phase, QUEUE_SCROLL, QueueDrag, RightPanel, Route, SEARCH_INPUT, THUMB, View,
+    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_COVER, NP_GAP,
+    NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, RightPanel,
+    Route, SEARCH_INPUT, THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -992,36 +993,104 @@ fn now_playing(app: &App) -> El<'_> {
     let track = &entry.track;
     let id = app.track_cover(track);
     let big =
-        container(cover(app.cover(id.as_deref(), HERO), 420.0, 12.0)).style(style::cover_frame);
+        container(cover(app.cover(id.as_deref(), HERO), NP_COVER, 12.0)).style(style::cover_frame);
     let mut info = column![
-        text(&track.title).size(42).font(BOLD),
-        text(&track.artist).size(19).color(style::TEXT_DIM),
+        text(ellipsize(&track.title, 60).into_owned())
+            .size(30)
+            .font(BOLD),
+        button(text(&track.artist).size(17).color(style::TEXT_DIM))
+            .padding(0)
+            .style(style::link)
+            .on_press(Message::OpenArtist(
+                track.artist_id.clone(),
+                main_artist(&track.artist).to_owned(),
+            )),
     ]
-    .spacing(8);
+    .spacing(6);
     if let (Some(album), Some(album_id)) = (&track.album, &track.album_id) {
         info = info.push(
-            button(text(album).size(15))
+            button(text(album).size(14).color(style::TEXT_DIM))
                 .padding(0)
                 .style(style::link)
                 .on_press(Message::Navigate(Route::Album(album_id.clone()))),
         );
     }
+    let left = column![big, info]
+        .spacing(22)
+        .width(Length::Fixed(NP_COVER));
+    let lyrics = container(lyrics_body(
+        app,
+        NP_LYRICS_SCROLL,
+        app.np_lyrics_text_width(),
+        app.np_lyrics_view.height,
+    ))
+    .width(Length::Fill)
+    .height(Length::Fill);
+    let main = row![left, lyrics].spacing(NP_GAP).height(Length::Fill);
+
     // Mode focus : rien n'apparaît tout seul ; un clic n'importe où affiche
-    // ou masque les contrôles (Échap pour revenir).
-    let side = info.width(Length::Fill);
+    // ou masque les contrôles (Échap pour revenir). La marge du bas laisse la
+    // place à la barre de contrôles : rien ne bouge quand elle apparaît.
     mouse_area(
         container(
-            row![big, side]
-                .spacing(40)
-                .align_y(Alignment::Center)
-                .padding(48),
+            column![main, upcoming_strip(app)]
+                .spacing(24)
+                .padding(Padding {
+                    top: NP_PAD,
+                    right: NP_PAD,
+                    bottom: 110.0,
+                    left: NP_PAD,
+                }),
         )
         .width(Length::Fill)
         .height(Length::Fill)
-        .center_y(Length::Fill)
         .style(style::hero(app.accent)),
     )
     .on_press(Message::ToggleControls)
+    .into()
+}
+
+/// « À suivre » sous la grande vue : les prochains morceaux (double-clic = lancer).
+fn upcoming_strip(app: &App) -> El<'_> {
+    const SHOWN: usize = 6;
+    let next: Vec<&ytmr_core::QueuedTrack> = app.queue.entries.iter().skip(1).take(SHOWN).collect();
+    if next.is_empty() {
+        return Space::new().into();
+    }
+    let cards = row(next.into_iter().map(|e| {
+        let id = app.track_cover(&e.track);
+        mouse_area(
+            container(
+                row![
+                    cover(app.cover(id.as_deref(), THUMB), 44.0, 6.0),
+                    column![
+                        text(ellipsize(&e.track.title, 22).into_owned())
+                            .size(13)
+                            .font(SEMIBOLD)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        text(ellipsize(&e.track.artist, 26).into_owned())
+                            .size(12)
+                            .color(style::TEXT_DIM)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                    ]
+                    .spacing(2),
+                ]
+                .spacing(10)
+                .align_y(Alignment::Center),
+            )
+            .width(Length::FillPortion(1))
+            .clip(true),
+        )
+        .on_double_click(Message::JumpTo(e.id))
+        .interaction(iced::mouse::Interaction::Pointer)
+        .into()
+    }))
+    .spacing(16);
+    column![
+        text("À suivre").size(13).font(BOLD).color(style::TEXT_DIM),
+        cards
+    ]
+    .spacing(10)
     .into()
 }
 
@@ -1033,7 +1102,6 @@ fn now_playing(app: &App) -> El<'_> {
 /// s'éclaircit seulement (pas de cadre) ; un clic y amène la lecture. Défiler
 /// à la molette suspend le suivi quelques secondes.
 fn lyrics_side(app: &App) -> El<'_> {
-    use ytmr_catalog::lyrics::LyricsBody;
     let accent = app.accent;
     let current = app.state.current.as_ref();
     let header = row![
@@ -1052,12 +1120,61 @@ fn lyrics_side(app: &App) -> El<'_> {
         Some(Load::Ready(Some(l))) => Some(l),
         _ => None,
     });
+    let body = lyrics_body(
+        app,
+        LYRICS_SCROLL,
+        crate::app::lyrics_text_width(app.queue_width),
+        app.lyrics_view.height,
+    );
+    let footer = text(
+        lyrics
+            .map(|l| format!("Paroles : {}", l.source))
+            .unwrap_or_default(),
+    )
+    .size(11)
+    .color(style::alpha(Color::WHITE, 0.45));
+
+    container(column![header, body, footer].spacing(10).padding(Padding {
+        top: 16.0,
+        right: 16.0,
+        bottom: 12.0,
+        left: 20.0,
+    }))
+    .width(Length::Fixed(app.queue_width))
+    .height(Length::Fill)
+    .style(move |_| iced::widget::container::Style {
+        // Teinte de la pochette, assombrie vers le bas pour la lisibilité.
+        background: Some(iced::Background::Gradient(iced::Gradient::Linear(
+            iced::gradient::Linear::new(std::f32::consts::PI)
+                .add_stop(0.0, style::shade(accent, 0.30))
+                .add_stop(1.0, style::shade(accent, 0.12)),
+        ))),
+        text_color: Some(Color::WHITE),
+        ..Default::default()
+    })
+    .into()
+}
+
+/// Paroles du morceau en cours (synchronisées ou texte simple) pour la
+/// liste défilante `scroll`, dont le texte fait `text_width` de large.
+fn lyrics_body<'a>(
+    app: &'a App,
+    scroll: &'static str,
+    text_width: f32,
+    view_height: f32,
+) -> El<'a> {
+    use ytmr_catalog::lyrics::LyricsBody;
+    let current = app.state.current.as_ref();
+    let lyrics = current.and_then(|e| match app.lyrics.get(&e.track.video_id) {
+        Some(Load::Ready(Some(l))) => Some(l),
+        _ => None,
+    });
     let message = |m: &'static str| -> El<'_> {
         container(text(m).size(15).color(style::alpha(Color::WHITE, 0.6)))
             .center(Length::Fill)
             .into()
     };
-    let body: El<'_> = match (current, lyrics) {
+    match (current, lyrics) {
         (None, _) => message("Rien en lecture."),
         (Some(e), None) => match app.lyrics.get(&e.track.video_id) {
             None | Some(Load::Loading) => message("Chargement…"),
@@ -1069,7 +1186,7 @@ fn lyrics_side(app: &App) -> El<'_> {
                 let mut list = column![Space::new().height(Length::Fixed(LYRICS_TOP))];
                 let heights = crate::app::lyric_heights(
                     lines.iter().map(|l| l.text.chars().count()),
-                    crate::app::lyrics_text_width(app.queue_width),
+                    text_width,
                 );
                 for ((i, line), height) in lines.iter().enumerate().zip(heights) {
                     // Opacité de repos : pleine (chantée), 0,5 (à venir), 0,3 (passée).
@@ -1108,8 +1225,8 @@ fn lyrics_side(app: &App) -> El<'_> {
                     );
                 }
                 // Marge du bas : la dernière ligne peut remonter comme les autres.
-                list = list.push(Space::new().height(Length::Fixed(app.lyrics_view.height)));
-                smooth_scroll(list, LYRICS_SCROLL)
+                list = list.push(Space::new().height(Length::Fixed(view_height)));
+                smooth_scroll(list, scroll)
             }
             LyricsBody::Plain(body) => smooth_scroll(
                 container(
@@ -1124,37 +1241,10 @@ fn lyrics_side(app: &App) -> El<'_> {
                     bottom: 40.0,
                     ..Padding::ZERO
                 }),
-                LYRICS_SCROLL,
+                scroll,
             ),
         },
-    };
-    let footer = text(
-        lyrics
-            .map(|l| format!("Paroles : {}", l.source))
-            .unwrap_or_default(),
-    )
-    .size(11)
-    .color(style::alpha(Color::WHITE, 0.45));
-
-    container(column![header, body, footer].spacing(10).padding(Padding {
-        top: 16.0,
-        right: 16.0,
-        bottom: 12.0,
-        left: 20.0,
-    }))
-    .width(Length::Fixed(app.queue_width))
-    .height(Length::Fill)
-    .style(move |_| iced::widget::container::Style {
-        // Teinte de la pochette, assombrie vers le bas pour la lisibilité.
-        background: Some(iced::Background::Gradient(iced::Gradient::Linear(
-            iced::gradient::Linear::new(std::f32::consts::PI)
-                .add_stop(0.0, style::shade(accent, 0.30))
-                .add_stop(1.0, style::shade(accent, 0.12)),
-        ))),
-        text_color: Some(Color::WHITE),
-        ..Default::default()
-    })
-    .into()
+    }
 }
 
 /// « Bonjour, <prénom> » selon l'heure locale.

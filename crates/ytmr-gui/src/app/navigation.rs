@@ -132,7 +132,12 @@ impl App {
             ]),
             Route::Playlist(id) => self.open_playlist(id),
             Route::Home => self.refresh_home(),
-            Route::NowPlaying => self.want_lyrics(),
+            Route::NowPlaying => {
+                // Les paroles de la grande vue repartent de la ligne chantée.
+                self.lyrics_line = None;
+                self.follow_lyrics();
+                self.want_lyrics()
+            }
             Route::Settings => self.open_settings(),
             Route::History => self.load_history_page(),
             Route::Stats => self.load_stats(),

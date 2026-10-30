@@ -69,6 +69,12 @@ pub const SEARCH_INPUT: &str = "recherche";
 pub const PAGE_SCROLL: &str = "page";
 pub const QUEUE_SCROLL: &str = "file";
 pub const LYRICS_SCROLL: &str = "paroles";
+/// Paroles de la vue « En cours » (défilement à part du panneau de droite).
+pub const NP_LYRICS_SCROLL: &str = "paroles-en-cours";
+/// Vue « En cours » : marges, largeur de la colonne pochette et écart.
+pub const NP_PAD: f32 = 48.0;
+pub const NP_COVER: f32 = 380.0;
+pub const NP_GAP: f32 = 48.0;
 /// Taille du texte des paroles et hauteur d'une ligne de texte.
 pub const LYRIC_SIZE: f32 = 20.0;
 const LYRIC_TEXT_H: f32 = 27.0;
@@ -438,6 +444,7 @@ pub struct App {
     /// Ligne de paroles suivie (pour ne glisser qu'au changement de ligne).
     lyrics_line: Option<usize>,
     pub lyrics_view: View,
+    pub np_lyrics_view: View,
     pub seek_preview: Option<f32>,
     muted_volume: Option<u8>,
     pub hovered: Option<String>,
@@ -575,6 +582,7 @@ impl App {
             fps_meter: std::env::var_os("YTMR_FPS").map(|_| (std::time::Instant::now(), 0)),
             lyrics_line: None,
             lyrics_view: View::default(),
+            np_lyrics_view: View::default(),
             drag_anchor: None,
             ui_file: Some(config.1.cache_dir.join("ui.json")),
             pending_route: None,

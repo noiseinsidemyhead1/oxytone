@@ -28,13 +28,15 @@ impl App {
                 // Nouveau morceau : les paroles repartent du haut.
                 self.lyrics_line = None;
                 self.scrolling.reset(LYRICS_SCROLL);
-                let lyrics_top = operation::scroll_to(
-                    LYRICS_SCROLL,
-                    iced::widget::scrollable::AbsoluteOffset {
-                        x: None,
-                        y: Some(0.0),
-                    },
-                );
+                self.scrolling.reset(NP_LYRICS_SCROLL);
+                let top = iced::widget::scrollable::AbsoluteOffset {
+                    x: None,
+                    y: Some(0.0),
+                };
+                let lyrics_top = Task::batch([
+                    operation::scroll_to(LYRICS_SCROLL, top),
+                    operation::scroll_to(NP_LYRICS_SCROLL, top),
+                ]);
                 let cover = self.current_cover();
                 if let Some(color) = cover.as_ref().and_then(|id| self.accents.get(id)).copied() {
                     self.accent_fade.set(self.accent, color);
