@@ -46,6 +46,11 @@ pub const THUMB: u32 = 96;
 pub const CARD: u32 = 200;
 /// Grandes pochettes (en-tête ~220 px, vue « En cours » ~420 px) : 1 Mo décodé.
 pub const HERO: u32 = 512;
+/// Pochette du mode focus : pleine définition (jusqu'à 620 px affichés, × l'échelle
+/// de l'écran ; 512 était agrandi et paraissait flou).
+pub const BIG: u32 = 1200;
+/// Fondu entre deux pochettes dans le mode focus.
+pub const NP_FADE: Duration = Duration::from_millis(700);
 /// Mémoire réservée aux pochettes décodées (~1 600 vignettes ou 300 cartes).
 const COVER_BUDGET: u64 = 64 << 20;
 
@@ -414,6 +419,9 @@ pub struct App {
     pub anims: crate::anim::Anims,
     /// Fondu des contrôles en cours : (début, opacité de départ).
     controls_anim: Option<(std::time::Instant, f32)>,
+    /// Mode focus : pochette affichée, et fondu depuis la précédente.
+    pub np_art: Option<String>,
+    pub np_fade: Option<(std::time::Instant, Option<String>)>,
     /// Ligne survolée dans la file d'attente.
     pub queue_hover: Option<usize>,
     queue_hover_video: Option<String>,
@@ -542,6 +550,8 @@ impl App {
             controls_level: 0.0,
             anims: crate::anim::Anims::default(),
             controls_anim: None,
+            np_art: None,
+            np_fade: None,
             queue_hover: None,
             queue_hover_video: None,
             visible_covers: std::collections::HashSet::new(),
@@ -678,6 +688,7 @@ impl App {
         if self.scrolling.is_animating()
             || self.fps_meter.is_some()
             || self.controls_anim.is_some()
+            || self.np_fade.is_some()
             || self.anims.is_running()
             || self.queue_fade.is_some()
             || self.is_loading()

@@ -31,6 +31,20 @@ impl App {
                 .anims
                 .aim(Key::Seek, self.state.position.as_secs_f32(), f32::INFINITY),
         }
+        // Mode focus : quand la pochette du nouveau morceau est prête, fondu
+        // depuis l'ancienne.
+        if self.route == Route::NowPlaying {
+            let current = self.current_cover();
+            let ready = current.as_deref().is_some_and(|id| {
+                self.cover(Some(id), BIG).is_some() || self.cover(Some(id), HERO).is_some()
+            });
+            if ready && current != self.np_art {
+                let previous = std::mem::replace(&mut self.np_art, current);
+                self.np_fade = previous
+                    .is_some()
+                    .then(|| (std::time::Instant::now(), previous));
+            }
+        }
         let on = |b: bool| if b { 1.0 } else { 0.0 };
         self.anims
             .aim(Key::Normalize, on(self.state.effects.normalize), 0.0);
@@ -717,6 +731,13 @@ impl App {
                 self.frame_now = now;
                 if self.queue_fade.is_some_and(|f| f.is_done(now)) {
                     self.queue_fade = None;
+                }
+                if self
+                    .np_fade
+                    .as_ref()
+                    .is_some_and(|(since, _)| now.saturating_duration_since(*since) >= NP_FADE)
+                {
+                    self.np_fade = None;
                 }
                 if let Some((since, from)) = self.controls_anim {
                     let t = (now.saturating_duration_since(since).as_secs_f32()

@@ -14,9 +14,9 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP, NP_LYRIC_SIZE,
-    NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, RightPanel,
-    Route, SEARCH_INPUT, THUMB, View,
+    App, BIG, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP,
+    NP_LYRIC_SIZE, NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag,
+    RightPanel, Route, SEARCH_INPUT, THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -414,6 +414,19 @@ pub(crate) fn cover<'a>(handle: Option<image::Handle>, size: f32, radius: f32) -
                 s
             })
             .into(),
+    }
+}
+
+/// Pochette à demi transparente (fondu du mode focus).
+fn faded_cover<'a>(handle: Option<image::Handle>, size: f32, radius: f32, opacity: f32) -> El<'a> {
+    match handle {
+        Some(h) => image(h)
+            .width(Length::Fixed(size))
+            .height(Length::Fixed(size))
+            .border_radius(radius)
+            .opacity(opacity)
+            .into(),
+        None => cover(None, size, radius),
     }
 }
 
@@ -1045,12 +1058,33 @@ fn now_playing(app: &App) -> El<'_> {
     let track = &entry.track;
     let id = app.track_cover(track);
     let side = app.np_cover();
-    let big =
-        container(cover(app.cover(id.as_deref(), HERO), side, 14.0)).style(style::cover_frame);
+    // Pleine définition dès qu'elle est prête (512 px en attendant) ; fondu
+    // depuis la pochette du morceau précédent.
+    let art = |id: Option<&str>| app.cover(id, BIG).or_else(|| app.cover(id, HERO));
+    let shown = match &app.np_fade {
+        Some((since, previous)) => {
+            let t = (app
+                .frame_now
+                .saturating_duration_since(*since)
+                .as_secs_f32()
+                / crate::app::NP_FADE.as_secs_f32())
+            .clamp(0.0, 1.0);
+            let eased = t * t * (3.0 - 2.0 * t);
+            stack![
+                cover(art(previous.as_deref()), side, 14.0),
+                faded_cover(art(id.as_deref()), side, 14.0, eased),
+            ]
+            .into()
+        }
+        None => cover(art(id.as_deref()), side, 14.0),
+    };
+    let big = container(shown).style(style::cover_frame);
     let mut info = column![
-        text(ellipsize(&track.title, 60).into_owned())
+        // Titre long : sur deux lignes plutôt que coupé.
+        text(&track.title)
             .size(34)
-            .font(BOLD),
+            .font(BOLD)
+            .width(Length::Fixed(side)),
         button(text(&track.artist).size(19).color(style::TEXT_DIM))
             .padding(0)
             .style(style::link)

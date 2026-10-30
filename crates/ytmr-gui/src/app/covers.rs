@@ -57,7 +57,7 @@ impl App {
         // Grandes pochettes : libérables (celles du morceau en cours et de la
         // page affichée sont protégées, et redemandées à chaque visite). Avant,
         // chaque page visitée en gardait une de plus en mémoire.
-        if size == HERO {
+        if size == HERO || size == BIG {
             self.cover_evictable.insert(key.clone());
         } else {
             self.cover_evictable.remove(&key);

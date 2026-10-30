@@ -144,7 +144,11 @@ impl App {
                 // Les paroles de la grande vue repartent de la ligne chantée.
                 self.lyrics_line = None;
                 self.follow_lyrics();
-                self.want_lyrics()
+                // Pas de fondu à l'ouverture : la pochette est déjà là.
+                self.np_art = self.current_cover();
+                self.np_fade = None;
+                let big = self.want_cover(self.current_cover(), BIG);
+                Task::batch([self.want_lyrics(), big])
             }
             Route::Settings => self.open_settings(),
             Route::History => self.load_history_page(),

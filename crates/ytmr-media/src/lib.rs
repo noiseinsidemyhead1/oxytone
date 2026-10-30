@@ -321,13 +321,29 @@ impl Covers {
         if self.offline.load(Ordering::Relaxed) {
             return Err(MediaError::Offline);
         }
-        let response = self
-            .http
-            .get(source_url(&url, tier))
-            .send()
-            .await?
-            .error_for_status()?;
-        let data = response.bytes().await?.to_vec();
+        // Vignette vidéo en grand : « maxres » (1280×720) n'existe pas toujours,
+        // `hqdefault` (480×360, flou une fois agrandi) sert de secours.
+        let maxres = (tier == Tier::Large && url.contains("i.ytimg.com/vi/"))
+            .then(|| source_url(&url, tier).replace("/hqdefault.jpg", "/maxresdefault.jpg"));
+        let mut data = None;
+        if let Some(maxres) = maxres
+            && let Ok(response) = self.http.get(&maxres).send().await
+            && response.status().is_success()
+        {
+            data = Some(response.bytes().await?.to_vec());
+        }
+        let data = match data {
+            Some(data) => data,
+            None => self
+                .http
+                .get(source_url(&url, tier))
+                .send()
+                .await?
+                .error_for_status()?
+                .bytes()
+                .await?
+                .to_vec(),
+        };
         // Vérifie que c'est bien une image avant de la garder.
         image::load_from_memory(&data)?;
         write_atomic(&path, &data).await?;

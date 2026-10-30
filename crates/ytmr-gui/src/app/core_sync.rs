@@ -47,6 +47,11 @@ impl App {
                     lyrics_top,
                     self.want_lyrics(),
                     self.want_cover(cover.clone(), HERO),
+                    if self.route == Route::NowPlaying {
+                        self.want_cover(cover.clone(), BIG)
+                    } else {
+                        Task::none()
+                    },
                     self.want_cover(cover.clone(), THUMB),
                     self.want_accent(cover),
                 ])
