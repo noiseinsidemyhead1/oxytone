@@ -251,7 +251,9 @@ impl Queue {
         self.entries.push(entry);
         self.current = Some(0);
         self.rebuild_upcoming();
-        self.top_up();
+        // Pas de tour de répétition ici : il ne s'ajoute qu'au passage au
+        // morceau suivant (`advance_auto`). Sinon un morceau lancé seul
+        // (recherche) en « Répéter tout » se retrouvait aussitôt dans sa suite.
         Some(id)
     }
 
@@ -289,7 +291,6 @@ impl Queue {
             self.entries.push(entry);
         }
         self.current = Some(current);
-        self.top_up();
         self.current().map(|e| e.id)
     }
 
@@ -452,7 +453,6 @@ impl Queue {
             self.current = Some(target);
         }
         self.trim_history();
-        self.top_up();
         true
     }
 
@@ -711,6 +711,17 @@ mod tests {
         assert_eq!(current(&q).as_deref(), Some("0"), "la liste repart");
         q.set_repeat(Repeat::One);
         q.advance_auto();
+        assert_eq!(current(&q).as_deref(), Some("0"));
+    }
+
+    #[test]
+    fn a_single_track_with_repeat_all_is_not_in_its_own_queue() {
+        // Morceau lancé seul depuis la recherche, « Répéter tout » actif.
+        let mut q = queue();
+        q.set_repeat(Repeat::All);
+        q.replace(tracks(0..1), 0);
+        assert_eq!(q.upcoming_len(), 0, "pas de doublon dans la file");
+        assert!(q.advance_auto().is_some(), "à la fin, il repart");
         assert_eq!(current(&q).as_deref(), Some("0"));
     }
 

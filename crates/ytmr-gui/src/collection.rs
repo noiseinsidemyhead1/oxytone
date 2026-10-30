@@ -349,6 +349,8 @@ fn card<'a>(
     open: Message,
     like: Option<El<'a>>,
     play: (String, Message),
+    // Clic droit : menu de la carte (copier le lien…).
+    menu: crate::context::Target,
 ) -> El<'a> {
     let id = app.url_cover(url);
     let max = if like.is_some() { 16 } else { 20 };
@@ -390,6 +392,7 @@ fn card<'a>(
     mouse_area(button(body).padding(10).style(style::card).on_press(open))
         .on_enter(Message::CardHover(key.clone()))
         .on_exit(Message::CardUnhover(key))
+        .on_right_press(crate::context::open(menu))
         .into()
 }
 
@@ -559,6 +562,7 @@ fn playlists_tab(app: &App) -> El<'_> {
                         p.id.clone(),
                         Message::PlayItem(HomeKind::Playlist, p.id.clone()),
                     ),
+                    crate::context::Target::Playlist(p.clone()),
                 );
                 tiles.push(if app.playlist_is_mine(p) {
                     crate::views::drop_zone(tile, crate::app::DropTarget::Playlist(p.id.clone()))
@@ -591,6 +595,7 @@ pub(crate) fn offline_cards(app: &App) -> El<'_> {
                     p.id.clone(),
                     Message::PlayItem(HomeKind::Playlist, p.id.clone()),
                 ),
+                crate::context::Target::Playlist(p.clone()),
             ));
         }
     }
@@ -636,6 +641,7 @@ fn albums_tab(app: &App) -> El<'_> {
                         a.id.clone(),
                         Message::PlayItem(HomeKind::Album, a.id.clone()),
                     ),
+                    crate::context::Target::Album(a.clone()),
                 )
             })
             .collect(),
@@ -678,6 +684,7 @@ fn artists_tab(app: &App) -> El<'_> {
                                 a.id.clone(),
                                 Message::PlayItem(HomeKind::Artist, a.id.clone()),
                             ),
+                            crate::context::Target::Artist(a.clone()),
                         )
                     })
                     .collect(),

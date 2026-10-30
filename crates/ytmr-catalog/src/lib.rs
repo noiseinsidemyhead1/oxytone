@@ -595,6 +595,33 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "nécessite le réseau"]
+    async fn radio_of_a_search_result_starts_with_the_same_song() {
+        let catalog = Catalog::new_unauthenticated().await.unwrap();
+        for query in [
+            "xtrullor wonderpunch",
+            "daft punk get lucky",
+            "ptite soeur lick a knife",
+        ] {
+            let found = catalog.search_songs(query).await.unwrap();
+            let seed = &found[0];
+            let radio = catalog.radio(&seed.video_id).await.unwrap();
+            for t in radio.iter().take(3) {
+                println!(
+                    "{query} | seed {} « {} » / {} || radio {} « {} » / {} same={}",
+                    seed.video_id,
+                    seed.title,
+                    seed.artist,
+                    t.video_id,
+                    t.title,
+                    t.artist,
+                    seed.same_song(t)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "nécessite le réseau"]
     async fn radio_returns_similar_tracks() {
         let catalog = Catalog::new_unauthenticated().await.unwrap();
         let tracks = catalog.radio("Jb6gcoR266U").await.unwrap();
