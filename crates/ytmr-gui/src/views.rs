@@ -630,7 +630,7 @@ fn help_panel<'a>() -> El<'a> {
         ("Double-clic", "Lancer le morceau"),
         ("Glisser", "Vers la file ou une playlist de la bibliothèque"),
         ("F11", "Plein écran"),
-        ("Échap", "Fermer, désélectionner, revenir"),
+        ("Échap", "Fermer, désélectionner, remonter en haut de la page"),
     ];
     let mut list = column![].spacing(10);
     for (keys, what) in KEYS {
@@ -1595,7 +1595,20 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
                 .then_some((Message::PlayAlbum(false), Message::PlayAlbum(true))),
             extra: Some({
                 let saved = app.album_saved(&album.id);
-                crate::collection::heart(
+                // Téléchargé si tous ses morceaux sont dans « Téléchargés ».
+                let pinned = !album.tracks.is_empty()
+                    && album
+                        .tracks
+                        .iter()
+                        .filter(|t| !t.unavailable)
+                        .all(|t| app.lib.downloads.iter().any(|d| d.video_id == t.video_id));
+                let download = crate::library::download_pill(
+                    app,
+                    &album.tracks,
+                    pinned,
+                    Message::Lib(crate::library::Lib::DownloadAlbum(!pinned)),
+                );
+                let heart = crate::collection::heart(
                     app,
                     saved,
                     Message::Coll(crate::collection::Coll::SaveAlbum(
@@ -1615,7 +1628,15 @@ fn album_body<'a>(app: &'a App, album: &'a Album) -> El<'a> {
                     } else {
                         "Ajouter à la bibliothèque"
                     },
-                )
+                );
+                if app.lib.offline_mode {
+                    heart
+                } else {
+                    row![heart, download]
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .into()
+                }
             }),
         },
     );

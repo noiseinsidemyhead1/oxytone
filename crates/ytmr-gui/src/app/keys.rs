@@ -65,6 +65,14 @@ impl App {
                 self.context_menu = None;
                 Task::none()
             }
+            // Échap ne quitte plus une page : il remonte en haut (la vue « En
+            // cours » se quitte toujours par Échap).
+            Key::Named(key::Named::Escape) if self.route != Route::NowPlaying => {
+                if self.page_view.offset > 0.5 {
+                    self.scrolling.glide_to(PAGE_SCROLL, 0.0);
+                }
+                Task::none()
+            }
             Key::Named(key::Named::Escape) | Key::Named(key::Named::BrowserBack) => {
                 self.update(Message::Back)
             }

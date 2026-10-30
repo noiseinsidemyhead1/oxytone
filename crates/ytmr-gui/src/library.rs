@@ -255,6 +255,9 @@ pub enum Lib {
     ToggleOffline,
     /// Télécharger (`true`) ou retirer des téléchargements des morceaux.
     Download(Vec<Track>, bool),
+    /// Tous les morceaux de l'album ouvert (l'album n'entre pas dans la
+    /// bibliothèque : seulement ses morceaux, dans « Téléchargés »).
+    DownloadAlbum(bool),
     /// Relevé du cache audio (morceaux présents sur le disque).
     OfflineScanned(HashSet<String>),
     OfflineTick,
@@ -945,6 +948,13 @@ impl App {
                 });
                 Task::batch([toast, self.keep_offline(ids, keep)])
             }
+            Lib::DownloadAlbum(keep) => match &self.album {
+                Some((_, Load::Ready(album))) => {
+                    let tracks = album.tracks.clone();
+                    self.update(Message::Lib(Lib::Download(tracks, keep)))
+                }
+                _ => Task::none(),
+            },
             Lib::Download(tracks, keep) => {
                 let ids: Vec<String> = tracks.iter().map(|t| t.video_id.clone()).collect();
                 if keep {
@@ -1866,6 +1876,62 @@ fn playlist_card<'a>(app: &App, p: &'a PlaylistSummary) -> El<'a> {
     }
 }
 
+/// Bouton de téléchargement d'une liste (playlist, album) : « Télécharger »,
+/// puis « Téléchargement · n / m », puis pastille pleine « Téléchargée ».
+/// `pinned` : la liste est demandée hors ligne.
+pub(crate) fn download_pill<'a>(
+    app: &App,
+    tracks: &[Track],
+    pinned: bool,
+    on_press: Message,
+) -> El<'a> {
+    let available = tracks
+        .iter()
+        .filter(|t| app.lib.offline_ids.contains(&t.video_id))
+        .count();
+    let accent = app.accent;
+    let playable = tracks.iter().filter(|t| !t.unavailable).count();
+    // Tout est sur l'appareil : le bouton devient une pastille pleine.
+    let complete = pinned && playable > 0 && available >= playable;
+    let label = if complete {
+        "Téléchargé".to_owned()
+    } else if pinned {
+        format!("Téléchargement · {available} / {playable}")
+    } else {
+        "Télécharger".to_owned()
+    };
+    // Téléchargé : pastille pleine, texte seul. Avant : petite icône.
+    let content: El<'a> = if complete {
+        text(label).size(12).font(SEMIBOLD).into()
+    } else {
+        row![
+            icon(
+                Icon::Download,
+                14.0,
+                if pinned { accent } else { style::TEXT_DIM }
+            ),
+            text(label).size(12).font(SEMIBOLD),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .into()
+    };
+    button(content)
+        .padding(Padding::from([5, 12]))
+        .style(move |theme, status| {
+            if complete {
+                return style::pill(accent)(theme, status);
+            }
+            let mut s = style::pill_ghost(theme, status);
+            if pinned {
+                s.border.color = style::alpha(accent, 0.7);
+            }
+            s
+        })
+        .on_press(on_press)
+        .into()
+}
+
 /// Identifiant de la playlist « Téléchargés » (propre à ytmr).
 pub const DOWNLOADS_ID: &str = "ytmr-downloads";
 
@@ -1935,51 +2001,12 @@ fn playlist_body<'a>(app: &'a App, id: &'a str, playlist: &'a Playlist) -> El<'a
         _ => Space::new().height(Length::Fixed(0.0)).into(),
     };
     let pinned = app.lib.offline_playlists.contains(id);
-    let available = playlist
-        .tracks
-        .iter()
-        .filter(|t| app.lib.offline_ids.contains(&t.video_id))
-        .count();
-    let accent = app.accent;
-    let playable = playlist.tracks.iter().filter(|t| !t.unavailable).count();
-    // Tout est sur l'appareil : le bouton devient une pastille pleine.
-    let complete = pinned && playable > 0 && available >= playable;
-    let offline_label = if complete {
-        "Téléchargée".to_owned()
-    } else if pinned {
-        format!("Téléchargement · {available} / {playable}")
-    } else {
-        "Télécharger".to_owned()
-    };
-    // Téléchargée : pastille pleine, texte seul. Avant : petite icône.
-    let offline_content: El<'_> = if complete {
-        text(offline_label).size(12).font(SEMIBOLD).into()
-    } else {
-        row![
-            icon(
-                Icon::Download,
-                14.0,
-                if pinned { accent } else { style::TEXT_DIM }
-            ),
-            text(offline_label).size(12).font(SEMIBOLD),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .into()
-    };
-    let offline = button(offline_content)
-        .padding(Padding::from([5, 12]))
-        .style(move |theme, status| {
-            if complete {
-                return style::pill(accent)(theme, status);
-            }
-            let mut s = style::pill_ghost(theme, status);
-            if pinned {
-                s.border.color = style::alpha(accent, 0.7);
-            }
-            s
-        })
-        .on_press(Message::Lib(Lib::ToggleOffline));
+    let offline = download_pill(
+        app,
+        &playlist.tracks,
+        pinned,
+        Message::Lib(Lib::ToggleOffline),
+    );
     let mut actions = row![
         icon_tip(
             Icon::Refresh,
