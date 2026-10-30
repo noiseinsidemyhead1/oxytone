@@ -52,6 +52,13 @@ pub struct StatsState {
     summary: Option<Summary>,
 }
 
+impl StatsState {
+    /// Page quittée : le journal relu (une ligne par écoute) est rendu.
+    pub fn release(&mut self) {
+        self.plays = None;
+    }
+}
+
 impl App {
     /// Ouverture de la page : relit le journal des écoutes (en tâche de fond).
     pub fn load_stats(&mut self) -> Task<Message> {

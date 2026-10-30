@@ -48,7 +48,7 @@ impl App {
                     self.want_lyrics(),
                     self.want_cover(cover.clone(), HERO),
                     if self.route == Route::NowPlaying {
-                        self.want_cover(cover.clone(), BIG)
+                        self.want_cover(cover.clone(), self.big_size())
                     } else {
                         Task::none()
                     },

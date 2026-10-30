@@ -41,6 +41,26 @@ impl App {
         })
     }
 
+    /// Les paroles du morceau en cours sont connues (trouvées ou non) : tant
+    /// qu'elles chargent, la mise en page du mode focus ne bouge pas.
+    pub(crate) fn np_lyrics_known(&self) -> bool {
+        self.state.current.as_ref().is_some_and(|e| {
+            matches!(
+                self.lyrics.get(&e.track.video_id),
+                Some(Load::Ready(_) | Load::Failed(_))
+            )
+        })
+    }
+
+    /// Taille de la pochette du mode focus, d'après la place à l'écran.
+    pub(crate) fn big_size(&self) -> u32 {
+        let pixels = self.np_cover() * self.scale_factor;
+        BIG_SIZES
+            .into_iter()
+            .find(|&s| s as f32 >= pixels)
+            .unwrap_or(BIG_SIZES[BIG_SIZES.len() - 1])
+    }
+
     /// À l'ouverture du mode focus : la mise en page est tout de suite la bonne.
     pub(crate) fn np_split_snap(&mut self) {
         let target = if self.np_synced() { 1.0 } else { 0.0 };

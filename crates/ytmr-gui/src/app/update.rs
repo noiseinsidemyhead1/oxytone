@@ -32,7 +32,10 @@ impl App {
                 .aim(Key::Seek, self.state.position.as_secs_f32(), f32::INFINITY),
         }
         // Mode focus : paroles synchronisées arrivées (ou parties) → glissement.
-        if self.route == Route::NowPlaying {
+        // Rien sans réseau ni morceau : la pochette revient au centre.
+        if self.route == Route::NowPlaying
+            && (self.np_lyrics_known() || self.state.current.is_none())
+        {
             let target = if self.np_synced() { 1.0 } else { 0.0 };
             if target != self.np_split_target {
                 self.np_split_target = target;
@@ -53,9 +56,10 @@ impl App {
                 }
             }
             let ready = current.as_deref().is_some_and(|id| {
-                let big_failed = !self.covers.contains_key(&(id.to_owned(), BIG));
+                let big = self.big_size();
+                let big_failed = !self.covers.contains_key(&(id.to_owned(), big));
                 let waited = self.np_waiting.is_none();
-                self.cover(Some(id), BIG).is_some()
+                self.cover(Some(id), big).is_some()
                     || ((big_failed || waited) && self.cover(Some(id), HERO).is_some())
             });
             if ready && current != self.np_art {
@@ -64,6 +68,16 @@ impl App {
                     .is_some()
                     .then(|| (std::time::Instant::now(), previous));
             }
+        }
+        // Pages quittées : leur mémoire est rendue (pochettes HD du mode focus,
+        // journal des écoutes des statistiques).
+        if self.route != Route::NowPlaying && self.np_art.is_some() {
+            self.np_art = None;
+            self.np_fade = None;
+            self.covers.retain(|(_, size), _| *size <= HERO);
+        }
+        if self.route != Route::Stats {
+            self.stats.release();
         }
         let on = |b: bool| if b { 1.0 } else { 0.0 };
         self.anims
@@ -729,7 +743,15 @@ impl App {
             Message::WindowResized(size) => {
                 self.window_width = size.width;
                 self.window_size = size;
-                self.refresh_maximized()
+                // Changement d'écran possible : l'échelle est redemandée.
+                let scale = window::oldest()
+                    .and_then(window::scale_factor)
+                    .map(Message::ScaleFactor);
+                Task::batch([self.refresh_maximized(), scale])
+            }
+            Message::ScaleFactor(scale) => {
+                self.scale_factor = scale;
+                Task::none()
             }
             Message::Batch(messages) => Task::batch(
                 messages

@@ -46,9 +46,9 @@ pub const THUMB: u32 = 96;
 pub const CARD: u32 = 200;
 /// Grandes pochettes (en-tête ~220 px, vue « En cours » ~420 px) : 1 Mo décodé.
 pub const HERO: u32 = 512;
-/// Pochette du mode focus : pleine définition (jusqu'à 620 px affichés, × l'échelle
-/// de l'écran ; 512 était agrandi et paraissait flou).
-pub const BIG: u32 = 1200;
+/// Pochette du mode focus : pleine définition, à la taille de l'écran (512 était
+/// agrandi et paraissait flou). 800 px suffisent en 1440p sans mise à l'échelle.
+pub const BIG_SIZES: [u32; 2] = [800, 1200];
 /// Fondu entre deux pochettes dans le mode focus.
 pub const NP_FADE: Duration = Duration::from_millis(700);
 /// Attente maximale de la pochette en pleine définition avant de se contenter
@@ -262,6 +262,8 @@ pub enum Message {
     /// Glisser-déposer dans la file d'attente.
     QueueDrag(QueueDrag),
     WindowResized(iced::Size),
+    /// Mise à l'échelle de l'écran (125 %, 150 %…).
+    ScaleFactor(f32),
     /// Plusieurs messages à la suite (menu contextuel : fermer puis agir).
     Batch(Vec<Message>),
     Context(crate::context::Ctx),
@@ -516,6 +518,7 @@ pub struct App {
     pub queue_width: f32,
     window_width: f32,
     pub window_size: iced::Size,
+    pub scale_factor: f32,
     /// Dernier clic droit (position dans la fenêtre).
     pub context_point: iced::Point,
     pub context_menu: Option<(iced::Point, crate::context::Target)>,
@@ -623,6 +626,7 @@ impl App {
             queue_width: RIGHT_DEFAULT,
             window_width: 1320.0,
             window_size: iced::Size::new(1320.0, 860.0),
+            scale_factor: 1.0,
             context_point: iced::Point::ORIGIN,
             context_menu: None,
             lyrics: HashMap::new(),

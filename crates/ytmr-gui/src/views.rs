@@ -14,9 +14,9 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, BIG, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP,
-    NP_LYRIC_SIZE, NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag,
-    RightPanel, Route, SEARCH_INPUT, THUMB, View,
+    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP, NP_LYRIC_SIZE,
+    NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, RightPanel,
+    Route, SEARCH_INPUT, THUMB, View,
 };
 use crate::icons::{Icon, icon};
 use crate::library::{self, Lib};
@@ -1069,7 +1069,8 @@ fn now_playing(app: &App) -> El<'_> {
     let side = app.np_cover();
     // Pleine définition dès qu'elle est prête (512 px en attendant) ; fondu
     // depuis la pochette du morceau précédent.
-    let art = |id: Option<&str>| app.cover(id, BIG).or_else(|| app.cover(id, HERO));
+    let big = app.big_size();
+    let art = |id: Option<&str>| app.cover(id, big).or_else(|| app.cover(id, HERO));
     let shown = match &app.np_fade {
         Some((since, previous)) => {
             let t = (app
