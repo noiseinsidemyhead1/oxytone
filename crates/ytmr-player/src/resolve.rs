@@ -468,11 +468,17 @@ impl Resolver for YtDlpResolver {
 
     fn cached(&self, video_id: &str) -> Option<MediaSource> {
         // Déjà sur le disque : rien à résoudre, rien à télécharger.
-        if let Some(local) = self.audio.as_ref().and_then(|a| a.get(video_id)) {
+        let offline = self.offline.load(Ordering::Relaxed);
+        // Hors ligne : seulement les morceaux téléchargés exprès (comme l'affiche
+        // l'interface), pas le cache automatique des écoutes récentes.
+        if let Some(audio) = &self.audio
+            && (!offline || audio.is_pinned(video_id))
+            && let Some(local) = audio.get(video_id)
+        {
             return Some(local);
         }
         // Hors ligne, une adresse (même valide) exigerait le réseau.
-        if self.offline.load(Ordering::Relaxed) {
+        if offline {
             return None;
         }
         let mut cache = lock(&self.cache);

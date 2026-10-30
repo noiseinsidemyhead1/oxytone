@@ -524,6 +524,21 @@ pub(crate) fn cover_with_play<'a>(
     .into()
 }
 
+/// Pastille « téléchargé » : petit rond plein de la teinte, flèche sombre.
+pub(crate) fn downloaded_badge<'a>(accent: Color) -> El<'a> {
+    container(icon(Icon::Download, 10.0, style::BG))
+        .center(Length::Fixed(16.0))
+        .style(move |_| iced::widget::container::Style {
+            background: Some(accent.into()),
+            border: iced::Border {
+                radius: 8.0.into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        })
+        .into()
+}
+
 /// Nom d'un morceau : un clic ouvre sa page (album ou single), s'il en a une.
 pub(crate) fn track_title<'a>(track: &'a Track, size: u32, color: Color) -> El<'a> {
     let label = line(&track.title, size).font(SEMIBOLD).color(color);
@@ -817,19 +832,19 @@ pub(crate) fn track_row<'a>(
         .clip(true),
         // Disponible sans réseau (cache audio) ; la place est toujours réservée.
         container(if app.lib.offline_ids.contains(&track.video_id) {
-            El::from(icon(Icon::Download, 13.0, style::alpha(app.accent, 0.8)))
+            downloaded_badge(app.accent)
         } else {
             Space::new().into()
         })
-        .width(Length::Fixed(14.0)),
-        // Écoutes selon YouTube (pages d'album et d'artiste).
-        match &track.plays {
-            Some(plays) => El::from(
+        .width(Length::Fixed(16.0)),
+        // Écoutes selon YouTube : seulement sur les pages d'album et d'artiste.
+        match (&track.plays, &app.route) {
+            (Some(plays), Route::Album(_) | Route::Artist(_)) => El::from(
                 container(text(plays).size(12).color(style::TEXT_FAINT))
                     .width(Length::Fixed(150.0))
                     .align_x(Alignment::End),
             ),
-            None => Space::new().into(),
+            _ => Space::new().into(),
         },
         text(fmt_opt(track.duration))
             .size(13)
@@ -1052,6 +1067,35 @@ fn now_playing(app: &App) -> El<'_> {
                 .style(style::link)
                 .on_press(Message::Navigate(Route::Album(album_id.clone()))),
         );
+    }
+    // Paroles seulement si elles suivent le son (synchronisées) ; sinon la
+    // pochette et le titre seuls, au centre.
+    let synced = matches!(
+        app.lyrics.get(&track.video_id),
+        Some(Load::Ready(Some(l))) if matches!(l.body, ytmr_catalog::lyrics::LyricsBody::Synced(_))
+    );
+    if !synced {
+        let alone = container(
+            column![big, info]
+                .spacing(24)
+                .width(Length::Fixed(side))
+                .align_x(Alignment::Center),
+        )
+        .center(Length::Fill);
+        return mouse_area(
+            container(alone)
+                .padding(Padding {
+                    top: NP_PAD,
+                    right: NP_PAD,
+                    bottom: 110.0,
+                    left: NP_PAD,
+                })
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .style(style::hero(app.accent)),
+        )
+        .on_press(Message::ToggleControls)
+        .into();
     }
     // Pochette et titre centrés en hauteur à gauche, paroles en grand à droite ;
     // l'ensemble est centré dans la fenêtre (rien ne reste collé à gauche).

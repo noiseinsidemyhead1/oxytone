@@ -381,6 +381,28 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Garde ou libère des morceaux sur le disque. Libérés seulement s'ils ne
+    /// sont plus voulus ailleurs (téléchargés seuls ou par une autre playlist).
+    fn keep_offline(&mut self, mut ids: Vec<String>, keep: bool) -> Task<Message> {
+        if !keep {
+            let wanted: HashSet<&str> = self
+                .lib
+                .downloads
+                .iter()
+                .chain(self.lib.offline_lists.values().flatten())
+                .map(|t| t.video_id.as_str())
+                .collect();
+            ids.retain(|id| !wanted.contains(id.as_str()));
+        }
+        Task::batch([
+            self.send(Command::KeepOffline {
+                video_ids: ids,
+                keep,
+            }),
+            self.scan_offline(),
+        ])
+    }
+
     fn downloads_file(&self) -> Option<PathBuf> {
         self.lib
             .cache_dir
@@ -435,7 +457,15 @@ impl App {
         };
         Task::perform(
             async move {
+                // Laisse le moteur écrire la liste des morceaux gardés.
+                tokio::time::sleep(Duration::from_millis(300)).await;
                 tokio::task::spawn_blocking(move || {
+                    // Seuls les morceaux gardés exprès comptent comme téléchargés :
+                    // le cache automatique (écoutes récentes) peut partir à tout moment.
+                    let pinned: HashSet<String> = std::fs::read_to_string(dir.join("pinned.json"))
+                        .ok()
+                        .and_then(|t| serde_json::from_str(&t).ok())
+                        .unwrap_or_default();
                     std::fs::read_dir(&dir)
                         .map(|entries| {
                             entries
@@ -445,6 +475,7 @@ impl App {
                                 .filter_map(|p| {
                                     p.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
                                 })
+                                .filter(|id| pinned.contains(id))
                                 .collect::<HashSet<String>>()
                         })
                         .unwrap_or_default()
@@ -912,14 +943,7 @@ impl App {
                 } else {
                     "Playlist retirée du hors ligne".into()
                 });
-                Task::batch([
-                    toast,
-                    self.send(Command::KeepOffline {
-                        video_ids: ids,
-                        keep,
-                    }),
-                    self.scan_offline(),
-                ])
+                Task::batch([toast, self.keep_offline(ids, keep)])
             }
             Lib::Download(tracks, keep) => {
                 let ids: Vec<String> = tracks.iter().map(|t| t.video_id.clone()).collect();
@@ -954,14 +978,7 @@ impl App {
                     (true, n) => format!("Téléchargement de {n} titres…"),
                     (false, _) => "Retiré des téléchargements".into(),
                 });
-                Task::batch([
-                    toast,
-                    self.send(Command::KeepOffline {
-                        video_ids: ids,
-                        keep,
-                    }),
-                    self.scan_offline(),
-                ])
+                Task::batch([toast, self.keep_offline(ids, keep)])
             }
             Lib::OfflineScanned(ids) => {
                 let before = self.lib.offline_ids.len();

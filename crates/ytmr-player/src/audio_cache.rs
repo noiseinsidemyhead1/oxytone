@@ -98,6 +98,11 @@ impl AudioCache {
         }
     }
 
+    /// Gardé exprès pour l'écoute hors ligne (« téléchargé »).
+    pub fn is_pinned(&self, video_id: &str) -> bool {
+        lock(&self.pinned).contains(video_id)
+    }
+
     /// Le fichier du morceau est déjà sur le disque.
     pub fn has(&self, video_id: &str) -> bool {
         self.file(video_id).is_some_and(|p| p.exists())
