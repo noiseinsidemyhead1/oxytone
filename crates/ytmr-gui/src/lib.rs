@@ -16,6 +16,7 @@ mod icons;
 mod import;
 mod instance;
 mod library;
+mod releases;
 mod settings;
 mod smooth;
 mod stats_page;

@@ -867,6 +867,7 @@ impl App {
                     profile,
                     self.load_home(),
                     self.load_collection(),
+                    self.load_releases(),
                 ];
                 if let Route::Playlist(id) = self.route.clone() {
                     tasks.push(self.open_playlist(id));
@@ -2578,6 +2579,8 @@ const HOME_SHELVES: [&str; 16] = [
     "accueil-15",
 ];
 pub const PLAYLISTS_SHELF: &str = "rangee-playlists";
+/// Rangée « Nouveautés de tes artistes ».
+pub const RELEASES_SHELF: &str = "rangee-nouveautes";
 /// Mosaïque « Réécouter » : 4 × 4 au plus.
 const GRID_MAX: usize = 16;
 
@@ -2859,6 +2862,21 @@ pub fn home_sections(app: &App) -> Option<El<'_>> {
                 ]
                 .align_y(Alignment::Center),
                 shelf(tiles, PLAYLISTS_SHELF),
+            ]
+            .spacing(10),
+        );
+    }
+    if !app.releases.is_empty() {
+        page = page.push(
+            column![
+                section_title("Nouveautés de tes artistes"),
+                shelf(
+                    app.releases
+                        .iter()
+                        .map(|a| crate::views::album_card(app, a))
+                        .collect(),
+                    RELEASES_SHELF
+                ),
             ]
             .spacing(10),
         );

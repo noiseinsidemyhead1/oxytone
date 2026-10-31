@@ -344,6 +344,7 @@ pub enum Message {
     Noop,
     CloseRequested,
     Import(crate::import::Imp),
+    Releases(crate::releases::Rel),
     /// Minuteur de sommeil : réglé, ou annulé (`None`).
     Sleep(Option<SleepChoice>),
     SleepTick,
@@ -491,6 +492,8 @@ pub struct App {
     /// Onglet des résultats, et recherches récentes (les plus récentes d'abord).
     pub search_tab: SearchTab,
     pub recent_searches: Vec<String>,
+    /// Nouveautés des artistes suivis (rangée de l'accueil).
+    pub releases: Vec<ytmr_catalog::AlbumSummary>,
     /// Fenêtre « Importer depuis Spotify » ouverte.
     pub import: Option<crate::import::Import>,
     /// Résultats reçus, en attente de leurs pochettes (au plus ~0,7 s).
@@ -663,6 +666,7 @@ impl App {
             search_shown: String::new(),
             search_tab: SearchTab::All,
             recent_searches: Vec::new(),
+            releases: Vec::new(),
             import: None,
             search_pending: None,
             search_inflight: false,

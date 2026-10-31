@@ -951,6 +951,7 @@ impl App {
             Message::Settings(message) => self.update_settings(message),
             Message::Stats(message) => self.update_stats(message),
             Message::Import(message) => self.update_import(message),
+            Message::Releases(message) => self.update_releases(message),
             Message::Sleep(choice) => {
                 let restore = self.sleep_volume.take();
                 self.sleep = choice.map(|c| match c {

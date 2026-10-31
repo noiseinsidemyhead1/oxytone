@@ -262,6 +262,13 @@ fn session_traffic() -> u64 {
     ytmr_player::traffic::audio_bytes() + ytmr_media::traffic_bytes()
 }
 
+/// (année, mois) locaux.
+pub(crate) fn current_year() -> (u32, u32) {
+    let month = current_month();
+    let (y, m) = month.split_once('-').unwrap_or(("1970", "1"));
+    (y.parse().unwrap_or(1970), m.parse().unwrap_or(1))
+}
+
 /// « 2026-10 » (mois local).
 fn current_month() -> String {
     let now = std::time::SystemTime::now()

@@ -907,7 +907,7 @@ pub(crate) fn track_row<'a>(
     .into()
 }
 
-fn album_card<'a>(app: &App, album: &'a AlbumSummary) -> El<'a> {
+pub(crate) fn album_card<'a>(app: &App, album: &'a AlbumSummary) -> El<'a> {
     let id = app.url_cover(album.thumbnail_url.as_deref());
     let subtitle = [
         album.kind.as_str(),
