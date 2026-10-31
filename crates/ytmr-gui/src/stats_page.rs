@@ -50,6 +50,8 @@ pub struct StatsState {
     plays: Option<Vec<Play>>,
     pub period: Period,
     summary: Option<Summary>,
+    /// Récap du mois en cours (toujours affiché, quelle que soit la période).
+    recap: Option<ytmr_core::stats::Recap>,
 }
 
 impl StatsState {
@@ -106,9 +108,146 @@ impl App {
             .map(|t| t.track.clone())
             .chain(summary.top_artists.iter().map(|a| a.sample.clone()))
             .collect();
+        let recap = ytmr_core::stats::recap(plays, now, crate::views::utc_offset_secs());
+        let mut tracks = tracks;
+        tracks.extend(recap.top_track.iter().map(|t| t.track.clone()));
+        tracks.extend(recap.top_artist.iter().map(|a| a.sample.clone()));
         self.stats.summary = Some(summary);
+        self.stats.recap = Some(recap);
         self.want_track_covers(&tracks, THUMB)
     }
+}
+
+/// Carte « Ton mois d'octobre » : temps, artiste et titre du mois,
+/// découvertes, heure préférée.
+fn recap_card<'a>(app: &'a App, r: &'a ytmr_core::stats::Recap) -> El<'a> {
+    const MONTHS: [&str; 12] = [
+        "janvier",
+        "février",
+        "mars",
+        "avril",
+        "mai",
+        "juin",
+        "juillet",
+        "août",
+        "septembre",
+        "octobre",
+        "novembre",
+        "décembre",
+    ];
+    let accent = app.accent;
+    let name = MONTHS
+        .get(r.month.saturating_sub(1) as usize)
+        .copied()
+        .unwrap_or("");
+    let de = if name.starts_with(['a', 'o']) {
+        "d'"
+    } else {
+        "de "
+    };
+    let title = text(format!("Ton mois {de}{name}")).size(22).font(BOLD);
+    if r.plays == 0 {
+        return container(column![title, muted("Pas encore d'écoute ce mois-ci.")].spacing(8))
+            .padding(20)
+            .width(Length::Fill)
+            .style(style::panel)
+            .into();
+    }
+    let highlight = |label: &'a str,
+                     value: String,
+                     sub: String,
+                     cover_of: Option<&ytmr_core::Track>,
+                     round: bool|
+     -> El<'a> {
+        let art: El<'a> = match cover_of {
+            Some(t) => {
+                let id = app.track_cover(t);
+                cover(
+                    app.cover(id.as_deref(), THUMB),
+                    56.0,
+                    if round { 28.0 } else { 6.0 },
+                )
+            }
+            None => Space::new().width(Length::Fixed(0.0)).into(),
+        };
+        row![
+            art,
+            column![
+                text(label).size(12).color(style::TEXT_DIM),
+                text(ellipsize(&value, 30).into_owned())
+                    .size(16)
+                    .font(SEMIBOLD)
+                    .wrapping(iced::widget::text::Wrapping::None),
+                text(sub).size(12).color(style::TEXT_DIM),
+            ]
+            .spacing(2),
+        ]
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .width(Length::Fill)
+        .into()
+    };
+    let artist = match &r.top_artist {
+        Some(a) => highlight(
+            "Artiste du mois",
+            a.name.clone(),
+            format!("{} écoutes · {}", a.plays, duration_label(a.seconds)),
+            Some(&a.sample),
+            true,
+        ),
+        None => Space::new().into(),
+    };
+    let track = match &r.top_track {
+        Some(t) => highlight(
+            "Titre du mois",
+            t.track.title.clone(),
+            format!("{} écoutes", t.plays),
+            Some(&t.track),
+            false,
+        ),
+        None => Space::new().into(),
+    };
+    let discoveries = match r.discoveries.len() {
+        0 => "aucune".to_owned(),
+        n => {
+            let names: Vec<&str> = r.discoveries.iter().take(3).map(String::as_str).collect();
+            let more = if n > 3 {
+                format!(" et {} autres", n - 3)
+            } else {
+                String::new()
+            };
+            format!("{n} : {}{more}", names.join(", "))
+        }
+    };
+    let hour = r
+        .favorite_hour
+        .map_or_else(String::new, |h| format!("Tu écoutes surtout vers {h} h."));
+    container(
+        column![
+            row![
+                title.width(Length::Fill),
+                text(format!(
+                    "{} · {} écoutes",
+                    duration_label(r.seconds),
+                    r.plays
+                ))
+                .size(14)
+                .font(SEMIBOLD)
+                .color(accent),
+            ]
+            .align_y(Alignment::Center),
+            row![artist, track].spacing(20),
+            text(format!("Découvertes : {discoveries}"))
+                .size(13)
+                .color(style::TEXT_DIM),
+            text(hour).size(13).color(style::TEXT_DIM),
+        ]
+        .spacing(14),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .style(style::panel)
+    .into()
 }
 
 /// « 12 h 34 min », « 45 min ».
@@ -216,11 +355,15 @@ pub fn stats_page(app: &App) -> El<'_> {
     ]
     .align_y(Alignment::Center);
 
+    let recap: El<'_> = match &app.stats.recap {
+        Some(r) => recap_card(app, r),
+        None => Space::new().into(),
+    };
     let body: El<'_> = match &app.stats.summary {
         None => muted("Chargement…"),
         Some(s) if s.plays == 0 => muted(
             "Aucune écoute sur cette période. Les statistiques se remplissent au fil de tes \
-             écoutes (un morceau compte après 30 s).",
+             écoutes (un morceau compte une fois écouté aux trois quarts).",
         ),
         Some(s) => {
             let tiles = row![
@@ -319,7 +462,7 @@ pub fn stats_page(app: &App) -> El<'_> {
         }
     };
 
-    page_scroll(column![header, body].spacing(24).padding(Padding {
+    page_scroll(column![header, recap, body].spacing(24).padding(Padding {
         top: 28.0,
         right: 28.0,
         bottom: 32.0,

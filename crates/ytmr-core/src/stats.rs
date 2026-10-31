@@ -206,6 +206,83 @@ pub fn summarize(plays: &[Play], days: u32, top: usize, now: u64, utc_offset: i6
     }
 }
 
+/// Récap du mois en cours (façon « Wrapped »).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Recap {
+    /// Mois (1 à 12) et année locaux.
+    pub month: u32,
+    pub year: i64,
+    pub plays: u32,
+    pub seconds: u64,
+    pub top_artist: Option<ArtistStat>,
+    pub top_track: Option<TrackStat>,
+    /// Artistes écoutés pour la première fois ce mois-ci.
+    pub discoveries: Vec<String>,
+    /// Heure locale où l'on écoute le plus (0 à 23).
+    pub favorite_hour: Option<u32>,
+}
+
+/// Jours depuis 1970 → (année, mois) (algorithme de H. Hinnant).
+fn year_month(days: i64) -> (i64, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (yoe + era * 400 + i64::from(month <= 2), month)
+}
+
+/// Récap du mois local en cours.
+pub fn recap(plays: &[Play], now: u64, utc_offset: i64) -> Recap {
+    let local = |t: u64| t as i64 + utc_offset;
+    let month_of = |t: u64| year_month(local(t).div_euclid(DAY as i64));
+    let (year, month) = month_of(now);
+    let this_month: Vec<Play> = plays
+        .iter()
+        .filter(|p| month_of(p.at) == (year, month))
+        .cloned()
+        .collect();
+    if this_month.is_empty() {
+        return Recap {
+            month,
+            year,
+            ..Recap::default()
+        };
+    }
+    let summary = summarize(&this_month, 0, 1, now, utc_offset);
+    // Découvertes : premier passage de l'artiste ce mois-ci.
+    let mut first_seen: HashMap<String, (u64, String)> = HashMap::new();
+    for p in plays {
+        let name = main_artist(&p.track.artist);
+        first_seen
+            .entry(name.to_lowercase())
+            .and_modify(|(at, _)| *at = (*at).min(p.at))
+            .or_insert((p.at, name.to_owned()));
+    }
+    let mut discoveries: Vec<(u64, String)> = first_seen
+        .into_values()
+        .filter(|(at, _)| month_of(*at) == (year, month))
+        .collect();
+    discoveries.sort();
+    let mut hours = [0u32; 24];
+    for p in &this_month {
+        hours[(local(p.at).rem_euclid(DAY as i64) / 3600) as usize] += 1;
+    }
+    let favorite_hour = (0..24u32).max_by_key(|&h| hours[h as usize]);
+    Recap {
+        month,
+        year,
+        plays: summary.plays,
+        seconds: summary.seconds,
+        top_artist: summary.top_artists.into_iter().next(),
+        top_track: summary.top_tracks.into_iter().next(),
+        discoveries: discoveries.into_iter().map(|(_, n)| n).collect(),
+        favorite_hour,
+    }
+}
+
 /// Premier nom d'une liste d'artistes (« A, B & C » → « A »).
 fn main_artist(artists: &str) -> &str {
     artists
@@ -260,6 +337,37 @@ mod tests {
         let all = summarize(&plays, 0, 10, now, 0);
         assert_eq!(all.plays, 4);
         assert_eq!(all.distinct_tracks, 3);
+    }
+
+    #[test]
+    fn monthly_recap() {
+        // 15 octobre 2026, 22 h UTC.
+        let now = 20_741 * DAY + 22 * 3600;
+        let at = |days_ago: u64, hour: u64| now - days_ago * DAY - 22 * 3600 + hour * 3600;
+        let plays = vec![
+            Play {
+                at: at(100, 10),
+                track: track("old", "Ancien"),
+            },
+            Play {
+                at: at(1, 22),
+                track: track("a", "Ancien"),
+            },
+            Play {
+                at: at(2, 22),
+                track: track("b", "Nouveau"),
+            },
+            Play {
+                at: at(3, 9),
+                track: track("b", "Nouveau"),
+            },
+        ];
+        let r = recap(&plays, now, 0);
+        assert_eq!((r.year, r.month), (2026, 10));
+        assert_eq!(r.plays, 3);
+        assert_eq!(r.top_artist.unwrap().name, "Nouveau");
+        assert_eq!(r.discoveries, vec!["Nouveau".to_owned()]);
+        assert_eq!(r.favorite_hour, Some(22));
     }
 
     #[test]
