@@ -202,12 +202,15 @@ fn start_worker(
     });
 }
 
-/// Lit la session YouTube du navigateur et s'y connecte (3 essais : un
-/// réseau qui se réveille ne doit pas laisser le compte « indisponible »).
+/// Lit la session YouTube du navigateur et s'y connecte. Un réseau qui se
+/// réveille (sortie de veille, Wi-Fi qui se reconnecte) ne doit pas laisser le
+/// compte « indisponible » : on réessaie pendant ~5 min en espaçant les essais
+/// (l'interface affiche « Connexion… » pendant ce temps).
 async fn connect_account(resolver: &YtDlpResolver) -> AccountState {
+    const DELAYS_S: [u64; 11] = [0, 1, 3, 5, 10, 15, 20, 30, 45, 60, 90];
     let mut last = String::new();
-    for delay_ms in [0, 1000, 3000] {
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+    for delay in DELAYS_S {
+        tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
         let cookie = match resolver.browser_cookie().await {
             Ok(cookie) => cookie,
             Err(e) => {
@@ -222,7 +225,14 @@ async fn connect_account(resolver: &YtDlpResolver) -> AccountState {
                 return AccountState::Ready(Arc::new(a));
             }
             Err(e) => {
-                tracing::warn!(error = %e, "connexion au compte, nouvel essai");
+                // La cause exacte (DNS, connexion refusée, TLS…) est dans la chaîne.
+                let mut cause = e.to_string();
+                let mut source = std::error::Error::source(&e);
+                while let Some(inner) = source {
+                    cause.push_str(&format!(" ← {inner}"));
+                    source = inner.source();
+                }
+                tracing::warn!(error = %cause, "connexion au compte, nouvel essai");
                 last = format!("connexion au compte : {e}");
             }
         }

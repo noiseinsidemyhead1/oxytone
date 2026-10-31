@@ -555,7 +555,14 @@ impl Resolver for YtDlpResolver {
         let _done = Done(&self.inflight, video_id);
 
         let result = self.resolve_now(video_id, mode, priority).await;
-        if let (Some(audio), Ok(source)) = (&self.audio, &result) {
+        // Un seul téléchargement par morceau : ceux préparés en fond passent
+        // par le cache (mpv les lira ensuite depuis le disque) ; un morceau
+        // urgent (clic, suivant préchargé) est lu en direct par mpv, qui le
+        // télécharge déjà : le cache le téléchargeait une seconde fois.
+        // Les morceaux gardés hors ligne sont toujours téléchargés.
+        if let (Some(audio), Ok(source)) = (&self.audio, &result)
+            && (priority == Priority::Background || audio.is_pinned(video_id))
+        {
             audio.store(video_id, source);
         }
         let _ = tx.send(Some(
