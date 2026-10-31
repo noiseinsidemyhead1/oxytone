@@ -8,6 +8,7 @@
 //! la GUI et l'API, ce module ne fait qu'envoyer des commandes au moteur et
 //! afficher son état.
 
+pub mod browser;
 pub mod discord;
 #[cfg(windows)]
 pub mod fullscreen;

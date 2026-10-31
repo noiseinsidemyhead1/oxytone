@@ -33,6 +33,24 @@ pub fn cookie_header(cookies: &[SessionCookie]) -> String {
         .join("; ")
 }
 
+/// Session tirée d'un en-tête `Cookie` (session d'un navigateur lue par yt-dlp).
+pub fn from_header(header: &str) -> Vec<SessionCookie> {
+    header
+        .split(';')
+        .filter_map(|pair| {
+            let (name, value) = pair.trim().split_once('=')?;
+            Some(SessionCookie {
+                name: name.to_owned(),
+                value: value.to_owned(),
+                domain: ".youtube.com".to_owned(),
+                path: "/".to_owned(),
+                secure: true,
+                expires: None,
+            })
+        })
+        .collect()
+}
+
 /// Session utilisable : les cookies de connexion de Google sont là.
 pub fn is_signed_in(cookies: &[SessionCookie]) -> bool {
     cookies

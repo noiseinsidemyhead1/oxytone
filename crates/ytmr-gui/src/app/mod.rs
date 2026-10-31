@@ -344,8 +344,11 @@ pub enum Message {
     Noop,
     CloseRequested,
     Import(crate::import::Imp),
-    /// « Se connecter » : fenêtre de connexion Google, puis redémarrage.
+    /// « Se connecter » : session du navigateur par défaut si elle est
+    /// lisible, sinon fenêtre de connexion Google ; puis redémarrage.
     Login,
+    LoginWindow,
+    BrowserSession(&'static str, Result<String, String>),
     LoginDone(Result<Vec<ytmr_player::session::SessionCookie>, String>),
     Releases(crate::releases::Rel),
     /// Minuteur de sommeil : réglé, ou annulé (`None`).

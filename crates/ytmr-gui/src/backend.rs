@@ -40,6 +40,13 @@ pub struct Backend {
     server: Option<(JoinHandle<std::io::Result<()>>, oneshot::Sender<()>)>,
 }
 
+impl Backend {
+    /// Résolveur yt-dlp (lecture de la session d'un navigateur).
+    pub fn resolver(&self) -> Arc<YtDlpResolver> {
+        Arc::clone(&self.resolver)
+    }
+}
+
 impl std::fmt::Debug for Backend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Backend").finish_non_exhaustive()

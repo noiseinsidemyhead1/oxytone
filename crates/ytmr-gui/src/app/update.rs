@@ -976,6 +976,41 @@ impl App {
                 if self.logging_in {
                     return Task::none();
                 }
+                // D'abord sans rien retaper : la session du navigateur par défaut.
+                let browser = ytmr_os::browser::default_browser()
+                    .filter(|b| ytmr_os::browser::session_readable(b));
+                if let (Some(browser), Some(backend)) = (browser, self.backend()) {
+                    let resolver = backend.resolver();
+                    self.logging_in = true;
+                    return Task::perform(
+                        async move { resolver.session_of(browser).await },
+                        move |r| Message::BrowserSession(browser, r),
+                    );
+                }
+                self.update(Message::LoginWindow)
+            }
+            Message::BrowserSession(browser, result) => {
+                self.logging_in = false;
+                match result {
+                    Ok(header) if header.contains("SAPISID=") => {
+                        tracing::info!(browser, "session du navigateur reprise");
+                        let cookies = ytmr_player::session::from_header(&header);
+                        self.update(Message::LoginDone(Ok(cookies)))
+                    }
+                    // Pas connecté dans ce navigateur, ou session illisible :
+                    // la fenêtre de connexion prend le relais.
+                    other => {
+                        if let Err(e) = other {
+                            tracing::info!(browser, error = %e, "session du navigateur illisible");
+                        }
+                        self.update(Message::LoginWindow)
+                    }
+                }
+            }
+            Message::LoginWindow => {
+                if self.logging_in {
+                    return Task::none();
+                }
                 // La fenêtre de connexion utilise le moteur web de Windows.
                 if cfg!(not(windows)) {
                     return self.show_toast(

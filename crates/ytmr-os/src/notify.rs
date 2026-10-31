@@ -143,5 +143,36 @@ fn register_app_id() {
         if status.is_err() {
             tracing::debug!(?status, "nom des notifications");
         }
+        // Icône à côté du nom : une image du disque de ytmr, déposée une fois
+        // dans son dossier (Windows veut un chemin de fichier).
+        let Some(dir) =
+            std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("ytmr"))
+        else {
+            return;
+        };
+        let icon = dir.join("ytmr-icon.png");
+        if !icon.exists()
+            && (std::fs::create_dir_all(&dir).is_err() || std::fs::write(&icon, ICON_PNG).is_err())
+        {
+            return;
+        }
+        let path: Vec<u16> = icon.to_string_lossy().encode_utf16().chain([0]).collect();
+        let status = unsafe {
+            RegSetKeyValueW(
+                HKEY_CURRENT_USER,
+                &key,
+                w!("IconUri"),
+                REG_SZ.0,
+                Some(path.as_ptr().cast()),
+                (path.len() * 2) as u32,
+            )
+        };
+        if status.is_err() {
+            tracing::debug!(?status, "icône des notifications");
+        }
     });
 }
+
+/// Icône de ytmr (256 px), celle de `packaging/linux/ytmr.png`.
+#[cfg(windows)]
+const ICON_PNG: &[u8] = include_bytes!("../../../packaging/linux/ytmr.png");
