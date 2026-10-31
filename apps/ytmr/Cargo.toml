@@ -17,3 +17,6 @@ ytmr-gui = { version = "0.1.0", path = "../../crates/ytmr-gui" }
 
 [build-dependencies]
 winresource = "0.1.34"
+
+[target."cfg(windows)".dependencies]
+winreg = "0.56.0"

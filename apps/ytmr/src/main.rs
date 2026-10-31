@@ -8,6 +8,8 @@ use ytmr_core::{AppPaths, Config};
 
 fn main() -> Result<()> {
     configure_renderer();
+    #[cfg(windows)]
+    refresh_path();
     // ytmr tourne déjà (peut-être caché près de l'horloge) : on le ramène.
     if !ytmr_gui::claim_instance() {
         return Ok(());
@@ -53,5 +55,88 @@ fn configure_renderer() {
                 std::env::set_var(key, value);
             }
         }
+    }
+}
+
+/// PATH à jour, relu dans le registre (Windows).
+///
+/// L'Explorateur garde le PATH de l'ouverture de session : ytmr lancé depuis
+/// le menu Démarrer ou l'installateur ne voyait pas mpv, yt-dlp ni node
+/// installés depuis (scoop), alors qu'un nouveau terminal les trouvait.
+/// On reprend donc le PATH système et utilisateur actuels, puis ce que le
+/// processus avait déjà en plus (lancement depuis un terminal).
+#[cfg(windows)]
+fn refresh_path() {
+    use winreg::{HKCU, HKLM, RegKey};
+    let read = |key: &RegKey, sub: &str| -> Option<String> {
+        key.open_subkey(sub)
+            .ok()?
+            .get_value::<String, _>("Path")
+            .ok()
+    };
+    let machine = read(
+        HKLM,
+        r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+    );
+    let user = read(HKCU, "Environment");
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut seen = std::collections::HashSet::new();
+    let entries: Vec<String> = [
+        machine.unwrap_or_default(),
+        user.unwrap_or_default(),
+        current,
+    ]
+    .iter()
+    .flat_map(|p| p.split(';').map(expand).collect::<Vec<_>>())
+    .filter(|e| !e.trim().is_empty())
+    .filter(|e| seen.insert(e.trim_end_matches('\\').to_lowercase()))
+    .collect();
+    // SAFETY : appelé en tout début de `main`, avant la création du moindre
+    // thread ; personne ne lit l'environnement en parallèle.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("PATH", entries.join(";"));
+    }
+}
+
+/// Remplace les `%VARIABLE%` d'une entrée du registre (`%USERPROFILE%\…`).
+#[cfg(windows)]
+fn expand(entry: &str) -> String {
+    let mut out = String::new();
+    let mut rest = entry;
+    while let Some(start) = rest.find('%') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('%') else {
+            break;
+        };
+        out.push_str(&rest[..start]);
+        let name = &after[..end];
+        match std::env::var(name) {
+            Ok(value) => out.push_str(&value),
+            Err(_) => {
+                out.push('%');
+                out.push_str(name);
+                out.push('%');
+            }
+        }
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::expand;
+
+    #[test]
+    fn expands_registry_variables() {
+        let home = std::env::var("USERPROFILE").unwrap();
+        assert_eq!(
+            expand(r"%USERPROFILE%\scoop\shims"),
+            format!(r"{home}\scoop\shims")
+        );
+        assert_eq!(expand(r"C:\Outils"), r"C:\Outils");
+        assert_eq!(expand("%INCONNUE_YTMR%"), "%INCONNUE_YTMR%");
     }
 }

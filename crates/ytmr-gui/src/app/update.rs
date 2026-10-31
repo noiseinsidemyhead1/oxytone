@@ -668,7 +668,12 @@ impl App {
                 // (« Quitter » dans le menu de l'icône ferme pour de bon).
                 #[cfg(windows)]
                 {
-                    if self.tray && !ytmr_os::tray::quit_requested() {
+                    // Seulement si ytmr a vraiment démarré (l'icône existe) : sur
+                    // l'écran d'erreur, fermer doit quitter.
+                    if self.tray
+                        && matches!(self.phase, Phase::Ready(_))
+                        && !ytmr_os::tray::quit_requested()
+                    {
                         ytmr_os::tray::hide_window();
                         return Task::none();
                     }
