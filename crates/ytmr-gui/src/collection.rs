@@ -29,6 +29,8 @@ pub enum LibTab {
     Playlists,
     Albums,
     Artists,
+    /// Ce qui est sur l'appareil (taille, retrait).
+    Downloads,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -69,7 +71,13 @@ impl App {
         match message {
             Coll::Tab(tab) => {
                 self.coll.tab = tab;
-                Task::batch([self.load_collection(), self.collection_covers()])
+                // Téléchargements : tailles relues sur le disque.
+                let scan = if tab == LibTab::Downloads {
+                    self.scan_offline()
+                } else {
+                    Task::none()
+                };
+                Task::batch([self.load_collection(), self.collection_covers(), scan])
             }
             Coll::Sort(sort) => {
                 self.coll.sort = sort;
@@ -202,6 +210,7 @@ impl App {
                         LibTab::Playlists => self.reload_playlists(),
                         LibTab::Albums => self.fetch_albums(),
                         LibTab::Artists => self.fetch_artists(),
+                        LibTab::Downloads => Task::none(),
                     };
                     Task::batch([toast, reload])
                 }
@@ -291,6 +300,10 @@ impl App {
                 Some(Load::Ready(list)) => list.iter().map(|a| a.thumbnail_url.clone()).collect(),
                 _ => Vec::new(),
             },
+            LibTab::Downloads => {
+                let tracks = self.lib.downloaded_tracks();
+                return self.want_track_covers(&tracks, crate::app::THUMB);
+            }
         };
         let ids: Vec<Option<String>> = urls.iter().map(|u| self.url_cover(u.as_deref())).collect();
         Task::batch(ids.into_iter().map(|id| self.want_cover(id, CARD)))
@@ -464,8 +477,20 @@ pub fn library_page(app: &App) -> El<'_> {
             tab == LibTab::Artists,
             Message::Coll(Coll::Tab(LibTab::Artists))
         ),
+        pill(
+            app,
+            "Téléchargements",
+            tab == LibTab::Downloads,
+            Message::Coll(Coll::Tab(LibTab::Downloads))
+        ),
         Space::new().width(Length::Fill),
-        text("Trier :").size(13).color(style::TEXT_DIM),
+        text(if tab == LibTab::Downloads {
+            ""
+        } else {
+            "Trier :"
+        })
+        .size(13)
+        .color(style::TEXT_DIM),
         pill(
             app,
             "Récents",
@@ -492,13 +517,49 @@ pub fn library_page(app: &App) -> El<'_> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let body: El<'_> = if let Some(info) = library::not_connected(app) {
+    // Les tris ne concernent pas les téléchargements (ils ont les leurs).
+    let tabs: El<'_> = if tab == LibTab::Downloads {
+        row![
+            pill(
+                app,
+                "Playlists",
+                false,
+                Message::Coll(Coll::Tab(LibTab::Playlists))
+            ),
+            pill(
+                app,
+                "Albums et EP",
+                false,
+                Message::Coll(Coll::Tab(LibTab::Albums))
+            ),
+            pill(
+                app,
+                "Artistes",
+                false,
+                Message::Coll(Coll::Tab(LibTab::Artists))
+            ),
+            pill(
+                app,
+                "Téléchargements",
+                true,
+                Message::Coll(Coll::Tab(LibTab::Downloads))
+            ),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        tabs.into()
+    };
+    let body: El<'_> = if tab == LibTab::Downloads {
+        downloads_tab(app)
+    } else if let Some(info) = library::not_connected(app) {
         info
     } else {
         match tab {
             LibTab::Playlists => playlists_tab(app),
             LibTab::Albums => albums_tab(app),
-            LibTab::Artists => artists_tab(app),
+            LibTab::Artists | LibTab::Downloads => artists_tab(app),
         }
     };
     page_scroll(column![header, tabs, body].spacing(20).padding(Padding {
@@ -594,6 +655,158 @@ pub(crate) fn offline_cards(app: &App) -> El<'_> {
         }
     }
     cards(tiles)
+}
+
+/// Taille lisible (« 12 Mo », « 1,4 Go »).
+fn size_text(bytes: u64) -> String {
+    let mb = bytes as f64 / 1_048_576.0;
+    if mb >= 1024.0 {
+        format!("{:.1} Go", mb / 1024.0).replace('.', ",")
+    } else if mb >= 10.0 {
+        format!("{mb:.0} Mo")
+    } else {
+        format!("{mb:.1} Mo").replace('.', ",")
+    }
+}
+
+/// Onglet « Téléchargements » : tout ce qui est sur l'appareil, sa place, et
+/// de quoi le retirer.
+fn downloads_tab(app: &App) -> El<'_> {
+    let lib = &app.lib;
+    let size_of = |id: &str| lib.offline_sizes.get(id).copied().unwrap_or(0);
+    let total: u64 = lib.offline_sizes.values().sum();
+    let mut tracks = lib.downloaded_tracks();
+    if tracks.is_empty() {
+        return muted(
+            "Rien de téléchargé. « Télécharger » sur une playlist ou un album, ou clic droit sur un titre.",
+        );
+    }
+    if lib.downloads_by_size {
+        tracks.sort_by_key(|t| std::cmp::Reverse(size_of(&t.video_id)));
+    } else {
+        tracks.sort_by_cached_key(|t| t.title.to_lowercase());
+    }
+    let summary = row![
+        text(format!("{} titres · {}", tracks.len(), size_text(total)))
+            .size(15)
+            .font(SEMIBOLD)
+            .width(Length::Fill),
+        text("Trier :").size(13).color(style::TEXT_DIM),
+        pill(
+            app,
+            "Nom",
+            !lib.downloads_by_size,
+            Message::Lib(library::Lib::DownloadsBySize(false))
+        ),
+        pill(
+            app,
+            "Taille",
+            lib.downloads_by_size,
+            Message::Lib(library::Lib::DownloadsBySize(true))
+        ),
+        button(text("Tout supprimer").size(13).font(SEMIBOLD))
+            .padding(Padding::from([7, 14]))
+            .style(style::pill_ghost)
+            .on_press(Message::Lib(library::Lib::RemoveAllDownloads)),
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center);
+
+    let remove = |message: Message, tip: &'static str| -> El<'_> {
+        crate::views::icon_tip(Icon::Trash, 15.0, style::TEXT_DIM, message, tip.into())
+    };
+    let mut page = column![summary].spacing(22);
+
+    // Playlists téléchargées.
+    let mut playlists: Vec<(&String, &Vec<ytmr_core::Track>)> = lib.offline_lists.iter().collect();
+    playlists.sort_by_cached_key(|(id, _)| lib.playlist_title(id).to_lowercase());
+    if !playlists.is_empty() {
+        let mut list = column![crate::views::section_title("Playlists")].spacing(6);
+        for (id, list_tracks) in playlists {
+            let here: Vec<&ytmr_core::Track> = list_tracks
+                .iter()
+                .filter(|t| lib.offline_ids.contains(&t.video_id))
+                .collect();
+            let size: u64 = here.iter().map(|t| size_of(&t.video_id)).sum();
+            list = list.push(
+                container(
+                    row![
+                        button(text(lib.playlist_title(id)).size(14).font(SEMIBOLD))
+                            .padding(0)
+                            .style(style::link)
+                            .on_press(Message::Navigate(Route::Playlist(id.to_string()))),
+                        Space::new().width(Length::Fill),
+                        text(format!(
+                            "{} / {} titres · {}",
+                            here.len(),
+                            list_tracks.len(),
+                            size_text(size)
+                        ))
+                        .size(13)
+                        .color(style::TEXT_DIM),
+                        remove(
+                            Message::Lib(library::Lib::RemoveOfflinePlaylist(id.to_string())),
+                            "Retirer des téléchargements",
+                        ),
+                    ]
+                    .spacing(14)
+                    .align_y(Alignment::Center),
+                )
+                .padding(Padding::from([8, 12]))
+                .style(style::panel),
+            );
+        }
+        page = page.push(list);
+    }
+
+    // Titres, un par ligne.
+    let single: std::collections::HashSet<&str> =
+        lib.downloads.iter().map(|t| t.video_id.as_str()).collect();
+    let mut list = column![crate::views::section_title("Titres")].spacing(2);
+    for track in &tracks {
+        let id = app.track_cover(track);
+        let action: El<'_> = if single.contains(track.video_id.as_str()) {
+            remove(
+                Message::Lib(library::Lib::RemoveDownload(track.video_id.clone())),
+                "Retirer des téléchargements",
+            )
+        } else {
+            // Téléchargé avec une playlist : se retire avec elle.
+            text("avec une playlist")
+                .size(12)
+                .color(style::TEXT_FAINT)
+                .into()
+        };
+        list = list.push(
+            container(
+                row![
+                    crate::views::cover(app.cover(id.as_deref(), crate::app::THUMB), 40.0, 6.0),
+                    column![
+                        text(crate::views::ellipsize(&track.title, 60).into_owned())
+                            .size(14)
+                            .font(SEMIBOLD)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                        text(crate::views::ellipsize(&track.artist, 60).into_owned())
+                            .size(12)
+                            .color(style::TEXT_DIM)
+                            .wrapping(iced::widget::text::Wrapping::None),
+                    ]
+                    .spacing(2)
+                    .width(Length::Fill),
+                    text(size_text(size_of(&track.video_id)))
+                        .size(13)
+                        .color(style::TEXT_DIM),
+                    container(action)
+                        .width(Length::Fixed(120.0))
+                        .align_x(Alignment::End),
+                ]
+                .spacing(14)
+                .align_y(Alignment::Center),
+            )
+            .padding(Padding::from([6, 10])),
+        );
+    }
+    page.push(list).into()
 }
 
 fn albums_tab(app: &App) -> El<'_> {

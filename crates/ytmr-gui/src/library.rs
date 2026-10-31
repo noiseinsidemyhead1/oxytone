@@ -109,6 +109,9 @@ pub struct LibraryState {
     pub offline_mode: bool,
     /// Morceaux présents dans le cache audio (lisibles sans réseau).
     pub offline_ids: HashSet<String>,
+    /// Taille de chaque fichier téléchargé (page Téléchargements).
+    pub offline_sizes: HashMap<String, u64>,
+    pub downloads_by_size: bool,
     /// Suivi des téléchargements hors ligne : morceaux attendus, et nombre de
     /// relevés sans progrès (on arrête de regarder au bout d'un moment).
     offline_watch: Vec<String>,
@@ -190,7 +193,7 @@ impl LibraryState {
         }
     }
 
-    fn playlist_title(&self, id: &str) -> String {
+    pub(crate) fn playlist_title(&self, id: &str) -> String {
         if id == LIKED_ID {
             return "Titres likés".into();
         }
@@ -262,7 +265,13 @@ pub enum Lib {
     /// bibliothèque : seulement ses morceaux, dans « Téléchargés »).
     DownloadAlbum(bool),
     /// Relevé du cache audio (morceaux présents sur le disque).
-    OfflineScanned(HashSet<String>),
+    OfflineScanned(HashMap<String, u64>),
+    /// Page Téléchargements : retirer une playlist, un titre, ou tout.
+    RemoveOfflinePlaylist(String),
+    RemoveDownload(String),
+    RemoveAllDownloads,
+    /// Tri de la page Téléchargements : par taille (sinon par nom).
+    DownloadsBySize(bool),
     OfflineTick,
     /// Lecture de l'historique à partir de la ligne donnée.
     PlayHistory(usize),
@@ -495,10 +504,12 @@ impl App {
                                 .map(|e| e.path())
                                 .filter(|p| p.extension().is_some_and(|x| x == "audio"))
                                 .filter_map(|p| {
-                                    p.file_stem().and_then(|s| s.to_str()).map(str::to_owned)
+                                    let id = p.file_stem().and_then(|s| s.to_str())?.to_owned();
+                                    let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                                    Some((id, size))
                                 })
-                                .filter(|id| pinned.contains(id))
-                                .collect::<HashSet<String>>()
+                                .filter(|(id, _)| pinned.contains(id))
+                                .collect::<HashMap<String, u64>>()
                         })
                         .unwrap_or_default()
                 })
@@ -1009,9 +1020,63 @@ impl App {
                 });
                 Task::batch([toast, self.keep_offline(ids, keep)])
             }
-            Lib::OfflineScanned(ids) => {
+            Lib::DownloadsBySize(on) => {
+                self.lib.downloads_by_size = on;
+                Task::none()
+            }
+            Lib::RemoveOfflinePlaylist(id) => {
+                self.lib.offline_playlists.remove(&id);
+                let ids: Vec<String> = self
+                    .lib
+                    .offline_lists
+                    .remove(&id)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|t| t.video_id)
+                    .collect();
+                if let Some(path) = self.offline_file() {
+                    write_json(&path, &self.lib.offline_playlists);
+                }
+                let toast = self.show_toast(format!(
+                    "« {} » retirée des téléchargements",
+                    self.lib.playlist_title(&id)
+                ));
+                Task::batch([toast, self.keep_offline(ids, false)])
+            }
+            Lib::RemoveDownload(video_id) => {
+                let track: Vec<Track> = self
+                    .lib
+                    .downloads
+                    .iter()
+                    .filter(|t| t.video_id == video_id)
+                    .cloned()
+                    .collect();
+                self.update(Message::Lib(Lib::Download(track, false)))
+            }
+            Lib::RemoveAllDownloads => {
+                let mut ids: Vec<String> =
+                    self.lib.downloads.drain(..).map(|t| t.video_id).collect();
+                ids.extend(
+                    self.lib
+                        .offline_lists
+                        .drain()
+                        .flat_map(|(_, tracks)| tracks.into_iter().map(|t| t.video_id)),
+                );
+                ids.extend(self.lib.offline_ids.iter().cloned());
+                self.lib.offline_playlists.clear();
+                if let Some(path) = self.offline_file() {
+                    write_json(&path, &self.lib.offline_playlists);
+                }
+                if let Some(path) = self.downloads_file() {
+                    write_json(&path, &self.lib.downloads);
+                }
+                let toast = self.show_toast("Téléchargements supprimés".into());
+                Task::batch([toast, self.keep_offline(ids, false)])
+            }
+            Lib::OfflineScanned(sizes) => {
                 let before = self.lib.offline_ids.len();
-                self.lib.offline_ids = ids;
+                self.lib.offline_ids = sizes.keys().cloned().collect();
+                self.lib.offline_sizes = sizes;
                 // « Téléchargés » ouverte suit les fichiers qui arrivent.
                 if matches!(&self.lib.playlist, Some((id, _)) if id == DOWNLOADS_ID) {
                     self.lib.playlist = Some((
