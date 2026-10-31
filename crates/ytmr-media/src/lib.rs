@@ -197,7 +197,11 @@ impl Covers {
         prune(&dir, CACHE_LIMIT, CACHE_TARGET);
         Ok(Self {
             dir,
-            http: reqwest::Client::new(),
+            // Google ajoute des en-têtes énormes : la limite de 16 Ko ne suffit plus.
+            http: reqwest::Client::builder()
+                .http2_max_header_list_size(256 * 1024)
+                .build()
+                .unwrap_or_default(),
             urls: Mutex::default(),
             downloads: Semaphore::new(MAX_CONCURRENT_DOWNLOADS),
             decodes: Semaphore::new(MAX_CONCURRENT_DECODES),

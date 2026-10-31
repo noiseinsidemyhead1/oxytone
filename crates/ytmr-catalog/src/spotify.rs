@@ -168,7 +168,8 @@ impl Catalog {
         let id = playlist_id(link).ok_or(CatalogError::Refused(
             "lien de playlist Spotify non reconnu",
         ))?;
-        let html = reqwest::Client::new()
+        let html = crate::http_builder()
+            .build()?
             .get(format!("https://open.spotify.com/embed/playlist/{id}"))
             .header(reqwest::header::USER_AGENT, "Mozilla/5.0")
             .send()

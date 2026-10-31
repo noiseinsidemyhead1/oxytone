@@ -105,6 +105,17 @@ pub struct Catalog {
     http: reqwest::Client,
 }
 
+/// En-têtes de réponse acceptés (HTTP/2). Le client Rust plafonne à 16 Ko par
+/// défaut ; depuis le 31/10/2026, YouTube ajoute l'en-tête
+/// `connection-allowlist-report-only` (la liste de tous ses domaines, > 10 Ko)
+/// et la réponse dépassait : « error sending request », compte inaccessible.
+pub const MAX_RESPONSE_HEADERS: u32 = 256 * 1024;
+
+/// Client HTTP de base de toutes les requêtes de ytmr (en-têtes larges acceptés).
+pub fn http_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().http2_max_header_list_size(MAX_RESPONSE_HEADERS)
+}
+
 /// Essais de connexion, espacés de plus en plus.
 const CONNECT_ATTEMPTS: [u64; 3] = [0, 600, 1500];
 
@@ -113,7 +124,7 @@ impl Catalog {
     pub fn new() -> Self {
         Self {
             yt: tokio::sync::OnceCell::new(),
-            http: reqwest::Client::new(),
+            http: http_builder().build().unwrap_or_default(),
         }
     }
 
@@ -349,7 +360,7 @@ async fn connect() -> Result<YtMusic<NoAuthToken>, CatalogError> {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         let mut headers = HeaderMap::new();
         headers.insert(COOKIE, HeaderValue::from_static(CONSENT_COOKIE));
-        let http = reqwest::Client::builder()
+        let http = http_builder()
             .default_headers(headers)
             .connect_timeout(std::time::Duration::from_secs(10))
             .build()?;

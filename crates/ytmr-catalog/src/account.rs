@@ -128,7 +128,9 @@ impl Account {
         }
         // ytmapi-rs attend un `;` après SAPISID pour le repérer.
         cookie.push(';');
+        let http = crate::http_builder().build()?;
         let yt = YtMusicBuilder::new()
+            .with_client(ytmapi_rs::Client::new_from_reqwest_client(http))
             .with_browser_token_cookie(cookie)
             .build()
             .await?;

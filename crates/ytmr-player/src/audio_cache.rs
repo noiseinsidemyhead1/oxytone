@@ -65,6 +65,8 @@ impl AudioCache {
             }
         }
         let http = reqwest::Client::builder()
+            // Google ajoute des en-têtes énormes : la limite de 16 Ko ne suffit plus.
+            .http2_max_header_list_size(256 * 1024)
             .timeout(REQUEST_TIMEOUT)
             .build()
             .ok()?;
