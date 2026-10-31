@@ -14,6 +14,7 @@ mod collection;
 mod context;
 mod icons;
 mod import;
+mod instance;
 mod library;
 mod settings;
 mod smooth;
@@ -27,6 +28,11 @@ use iced::{Size, window};
 use ytmr_core::{AppPaths, Config};
 
 pub use backend::Backend;
+
+/// Une seule instance : `false` si ytmr tourne déjà (sa fenêtre a été ramenée).
+pub fn claim_instance() -> bool {
+    instance::claim()
+}
 
 pub fn run(config: Config, paths: AppPaths) -> iced::Result {
     let boot = Arc::new((config, paths));

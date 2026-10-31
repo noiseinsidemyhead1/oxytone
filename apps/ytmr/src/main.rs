@@ -8,6 +8,10 @@ use ytmr_core::{AppPaths, Config};
 
 fn main() -> Result<()> {
     configure_renderer();
+    // ytmr tourne déjà (peut-être caché près de l'horloge) : on le ramène.
+    if !ytmr_gui::claim_instance() {
+        return Ok(());
+    }
     let paths = AppPaths::discover()?;
     let config_file = paths.config_file();
     let mut config = Config::load_or_create(&config_file)

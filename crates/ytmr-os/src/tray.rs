@@ -63,6 +63,22 @@ pub fn quit_requested() -> bool {
     QUIT.load(Ordering::Relaxed)
 }
 
+/// Deuxième lancement : autorise l'instance déjà ouverte à passer au premier
+/// plan (Windows le refuse sinon à un programme en arrière-plan).
+pub fn allow_foreground() {
+    use windows::Win32::UI::WindowsAndMessaging::{ASFW_ANY, AllowSetForegroundWindow};
+    unsafe {
+        let _ = AllowSetForegroundWindow(ASFW_ANY);
+    }
+}
+
+/// Ramène la fenêtre (cachée, réduite ou derrière les autres).
+pub fn show() {
+    if let Some(window) = crate::taskbar::window() {
+        show_window(window);
+    }
+}
+
 /// Cache la fenêtre (fermeture avec l'icône active : la musique continue).
 pub fn hide_window() {
     if let Some(window) = crate::taskbar::window() {
