@@ -4,23 +4,57 @@ Client YouTube Music natif en Rust (Linux et Windows), avec une API locale pour 
 
 Projet en cours de développement : voir [`ytmr-plan.md`](ytmr-plan.md) pour le plan et [`CLAUDE.md`](CLAUDE.md) pour l'avancement.
 
-## Prérequis
+## Installation
 
-- Rust stable (1.88 minimum)
-- Windows : Build Tools Visual Studio avec la charge de travail « Développement Desktop en C++ »
-- `mpv` et `yt-dlp` dans le PATH, plus un moteur JavaScript pour yt-dlp (`deno` conseillé, `node` accepté)
-  - Windows : `scoop bucket add extras && scoop install mpv yt-dlp deno`
-  - CachyOS / Arch : `sudo pacman -S mpv yt-dlp deno`
+ytmr se sert de trois outils installés à part : **mpv** (lecture), **yt-dlp**
+(adresses des flux) et **node** (défis JavaScript de YouTube pour yt-dlp).
+**Python** est conseillé : yt-dlp reste alors en mémoire et un morceau démarre
+plus vite. Au premier lancement, ytmr dit ce qui manque et comment l'installer.
+
+### Windows
+
+1. Les outils (une fois) : `scoop bucket add extras && scoop install mpv yt-dlp nodejs python`
+2. L'installateur `ytmr-setup-<version>.exe` : installation pour toi seul (sans
+   droits administrateur) ou pour tous, raccourci du menu Démarrer, raccourci
+   sur le Bureau et lancement au démarrage de Windows au choix. Désinstallation
+   depuis « Applications installées » (réglages et téléchargements gardés, ou
+   tout effacé si tu le demandes).
+
+Fabriquer l'installateur (Inno Setup requis : `scoop install inno-setup`) :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File packaging\windowsuild.ps1
+# ytmr ouvert ? targetelease est verrouillé :
+powershell -ExecutionPolicy Bypass -File packaging\windowsuild.ps1 -TargetDir targetlt
+```
+
+Résultat : `dist\ytmr-setup-<version>.exe`.
+
+### CachyOS / Arch
+
+```sh
+cd packaging/linux && makepkg -si
+```
+
+Le paquet `ytmr-git` installe mpv, yt-dlp et node en dépendances, puis ytmr,
+son icône et son entrée dans le menu des applications.
+
+### Depuis les sources
+
+- Rust stable (1.88 minimum) ; sous Windows, les Build Tools Visual Studio
+  (« Développement Desktop en C++ »).
+- `cargo run --release -p ytmr`
 
 ## Utilisation
 
-```sh
-cargo run --release -p ytmr
-```
+Raccourcis (aide complète avec `?`) : `Espace` lecture/pause, `←`/`→` ±5 s,
+`Ctrl+←`/`Ctrl+→` précédent/suivant, `↑`/`↓` volume, `M` muet, `L` like,
+`Ctrl+F` rechercher, `Ctrl+Z` remettre un morceau retiré de la file, `F11`
+plein écran, `Échap` fermer / remonter en haut de la page.
 
-Raccourcis : `Espace` lecture/pause, `←`/`→` ±10 s, `Ctrl+←`/`Ctrl+→` précédent/suivant, `Ctrl+F` rechercher, `Échap` retour.
-
-Pour la qualité Premium (Opus ~264 kb/s), mettre dans `config.toml`, section `[player]` : `cookies_from_browser = "firefox"` (YouTube connecté dans Firefox).
+Pour le compte YouTube (playlists, likes) et la qualité Premium (Opus
+~256 kb/s), mettre dans `config.toml`, section `[player]` :
+`cookies_from_browser = "firefox"` (YouTube connecté dans Firefox).
 
 ## Performances mesurées
 

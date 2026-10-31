@@ -179,6 +179,11 @@ Sécurité (`security.rs`) : `Host` limité aux noms de loopback en mode local (
 - **Discord** (`discord.rs`, crate `discord-rich-presence`) : fil dédié, statut « Écoute » (titre, artiste, pochette par URL ≤ 256 caractères, temps restant), effacé en pause ; reconnexion toutes les 20 s si Discord est fermé. Il faut l'**Application ID** d'une application créée par l'utilisateur sur discord.com/developers (champ des Paramètres, `ui.json`).
 - **Zone de notification** (`tray.rs`, réglage « Arrière-plan », `ui.json` `tray`) : `Shell_NotifyIconW` sur la fenêtre principale ; ses messages (`WM_APP+0x40`) passent par le sous-classement de `taskbar.rs`. Clic = afficher, clic droit = menu (lecture / pause, suivant, précédent, afficher, quitter). Icône dessinée en code (rond rouge, triangle blanc). Fermer la fenêtre avec l'icône active = `ShowWindow(SW_HIDE)` ; « Quitter » pose `QUIT` puis poste `WM_CLOSE` (arrêt normal de mpv). Reposée sur `TaskbarButtonCreated`. Windows seulement.
 
+## Packaging
+
+- **Icône** : `packaging/make_icon.py` (Pillow) régénère `packaging/windows/ytmr.ico` (16 à 256 px) et `packaging/linux/ytmr.png`, même dessin que `ytmr_gui::app_icon` (disque dégradé rose-violet percé).
+- **Windows** : `.iss` et `build.ps1` enregistrés en **UTF-8 avec BOM** (sinon Inno Setup et PowerShell 5.1 lisent de l'ANSI : accents abîmés). Installation par défaut pour l'utilisateur seul (`PrivilegesRequired=lowest`), démarrage avec Windows = `HKCU\…\Run`. mpv / yt-dlp / node **non inclus** (choix de l'utilisateur : installateur léger, ~10 Mo).
+
 ## Emplacements à l'exécution
 
 | | Linux | Windows |
@@ -199,4 +204,4 @@ Sécurité (`security.rs`) : `Host` limité aux noms de loopback en mode local (
 | 5 — Firmware CYD | à faire (`/api/v1/like` répond encore 501) |
 | 6 — Authentification et bibliothèque (playlists, likes) | faite sous Windows (lecture vérifiée sur un vrai compte ; modifications à confirmer par l'utilisateur) |
 | 7 — Intégration OS | Windows : touches média, overlay, boutons de la barre des tâches, notifications, plein écran, icône de la zone de notification ; Linux : MPRIS et notifications à vérifier sous CachyOS |
-| 8 — Packaging | à faire |
+| 8 — Packaging | Windows : installateur Inno Setup (`packaging/windows/ytmr.iss`, `build.ps1` → `dist/ytmr-setup-<version>.exe`, icône intégrée à l'exe par `apps/ytmr/build.rs` + `winresource`), outils non inclus (option A choisie) ; Linux : `packaging/linux/PKGBUILD` (`ytmr-git`) + `.desktop`, à tester sous CachyOS |
