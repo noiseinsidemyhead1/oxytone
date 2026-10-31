@@ -130,6 +130,16 @@ mod tests {
     use super::expand;
 
     #[test]
+    fn reads_the_user_path_from_the_registry() {
+        use winreg::HKCU;
+        let path: std::io::Result<String> = HKCU
+            .open_subkey("Environment")
+            .and_then(|k| k.get_value("Path"));
+        println!("PATH utilisateur : {path:?}");
+        assert!(path.is_ok());
+    }
+
+    #[test]
     fn expands_registry_variables() {
         let home = std::env::var("USERPROFILE").unwrap();
         assert_eq!(
