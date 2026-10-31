@@ -134,10 +134,29 @@ pub fn view(app: &App) -> El<'_> {
     .into()
 }
 
+/// Le disque de ytmr (même dessin que l'icône de l'appli), une seule fois en mémoire.
+fn logo<'a>(size: f32) -> El<'a> {
+    static LOGO: std::sync::LazyLock<iced::widget::svg::Handle> = std::sync::LazyLock::new(|| {
+        iced::widget::svg::Handle::from_memory(
+            br##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#ff3c6e"/><stop offset="1" stop-color="#c346dc"/>
+</linearGradient></defs>
+<path fill="url(#g)" fill-rule="evenodd" d="M32 0a32 32 0 1 0 0.01 0zM32 25.6a6.4 6.4 0 1 1 -0.01 0z"/>
+</svg>"##
+                .as_slice(),
+        )
+    });
+    iced::widget::svg(LOGO.clone())
+        .width(Length::Fixed(size))
+        .height(Length::Fixed(size))
+        .into()
+}
+
 fn splash(message: &str) -> El<'_> {
     container(
         column![
-            icon(Icon::Music, 44.0, style::DEFAULT_ACCENT),
+            logo(48.0),
             text("ytmr").size(30).font(BOLD),
             text(message).size(14).color(style::TEXT_DIM),
         ]
@@ -313,12 +332,9 @@ fn sidebar(app: &App) -> El<'_> {
         .on_press(Message::Navigate(route))
     };
 
-    let logo = row![
-        icon(Icon::Music, 22.0, app.accent),
-        text("ytmr").size(22).font(BOLD),
-    ]
-    .spacing(10)
-    .align_y(Alignment::Center);
+    let logo = row![logo(24.0), text("ytmr").size(22).font(BOLD),]
+        .spacing(10)
+        .align_y(Alignment::Center);
 
     let search = text_input("Rechercher", &app.search_query)
         .id(SEARCH_INPUT)

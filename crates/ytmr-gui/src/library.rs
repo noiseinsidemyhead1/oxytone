@@ -2030,17 +2030,23 @@ pub(crate) fn download_pill<'a>(
     let playable = tracks.iter().filter(|t| !t.unavailable).count();
     // Tout est sur l'appareil : le bouton devient une pastille pleine.
     let complete = pinned && playable > 0 && available >= playable;
+    // Court, pour tenir dans le bouton même quand la fenêtre est étroite :
+    // pendant le téléchargement, l'icône suffit à dire ce qui se passe.
     let label = if complete {
         "Téléchargé".to_owned()
     } else if pinned {
-        format!("Téléchargement · {available} / {playable}")
+        format!("{available} / {playable}")
     } else {
         "Télécharger".to_owned()
     };
     // Téléchargé : pastille pleine, texte seul. Avant : petite icône.
     // Même taille que « Lecture » et « Aléatoire » à côté.
     let content: El<'a> = if complete {
-        text(label).size(14).font(SEMIBOLD).into()
+        text(label)
+            .size(14)
+            .font(SEMIBOLD)
+            .wrapping(iced::widget::text::Wrapping::None)
+            .into()
     } else {
         row![
             icon(
@@ -2048,7 +2054,10 @@ pub(crate) fn download_pill<'a>(
                 16.0,
                 if pinned { accent } else { style::TEXT }
             ),
-            text(label).size(14).font(SEMIBOLD),
+            text(label)
+                .size(14)
+                .font(SEMIBOLD)
+                .wrapping(iced::widget::text::Wrapping::None),
         ]
         .spacing(8)
         .align_y(Alignment::Center)

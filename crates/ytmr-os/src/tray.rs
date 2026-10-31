@@ -230,33 +230,32 @@ fn menu(window: HWND) {
     }
 }
 
-// ----- icône dessinée en code : rond rouge, triangle « lecture » blanc -----
+// ----- icône dessinée en code : le disque de ytmr (dégradé rose-violet percé) -----
 
-/// Pixels BGRA prémultipliés (lissés par 4 × 4 échantillons).
+/// Pixels BGRA prémultipliés (lissés par 4 × 4 échantillons), même dessin
+/// que l'icône de l'appli (`packaging/make_icon.py`).
 fn pixels() -> Vec<u8> {
-    const RED: [f32; 3] = [0x45 as f32, 0x4e as f32, 0xff as f32]; // BGR
     let mut out = vec![0u8; ICON_PX * ICON_PX * 4];
     for py in 0..ICON_PX {
+        // Dégradé vertical : rose en haut, violet en bas (RVB).
+        let t = py as f32 / ICON_PX as f32;
+        let rgb = [255.0 - 60.0 * t, 60.0 + 10.0 * t, 110.0 + 110.0 * t];
         for px in 0..ICON_PX {
-            let (mut disc, mut play) = (0u32, 0u32);
+            let mut covered = 0u32;
             for sy in 0..4 {
                 for sx in 0..4 {
-                    let x = (px as f32 + (sx as f32 + 0.5) / 4.0) / ICON_PX as f32;
-                    let y = (py as f32 + (sy as f32 + 0.5) / 4.0) / ICON_PX as f32;
-                    let inside = (x - 0.5).powi(2) + (y - 0.5).powi(2) <= 0.47 * 0.47;
-                    let triangle =
-                        (0.38..=0.72).contains(&x) && (y - 0.5).abs() <= 0.2 * (0.72 - x) / 0.34;
-                    disc += u32::from(inside);
-                    play += u32::from(inside && triangle);
+                    let x = (px as f32 + (sx as f32 + 0.5) / 4.0) / ICON_PX as f32 - 0.5;
+                    let y = (py as f32 + (sy as f32 + 0.5) / 4.0) / ICON_PX as f32 - 0.5;
+                    let d = (x * x + y * y).sqrt() / 0.5;
+                    covered += u32::from((0.2..=1.0).contains(&d));
                 }
             }
-            let alpha = disc as f32 / 16.0;
-            let white = play as f32 / 16.0;
+            let alpha = covered as f32 / 16.0;
             let i = (py * ICON_PX + px) * 4;
-            for c in 0..3 {
-                // Prémultiplié : (rouge hors triangle + blanc dedans) × couverture.
-                out[i + c] = (RED[c] * (alpha - white) + 255.0 * white).round() as u8;
-            }
+            // BGRA, prémultiplié par la couverture.
+            out[i] = (rgb[2] * alpha).round() as u8;
+            out[i + 1] = (rgb[1] * alpha).round() as u8;
+            out[i + 2] = (rgb[0] * alpha).round() as u8;
             out[i + 3] = (alpha * 255.0).round() as u8;
         }
     }
@@ -294,15 +293,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn icon_is_a_disc_with_a_triangle() {
+    fn icon_is_a_pierced_disc() {
         let px = pixels();
         let at = |x: usize, y: usize| &px[(y * ICON_PX + x) * 4..(y * ICON_PX + x) * 4 + 4];
         assert_eq!(at(0, 0)[3], 0, "coin transparent");
-        assert_eq!(at(16, 4), [0x45, 0x4e, 0xff, 255], "bord du rond rouge");
-        let center = at(15, 16);
-        assert!(
-            center[0] > 200 && center[1] > 200,
-            "triangle blanc au centre"
-        );
+        assert_eq!(at(16, 4)[3], 255, "disque plein");
+        assert!(at(16, 4)[2] > at(16, 4)[0], "rose en haut");
+        assert_eq!(at(16, 16)[3], 0, "trou au centre");
     }
 }
