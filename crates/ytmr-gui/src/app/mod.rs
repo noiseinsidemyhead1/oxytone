@@ -419,6 +419,9 @@ struct UiSettings {
     offline_mode: bool,
     /// Icône dans la zone de notification ; fermer la fenêtre la cache.
     tray: bool,
+    /// Apparence : fond anthracite, couleur d'accent fixe (sinon la pochette).
+    anthracite: bool,
+    accent: Option<[u8; 3]>,
     /// Paroles : taille en mode focus (0 à 2), romanisation.
     #[serde(default = "medium")]
     np_lyrics_size: usize,
@@ -449,6 +452,8 @@ impl Default for UiSettings {
             discord_client_id: String::new(),
             np_lyrics_size: 1,
             romanize: false,
+            anthracite: false,
+            accent: None,
         }
     }
 }
@@ -517,6 +522,9 @@ pub struct App {
     /// Taille des paroles du mode focus, et romanisation (Paramètres).
     pub np_lyric_size: f32,
     pub romanize: bool,
+    /// Apparence : fond anthracite, accent fixe ([r, g, b]) au lieu de la pochette.
+    pub anthracite: bool,
+    pub fixed_accent: Option<[u8; 3]>,
     pub np_fade: Option<(std::time::Instant, Option<String>)>,
     /// Nouveau morceau dont la pochette n'est pas encore prête (depuis quand).
     pub np_waiting: Option<std::time::Instant>,
@@ -680,6 +688,8 @@ impl App {
             tray: false,
             np_lyric_size: NP_LYRIC_SIZES[1],
             romanize: false,
+            anthracite: false,
+            fixed_accent: None,
             np_fade: None,
             np_waiting: None,
             np_split: 0.0,
@@ -772,7 +782,7 @@ impl App {
         Theme::custom(
             "ytmr".to_owned(),
             iced::theme::Palette {
-                background: style::BG,
+                background: style::bg(),
                 text: style::TEXT,
                 primary: self.accent,
                 success: self.accent,
@@ -931,6 +941,9 @@ impl App {
         self.tray = settings.tray;
         self.np_lyric_size = NP_LYRIC_SIZES[settings.np_lyrics_size.min(NP_LYRIC_SIZES.len() - 1)];
         self.romanize = settings.romanize;
+        self.anthracite = settings.anthracite;
+        crate::style::set_anthracite(self.anthracite);
+        self.fixed_accent = settings.accent;
         self.notify
             .discord
             .enabled
@@ -981,6 +994,8 @@ impl App {
                 .position(|s| *s == self.np_lyric_size)
                 .unwrap_or(1),
             romanize: self.romanize,
+            anthracite: self.anthracite,
+            accent: self.fixed_accent,
             discord: self.discord_on(),
             discord_client_id: self.discord_client_id(),
         };

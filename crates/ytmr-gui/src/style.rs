@@ -10,14 +10,68 @@ use iced::{Background, Border, Color, Gradient, Shadow, Theme, Vector, color, gr
 
 // Noir pur pour le fond : les pixels d'un écran OLED s'éteignent vraiment.
 // Les panneaux restent à peine plus clairs pour garder la structure.
-pub const BG: Color = color!(0x000000);
+// Thème « anthracite » (Paramètres) : un fond gris très sombre à la place.
 /// Teinte d'une page dont la pochette n'est pas encore analysée : neutre,
 /// pour ne pas emprunter celle du morceau en cours.
 pub const NEUTRAL_ACCENT: Color = color!(0xb8b8c4);
-pub const SURFACE: Color = color!(0x0a0a0c);
-pub const SURFACE_HI: Color = color!(0x16161a);
-pub const SURFACE_HOVER: Color = color!(0x1f1f25);
-pub const LINE: Color = color!(0x1c1c22);
+/// Texte et icônes posés sur la couleur d'accent (boutons pleins).
+pub const ON_ACCENT: Color = color!(0x000000);
+
+/// Fond, panneaux, survols et filets d'un thème.
+struct Palette {
+    bg: Color,
+    surface: Color,
+    surface_hi: Color,
+    surface_hover: Color,
+    line: Color,
+}
+
+const BLACK: Palette = Palette {
+    bg: color!(0x000000),
+    surface: color!(0x0a0a0c),
+    surface_hi: color!(0x16161a),
+    surface_hover: color!(0x1f1f25),
+    line: color!(0x1c1c22),
+};
+
+const ANTHRACITE: Palette = Palette {
+    bg: color!(0x121216),
+    surface: color!(0x1a1a1f),
+    surface_hi: color!(0x24242a),
+    surface_hover: color!(0x2e2e35),
+    line: color!(0x2a2a31),
+};
+
+static ANTHRACITE_ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Thème du fond : noir (OLED) ou anthracite.
+pub fn set_anthracite(on: bool) {
+    ANTHRACITE_ON.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn palette() -> &'static Palette {
+    if ANTHRACITE_ON.load(std::sync::atomic::Ordering::Relaxed) {
+        &ANTHRACITE
+    } else {
+        &BLACK
+    }
+}
+
+pub fn bg() -> Color {
+    palette().bg
+}
+pub fn surface() -> Color {
+    palette().surface
+}
+pub fn surface_hi() -> Color {
+    palette().surface_hi
+}
+pub fn surface_hover() -> Color {
+    palette().surface_hover
+}
+pub fn line_color() -> Color {
+    palette().line
+}
 pub const TEXT: Color = color!(0xf2f2f5);
 pub const TEXT_DIM: Color = color!(0xa3a3ad);
 pub const TEXT_FAINT: Color = color!(0x6c6c77);
@@ -109,7 +163,7 @@ pub fn alpha(c: Color, a: f32) -> Color {
 
 pub fn window_bg(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(BG.into()),
+        background: Some(bg().into()),
         text_color: Some(TEXT),
         ..container::Style::default()
     }
@@ -117,16 +171,16 @@ pub fn window_bg(_: &Theme) -> container::Style {
 
 pub fn sidebar(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(SURFACE.into()),
+        background: Some(surface().into()),
         ..container::Style::default()
     }
 }
 
 pub fn player_bar(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(SURFACE.into()),
+        background: Some(surface().into()),
         border: Border {
-            color: LINE,
+            color: line_color(),
             width: 1.0,
             radius: Radius::default(),
         },
@@ -136,9 +190,9 @@ pub fn player_bar(_: &Theme) -> container::Style {
 
 pub fn panel(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(SURFACE.into()),
+        background: Some(surface().into()),
         border: Border {
-            color: LINE,
+            color: line_color(),
             width: 1.0,
             radius: RADIUS.into(),
         },
@@ -152,7 +206,7 @@ pub fn hero(accent: Color) -> impl Fn(&Theme) -> container::Style {
         background: Some(Background::Gradient(Gradient::Linear(
             gradient::Linear::new(std::f32::consts::PI)
                 .add_stop(0.0, shade(accent, 0.22))
-                .add_stop(1.0, BG),
+                .add_stop(1.0, bg()),
         ))),
         ..container::Style::default()
     }
@@ -166,7 +220,7 @@ pub fn greeting(accent: Color) -> impl Fn(&Theme) -> container::Style {
             gradient::Linear::new(std::f32::consts::PI)
                 .add_stop(0.0, shade(accent, 0.20))
                 .add_stop(0.6, alpha(shade(accent, 0.12), 0.5))
-                .add_stop(1.0, alpha(BG, 0.0)),
+                .add_stop(1.0, alpha(bg(), 0.0)),
         ))),
         ..container::Style::default()
     }
@@ -185,7 +239,7 @@ pub fn cover_frame_round(radius: f32) -> impl Fn(&Theme) -> container::Style {
 /// dessine mal aux coins (points clairs), un liseré discret suffit.
 pub fn cover_frame(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(SURFACE_HI.into()),
+        background: Some(surface_hi().into()),
         border: Border {
             color: alpha(Color::WHITE, 0.06),
             width: 1.0,
@@ -197,10 +251,10 @@ pub fn cover_frame(_: &Theme) -> container::Style {
 
 pub fn toast(_: &Theme) -> container::Style {
     container::Style {
-        background: Some(SURFACE_HOVER.into()),
+        background: Some(surface_hover().into()),
         text_color: Some(TEXT),
         border: Border {
-            color: LINE,
+            color: line_color(),
             width: 1.0,
             radius: RADIUS.into(),
         },
@@ -272,7 +326,7 @@ pub fn row_box(state: RowState, accent: Color) -> impl Fn(&Theme) -> container::
 /// Carte sans bouton (morceau : double-clic pour lancer).
 pub fn card_box(hovered: bool) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
-        background: hovered.then(|| SURFACE_HI.into()),
+        background: hovered.then(|| surface_hi().into()),
         text_color: Some(TEXT),
         border: Border {
             radius: RADIUS.into(),
@@ -309,7 +363,7 @@ pub fn primary_round(accent: Color) -> impl Fn(&Theme, button::Status) -> button
         };
         button::Style {
             background: Some(bg.into()),
-            text_color: BG,
+            text_color: ON_ACCENT,
             // Liseré d'accent plutôt qu'une ombre floue (le halo débordait en carré).
             border: Border {
                 color: alpha(accent, 0.6),
@@ -332,7 +386,7 @@ pub fn pill(accent: Color) -> impl Fn(&Theme, button::Status) -> button::Style {
             }
             .into(),
         ),
-        text_color: BG,
+        text_color: ON_ACCENT,
         border: Border {
             radius: 999.0.into(),
             ..Border::default()
@@ -346,14 +400,14 @@ pub fn pill_ghost(_: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: Some(
             match status {
-                button::Status::Hovered | button::Status::Pressed => SURFACE_HOVER,
-                _ => SURFACE_HI,
+                button::Status::Hovered | button::Status::Pressed => surface_hover(),
+                _ => surface_hi(),
             }
             .into(),
         ),
         text_color: TEXT,
         border: Border {
-            color: LINE,
+            color: line_color(),
             width: 1.0,
             radius: 999.0.into(),
         },
@@ -397,7 +451,7 @@ pub fn grid_tile(accent: Color) -> impl Fn(&Theme, button::Status) -> button::St
         background: Some(
             match status {
                 button::Status::Hovered | button::Status::Pressed => alpha(accent, 0.16),
-                _ => SURFACE_HI,
+                _ => surface_hi(),
             }
             .into(),
         ),
@@ -414,7 +468,7 @@ pub fn grid_tile(accent: Color) -> impl Fn(&Theme, button::Status) -> button::St
 pub fn card(_: &Theme, status: button::Status) -> button::Style {
     button::Style {
         background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(SURFACE_HI.into()),
+            button::Status::Hovered | button::Status::Pressed => Some(surface_hi().into()),
             _ => None,
         },
         text_color: TEXT,
@@ -448,9 +502,13 @@ pub fn icon_color(color: Color) -> impl Fn(&Theme, svg::Status) -> svg::Style {
 pub fn search_input(_: &Theme, status: text_input::Status) -> text_input::Style {
     let focused = matches!(status, text_input::Status::Focused { .. });
     text_input::Style {
-        background: SURFACE_HI.into(),
+        background: surface_hi().into(),
         border: Border {
-            color: if focused { alpha(TEXT, 0.35) } else { LINE },
+            color: if focused {
+                alpha(TEXT, 0.35)
+            } else {
+                line_color()
+            },
             width: 1.0,
             radius: 999.0.into(),
         },
@@ -534,7 +592,7 @@ pub fn scroll(_: &Theme, status: scrollable::Status) -> scrollable::Style {
         horizontal_rail: rail,
         gap: None,
         auto_scroll: scrollable::AutoScroll {
-            background: SURFACE_HI.into(),
+            background: surface_hi().into(),
             border: Border::default(),
             shadow: Shadow::default(),
             icon: TEXT,

@@ -444,7 +444,7 @@ pub fn library_page(app: &App) -> El<'_> {
         text("Bibliothèque").size(30).font(BOLD).width(Length::Fill),
         button(
             row![
-                icon(Icon::Plus, 16.0, style::BG),
+                icon(Icon::Plus, 16.0, style::ON_ACCENT),
                 text("Nouvelle playlist").size(14).font(SEMIBOLD)
             ]
             .spacing(8)

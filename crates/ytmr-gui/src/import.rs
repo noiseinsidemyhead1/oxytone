@@ -293,7 +293,7 @@ pub fn panel(app: &App) -> Option<El<'_>> {
             progress_bar(0.0..=found.source.len() as f32, found.found.len() as f32)
                 .girth(6)
                 .style(move |_| iced::widget::progress_bar::Style {
-                    background: style::SURFACE_HI.into(),
+                    background: style::surface_hi().into(),
                     bar: accent.into(),
                     border: iced::Border {
                         radius: 3.0.into(),

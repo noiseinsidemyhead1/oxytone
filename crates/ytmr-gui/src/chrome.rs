@@ -113,7 +113,7 @@ pub fn title_bar(app: &App) -> El<'_> {
             .width(Length::Fill)
             .height(Length::Fixed(1.0))
             .style(|_| container::Style {
-                background: Some(style::LINE.into()),
+                background: Some(style::line_color().into()),
                 ..container::Style::default()
             }),
     ]

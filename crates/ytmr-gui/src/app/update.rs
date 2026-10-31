@@ -79,6 +79,10 @@ impl App {
         if self.route != Route::Stats {
             self.stats.release();
         }
+        // Accent fixe (Paramètres) : il remplace la couleur de la pochette.
+        if let Some([r, g, b]) = self.fixed_accent {
+            self.accent = iced::Color::from_rgb8(r, g, b);
+        }
         let on = |b: bool| if b { 1.0 } else { 0.0 };
         self.anims
             .aim(Key::Normalize, on(self.state.effects.normalize), 0.0);

@@ -224,7 +224,7 @@ fn main_layout(app: &App) -> El<'_> {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(move |_| iced::widget::container::Style {
-                        background: Some(style::alpha(style::BG, 1.0 - level).into()),
+                        background: Some(style::alpha(style::bg(), 1.0 - level).into()),
                         ..Default::default()
                     }),
             ]))
@@ -286,7 +286,7 @@ fn resize_handle<'a>(panel: Panel) -> El<'a> {
             .width(Length::Fixed(5.0))
             .height(Length::Fill)
             .style(|_| iced::widget::container::Style {
-                background: Some(style::LINE.into()),
+                background: Some(style::line_color().into()),
                 ..Default::default()
             }),
     )
@@ -505,7 +505,7 @@ fn title_chars(app: &App) -> usize {
 
 /// Bouton lecture rond posé sur une pochette au survol (accueil).
 pub(crate) fn play_bubble<'a>(app: &App, message: Message) -> El<'a> {
-    button(container(icon(Icon::Play, 16.0, style::BG)).center(Length::Fixed(40.0)))
+    button(container(icon(Icon::Play, 16.0, style::ON_ACCENT)).center(Length::Fixed(40.0)))
         .padding(0)
         .style(style::primary_round(app.accent))
         .on_press(message)
@@ -540,7 +540,7 @@ pub(crate) fn cover_with_play<'a>(
 
 /// Pastille « téléchargé » : petit rond plein de la teinte, flèche sombre.
 pub(crate) fn downloaded_badge<'a>(accent: Color) -> El<'a> {
-    container(icon(Icon::Download, 10.0, style::BG))
+    container(icon(Icon::Download, 10.0, style::ON_ACCENT))
         .center(Length::Fixed(16.0))
         .style(move |_| iced::widget::container::Style {
             background: Some(accent.into()),
@@ -1040,7 +1040,7 @@ fn home(app: &App) -> El<'_> {
                 muted("Tape un titre, un artiste ou un album dans la recherche à gauche."),
                 button(
                     row![
-                        icon(Icon::Search, 16.0, style::BG),
+                        icon(Icon::Search, 16.0, style::ON_ACCENT),
                         text("Rechercher").size(14).font(SEMIBOLD)
                     ]
                     .spacing(8)
@@ -1671,7 +1671,7 @@ pub(crate) fn page_header<'a>(
     let actions = row![
         button(
             row![
-                icon(Icon::Play, 16.0, style::BG),
+                icon(Icon::Play, 16.0, style::ON_ACCENT),
                 text("Lecture").size(14).font(SEMIBOLD)
             ]
             .spacing(8)
@@ -2062,7 +2062,8 @@ fn queue_panel(app: &App) -> El<'_> {
                     .width(Length::Fill)
                     .height(Length::Fill)
                     .style(move |_| iced::widget::container::Style {
-                        background: (veil > 0.0).then(|| style::alpha(style::SURFACE, veil).into()),
+                        background: (veil > 0.0)
+                            .then(|| style::alpha(style::surface(), veil).into()),
                         ..Default::default()
                     }),
             ]
@@ -2141,10 +2142,11 @@ fn player_bar(app: &App) -> El<'_> {
     } else {
         Icon::Play
     };
-    let play = button(container(icon(toggle_icon, 18.0, style::BG)).center(Length::Fixed(40.0)))
-        .padding(0)
-        .style(style::primary_round(accent))
-        .on_press(Message::TogglePause);
+    let play =
+        button(container(icon(toggle_icon, 18.0, style::ON_ACCENT)).center(Length::Fixed(40.0)))
+            .padding(0)
+            .style(style::primary_round(accent))
+            .on_press(Message::TogglePause);
     let lit = |on: bool| if on { accent } else { style::TEXT_DIM };
     let repeat_icon = if state.repeat == Repeat::One {
         Icon::RepeatOne

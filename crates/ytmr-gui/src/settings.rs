@@ -38,6 +38,8 @@ pub enum Settings {
     Tray(bool),
     Discord(bool),
     LyricsSize(usize),
+    Accent(Option<[u8; 3]>),
+    Anthracite(bool),
     Romanize(bool),
     DiscordId(String),
 }
@@ -118,6 +120,21 @@ impl App {
                     self.send(Command::SetOffline(on)),
                     self.scan_offline(),
                 ])
+            }
+            Settings::Accent(rgb) => {
+                self.fixed_accent = rgb;
+                if rgb.is_none() {
+                    // Retour à la pochette : sa couleur revient tout de suite.
+                    self.restore_cover_accent();
+                }
+                self.save_ui();
+                Task::none()
+            }
+            Settings::Anthracite(on) => {
+                self.anthracite = on;
+                style::set_anthracite(on);
+                self.save_ui();
+                Task::none()
             }
             Settings::LyricsSize(index) => {
                 self.np_lyric_size =
@@ -351,6 +368,108 @@ fn clear_audio(dir: &Path) {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+/// Couleurs proposées pour l'accent fixe.
+const ACCENTS: [[u8; 3]; 7] = [
+    [0xff, 0x4d, 0x73],
+    [0xff, 0x5a, 0x4e],
+    [0xff, 0x9f, 0x43],
+    [0xf5, 0xc5, 0x42],
+    [0x3d, 0xdc, 0x84],
+    [0x4e, 0xa1, 0xff],
+    [0xa9, 0x70, 0xff],
+];
+
+/// Section « Apparence » : couleur d'accent et fond.
+fn appearance(app: &App) -> El<'_> {
+    let accent = app.accent;
+    let pill = |label: &'static str, active: bool, message: Message| -> El<'_> {
+        button(text(label).size(13).font(SEMIBOLD))
+            .padding(Padding::from([7, 14]))
+            .style(move |theme, status| {
+                if active {
+                    style::pill(accent)(theme, status)
+                } else {
+                    style::pill_ghost(theme, status)
+                }
+            })
+            .on_press(message)
+            .into()
+    };
+    let swatch = |rgb: [u8; 3]| -> El<'_> {
+        let color = Color::from_rgb8(rgb[0], rgb[1], rgb[2]);
+        let chosen = app.fixed_accent == Some(rgb);
+        button(
+            Space::new()
+                .width(Length::Fixed(22.0))
+                .height(Length::Fixed(22.0)),
+        )
+        .padding(0)
+        .style(move |_, status| button::Style {
+            background: Some(color.into()),
+            border: iced::Border {
+                radius: 12.0.into(),
+                width: if chosen || status == button::Status::Hovered {
+                    2.0
+                } else {
+                    0.0
+                },
+                color: style::TEXT,
+            },
+            ..button::Style::default()
+        })
+        .on_press(Message::Settings(Settings::Accent(Some(rgb))))
+        .into()
+    };
+    let mut colors = row![pill(
+        "Pochette",
+        app.fixed_accent.is_none(),
+        Message::Settings(Settings::Accent(None))
+    )]
+    .spacing(8)
+    .align_y(Alignment::Center);
+    for rgb in ACCENTS {
+        colors = colors.push(swatch(rgb));
+    }
+    column![
+        row![
+            column![
+                text("Couleur d'accent").size(15).font(SEMIBOLD),
+                muted("Celle de la pochette du morceau en cours, ou une couleur fixe."),
+            ]
+            .spacing(4)
+            .width(Length::Fill),
+            colors,
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center),
+        row![
+            column![
+                text("Fond").size(15).font(SEMIBOLD),
+                muted("Noir pur (les pixels d'un écran OLED s'éteignent) ou gris anthracite."),
+            ]
+            .spacing(4)
+            .width(Length::Fill),
+            row![
+                pill(
+                    "Noir",
+                    !app.anthracite,
+                    Message::Settings(Settings::Anthracite(false))
+                ),
+                pill(
+                    "Anthracite",
+                    app.anthracite,
+                    Message::Settings(Settings::Anthracite(true))
+                ),
+            ]
+            .spacing(6),
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center),
+    ]
+    .spacing(18)
+    .into()
 }
 
 fn card(content: El<'_>) -> El<'_> {
@@ -651,6 +770,8 @@ pub fn settings_page(app: &App) -> El<'_> {
                 .align_y(Alignment::Center)
                 .into()
             ),
+            section_title("Apparence"),
+            card(appearance(app)),
             section_title("Paroles"),
             card(
                 column![

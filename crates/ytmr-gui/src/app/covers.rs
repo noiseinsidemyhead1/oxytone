@@ -38,6 +38,17 @@ impl App {
         )
     }
 
+    /// Accent fixe retiré : la couleur de la pochette en cours revient.
+    pub(crate) fn restore_cover_accent(&mut self) {
+        let color = self
+            .current_cover()
+            .and_then(|id| self.accents.get(&id).copied());
+        if let Some(color) = color {
+            self.accent = color;
+            self.accent_fade.set(color, color);
+        }
+    }
+
     pub fn cover(&self, id: Option<&str>, size: u32) -> Option<image::Handle> {
         self.covers
             .get(&(id?.to_owned(), size))
