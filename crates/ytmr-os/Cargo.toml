@@ -10,6 +10,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+discord-rich-presence = "1.1.0"
 notify-rust = "4.17.0"
 # zbus plutôt que libdbus : rien à installer côté système sous Linux.
 souvlaki = { version = "0.9.3", default-features = false, features = ["use_zbus"] }

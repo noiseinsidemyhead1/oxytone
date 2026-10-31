@@ -87,6 +87,7 @@ impl App {
         self.anims
             .aim(Key::OfflineMode, on(self.lib.offline_mode), 0.0);
         self.anims.aim(Key::Tray, on(self.tray), 0.0);
+        self.anims.aim(Key::Discord, on(self.discord_on()), 0.0);
     }
 
     pub(super) fn update_inner(&mut self, message: Message) -> Task<Message> {

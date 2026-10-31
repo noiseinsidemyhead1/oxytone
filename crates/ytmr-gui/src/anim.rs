@@ -28,6 +28,7 @@ pub enum Key {
     Notifications,
     OfflineMode,
     Tray,
+    Discord,
 }
 
 #[derive(Debug, Clone, Copy)]

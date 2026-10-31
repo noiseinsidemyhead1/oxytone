@@ -7,7 +7,9 @@
 
 use std::path::{Path, PathBuf};
 
-use iced::widget::{Space, button, column, container, pick_list, row, text, vertical_slider};
+use iced::widget::{
+    Space, button, column, container, pick_list, row, text, text_input, vertical_slider,
+};
 use iced::{Alignment, Color, Length, Padding, Task, color};
 use ytmr_core::Command;
 use ytmr_player::effects::{EQ_BANDS, EQ_MAX_DB, EQ_PRESETS};
@@ -34,6 +36,8 @@ pub enum Settings {
     AudioDevice(String),
     OfflineMode(bool),
     Tray(bool),
+    Discord(bool),
+    DiscordId(String),
 }
 
 /// Sortie audio dans la liste déroulante (nom lisible, identifiant mpv).
@@ -112,6 +116,24 @@ impl App {
                     self.send(Command::SetOffline(on)),
                     self.scan_offline(),
                 ])
+            }
+            Settings::Discord(on) => {
+                self.notify
+                    .discord
+                    .enabled
+                    .store(on, std::sync::atomic::Ordering::Relaxed);
+                self.save_ui();
+                ytmr_os::discord::settings_changed();
+                Task::none()
+            }
+            Settings::DiscordId(id) => {
+                let id: String = id.chars().filter(char::is_ascii_digit).collect();
+                if let Ok(mut current) = self.notify.discord.client_id.lock() {
+                    *current = id;
+                }
+                self.save_ui();
+                ytmr_os::discord::settings_changed();
+                Task::none()
             }
             Settings::Tray(on) => {
                 self.tray = on;
@@ -605,6 +627,39 @@ pub fn settings_page(app: &App) -> El<'_> {
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center)
+                .into()
+            ),
+            section_title("Discord"),
+            card(
+                column![
+                    row![
+                        column![
+                            text("Statut « En train d'écouter »").size(15).font(SEMIBOLD),
+                            muted("Ton profil Discord montre le titre, l'artiste, la pochette et le temps restant. Effacé en pause."),
+                        ]
+                        .spacing(4)
+                        .width(Length::Fill),
+                        switch(
+                            app.anims.get(Key::Discord, 0.0),
+                            accent,
+                            Message::Settings(Settings::Discord(!app.discord_on())),
+                        ),
+                    ]
+                    .spacing(16)
+                    .align_y(Alignment::Center),
+                    column![
+                        text_input("Identifiant d'application Discord", &app.discord_client_id())
+                            .on_input(|id| Message::Settings(Settings::DiscordId(id)))
+                            .size(13)
+                            .padding(Padding::from([8, 12]))
+                            .style(style::search_input),
+                        text("Une fois : discord.com/developers/applications → « New Application », nomme-la ytmr (c'est le nom affiché : « Écoute ytmr »), puis copie son « Application ID » ici.")
+                            .size(12)
+                            .color(style::TEXT_FAINT),
+                    ]
+                    .spacing(6),
+                ]
+                .spacing(14)
                 .into()
             ),
             section_title("Notifications"),

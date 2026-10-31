@@ -395,6 +395,9 @@ struct UiSettings {
     offline_mode: bool,
     /// Icône dans la zone de notification ; fermer la fenêtre la cache.
     tray: bool,
+    /// Statut Discord et identifiant d'application.
+    discord: bool,
+    discord_client_id: String,
 }
 
 fn yes() -> bool {
@@ -410,6 +413,8 @@ impl Default for UiSettings {
             notifications: true,
             offline_mode: false,
             tray: false,
+            discord: false,
+            discord_client_id: String::new(),
         }
     }
 }
@@ -863,8 +868,31 @@ impl App {
             .store(settings.notifications, std::sync::atomic::Ordering::Relaxed);
         self.lib.offline_mode = settings.offline_mode;
         self.tray = settings.tray;
+        self.notify
+            .discord
+            .enabled
+            .store(settings.discord, std::sync::atomic::Ordering::Relaxed);
+        if let Ok(mut id) = self.notify.discord.client_id.lock() {
+            *id = settings.discord_client_id;
+        }
         #[cfg(windows)]
         ytmr_os::tray::set_enabled(self.tray);
+    }
+
+    pub(crate) fn discord_on(&self) -> bool {
+        self.notify
+            .discord
+            .enabled
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn discord_client_id(&self) -> String {
+        self.notify
+            .discord
+            .client_id
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     /// Mode hors ligne côté interface : plus de jaquettes téléchargées.
@@ -885,6 +913,8 @@ impl App {
             notifications: self.notifications_on(),
             offline_mode: self.lib.offline_mode,
             tray: self.tray,
+            discord: self.discord_on(),
+            discord_client_id: self.discord_client_id(),
         };
         if let Ok(json) = serde_json::to_vec(&settings) {
             let _ = std::fs::write(path, json);

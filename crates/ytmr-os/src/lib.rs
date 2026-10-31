@@ -8,6 +8,7 @@
 //! la GUI et l'API, ce module ne fait qu'envoyer des commandes au moteur et
 //! afficher son état.
 
+pub mod discord;
 #[cfg(windows)]
 pub mod fullscreen;
 mod notify;
@@ -16,6 +17,7 @@ pub mod taskbar;
 #[cfg(windows)]
 pub mod tray;
 
+pub use discord::DiscordSettings;
 pub use notify::NotifySettings;
 
 use std::ffi::c_void;
@@ -97,6 +99,7 @@ fn run(
         return;
     }
     let _ = ready.send(Ok(()));
+    discord::start(notify.discord.clone());
 
     // On recopie l'état du moteur à chaque changement utile.
     let mut rx = core.watch_state();
@@ -186,6 +189,7 @@ impl Shown {
         }
         self.status = Some(state.status);
         self.anchor = Some((std::time::Instant::now(), state.position));
+        discord::publish(state);
     }
 }
 

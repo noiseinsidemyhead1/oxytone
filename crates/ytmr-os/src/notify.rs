@@ -24,6 +24,8 @@ pub struct NotifySettings {
     pub focused: Arc<AtomicBool>,
     /// Cache de jaquettes (la pochette de la bulle), fourni une fois le backend prêt.
     pub covers: Arc<std::sync::OnceLock<Arc<ytmr_media::Covers>>>,
+    /// Statut Discord « En train d'écouter ».
+    pub discord: crate::DiscordSettings,
 }
 
 // À la main : le cache de jaquettes n'a pas de `Debug`.
@@ -42,6 +44,7 @@ impl NotifySettings {
             enabled: Arc::new(AtomicBool::new(enabled)),
             focused: Arc::new(AtomicBool::new(true)),
             covers: Arc::default(),
+            discord: crate::DiscordSettings::default(),
         }
     }
 
