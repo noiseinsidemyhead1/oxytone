@@ -40,6 +40,9 @@ pub struct Lyrics {
     pub body: LyricsBody,
     /// « LRCLIB », « Musixmatch » (via YouTube Music)…
     pub source: String,
+    /// Lecture en lettres latines de chaque ligne synchronisée (japonais,
+    /// coréen, chinois) ; vide si rien à romaniser.
+    pub romanized: Vec<Option<String>>,
 }
 
 impl Lyrics {
@@ -127,6 +130,7 @@ impl Catalog {
                     lyrics: Lyrics {
                         body: LyricsBody::Synced(lines),
                         source: "LRCLIB".into(),
+                        romanized: Vec::new(),
                     },
                     gap,
                 });
@@ -135,19 +139,25 @@ impl Catalog {
                     lyrics: Lyrics {
                         body: LyricsBody::Plain(text),
                         source: "LRCLIB".into(),
+                        romanized: Vec::new(),
                     },
                     gap,
                 });
             }
         }
-        if let Ok(Some(candidate)) = netease {
-            candidates.push(candidate);
+        let mut romaji = Vec::new();
+        if let Ok((candidate, roma)) = netease {
+            romaji = roma;
+            candidates.extend(candidate);
         }
         if let Ok(Some(lyrics)) = youtube {
             candidates.push(Candidate { lyrics, gap: None });
         }
         candidates.sort_by_key(Candidate::rank);
-        Ok(candidates.into_iter().next().map(|c| c.lyrics))
+        Ok(candidates
+            .into_iter()
+            .next()
+            .map(|c| with_romanization(c.lyrics, &romaji)))
     }
 
     async fn lrclib_get(
@@ -189,7 +199,7 @@ impl Catalog {
         title: &str,
         artist: &str,
         duration: Option<f64>,
-    ) -> Result<Option<Candidate>, CatalogError> {
+    ) -> Result<(Option<Candidate>, Vec<LyricLine>), CatalogError> {
         #[derive(Deserialize)]
         struct Search {
             result: Option<Found>,
@@ -215,6 +225,8 @@ impl Catalog {
         #[derive(Deserialize)]
         struct LyricReply {
             lrc: Option<Lrc>,
+            /// Romaji des chansons japonaises (synchronisé, fait à la main).
+            romalrc: Option<Lrc>,
         }
         #[derive(Deserialize)]
         struct Lrc {
@@ -254,21 +266,34 @@ impl Catalog {
             })
             .min_by_key(|s| (gap(s).unwrap_or(999.0) * 1000.0) as u64);
         let Some(song) = best else {
-            return Ok(None);
+            return Ok((None, Vec::new()));
         };
         let text = self
             .http
             .get(format!("{NETEASE}/song/lyric"))
             .header(reqwest::header::REFERER, "https://music.163.com")
-            .query(&[("id", song.id.to_string().as_str()), ("lv", "1")])
+            .query(&[
+                ("id", song.id.to_string().as_str()),
+                ("lv", "1"),
+                ("rv", "-1"),
+            ])
             .timeout(Duration::from_secs(8))
             .send()
             .await?
             .error_for_status()?
             .text()
             .await?;
-        let lrc = serde_json::from_str::<LyricReply>(&text)
-            .ok()
+        let reply = serde_json::from_str::<LyricReply>(&text).ok();
+        let romaji: Vec<LyricLine> = reply
+            .as_ref()
+            .and_then(|r| r.romalrc.as_ref())
+            .and_then(|l| l.lyric.as_deref())
+            .map(parse_lrc)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|l| !l.text.is_empty() && !is_credit(&l.text))
+            .collect();
+        let lrc = reply
             .and_then(|r| r.lrc)
             .and_then(|l| l.lyric)
             .unwrap_or_default();
@@ -277,15 +302,17 @@ impl Catalog {
             .filter(|l| !is_credit(&l.text))
             .collect();
         if lines.iter().filter(|l| !l.text.is_empty()).count() < 3 {
-            return Ok(None);
+            return Ok((None, romaji));
         }
-        Ok(Some(Candidate {
+        let candidate = Candidate {
             lyrics: Lyrics {
                 body: LyricsBody::Synced(lines),
                 source: "NetEase".into(),
+                romanized: Vec::new(),
             },
             gap: gap(song),
-        }))
+        };
+        Ok((Some(candidate), romaji))
     }
 
     async fn lrclib_search(
@@ -332,6 +359,7 @@ impl Catalog {
             } else {
                 source
             },
+            romanized: Vec::new(),
         }))
     }
 }
@@ -392,6 +420,32 @@ fn main_artist(artist: &str) -> String {
 }
 
 /// Lignes `[mm:ss.xx] texte` (plusieurs horodatages possibles par ligne).
+/// Ajoute la lecture latine des lignes synchronisées : le romaji de NetEase à
+/// ±1 s quand il existe, sinon la romanisation automatique.
+fn with_romanization(mut lyrics: Lyrics, romaji: &[LyricLine]) -> Lyrics {
+    let LyricsBody::Synced(lines) = &lyrics.body else {
+        return lyrics;
+    };
+    let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+    let automatic = crate::romanize::romanize_lines(&texts);
+    if automatic.iter().all(Option::is_none) {
+        return lyrics;
+    }
+    lyrics.romanized = lines
+        .iter()
+        .zip(automatic)
+        .map(|(line, auto)| {
+            auto.as_ref()?;
+            romaji
+                .iter()
+                .find(|r| r.at.abs_diff(line.at) <= Duration::from_secs(1))
+                .map(|r| r.text.clone())
+                .or(auto)
+        })
+        .collect();
+    lyrics
+}
+
 pub fn parse_lrc(lrc: &str) -> Vec<LyricLine> {
     let mut lines = Vec::new();
     for raw in lrc.lines() {
@@ -455,6 +509,7 @@ mod tests {
         let lyrics = Lyrics {
             body: LyricsBody::Synced(parse_lrc("[00:01.00]a\n[00:03.00]b")),
             source: String::new(),
+            romanized: Vec::new(),
         };
         assert_eq!(lyrics.line_at(Duration::from_millis(500)), None);
         assert_eq!(lyrics.line_at(Duration::from_secs(2)), Some(0));
@@ -467,6 +522,7 @@ mod tests {
             lyrics: Lyrics {
                 body: LyricsBody::Plain("x".into()),
                 source: String::new(),
+                romanized: Vec::new(),
             },
             gap: None,
         };
@@ -474,6 +530,7 @@ mod tests {
             lyrics: Lyrics {
                 body: LyricsBody::Synced(parse_lrc("[00:01.00]a")),
                 source: String::new(),
+                romanized: Vec::new(),
             },
             gap: Some(40.0),
         };
@@ -536,12 +593,27 @@ mod network {
 
     #[tokio::test]
     #[ignore = "réseau"]
+    async fn netease_gives_japanese_romaji() {
+        let catalog = Catalog::new();
+        let (_, romaji) = catalog
+            .netease("Lemon", "米津玄師", Some(255.0))
+            .await
+            .unwrap();
+        for line in romaji.iter().take(4) {
+            println!("{:?} {}", line.at, line.text);
+        }
+        assert!(romaji.len() > 10, "romaji de NetEase");
+    }
+
+    #[tokio::test]
+    #[ignore = "réseau"]
     async fn netease_finds_synced_lyrics() {
         let catalog = Catalog::new();
         let found = catalog
             .netease("Reality Surf", "Bladee", Some(123.0))
             .await
             .unwrap()
+            .0
             .unwrap();
         assert!(matches!(found.lyrics.body, LyricsBody::Synced(ref l) if l.len() > 10));
         assert!(found.gap.is_some_and(|g| g < 3.0));

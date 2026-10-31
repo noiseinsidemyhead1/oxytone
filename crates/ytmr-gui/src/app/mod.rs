@@ -33,7 +33,7 @@ mod update;
 
 use core_sync::core_updates;
 use fade::Fade;
-pub use lyrics::{lyric_heights, lyrics_text_width};
+pub use lyrics::{ROMAJI_SCALE, line_lengths, lyric_heights, lyrics_text_width};
 use native::{native_handle, window_hwnd};
 
 use crate::backend::Backend;
@@ -102,7 +102,8 @@ pub const NP_GAP: f32 = 72.0;
 pub const NP_LYRICS_MAX: f32 = 960.0;
 /// Taille du texte des paroles (panneau de droite, vue « En cours »).
 pub const LYRIC_SIZE: f32 = 20.0;
-pub const NP_LYRIC_SIZE: f32 = 32.0;
+/// Tailles des paroles du mode focus (Paramètres : petite, moyenne, grande).
+pub const NP_LYRIC_SIZES: [f32; 3] = [26.0, 32.0, 40.0];
 
 /// Marge au-dessus de la première ligne de paroles.
 pub const LYRICS_TOP: f32 = 24.0;
@@ -417,6 +418,10 @@ struct UiSettings {
     offline_mode: bool,
     /// Icône dans la zone de notification ; fermer la fenêtre la cache.
     tray: bool,
+    /// Paroles : taille en mode focus (0 à 2), romanisation.
+    #[serde(default = "medium")]
+    np_lyrics_size: usize,
+    romanize: bool,
     /// Statut Discord et identifiant d'application.
     discord: bool,
     discord_client_id: String,
@@ -424,6 +429,10 @@ struct UiSettings {
 
 fn yes() -> bool {
     true
+}
+
+fn medium() -> usize {
+    1
 }
 
 impl Default for UiSettings {
@@ -437,6 +446,8 @@ impl Default for UiSettings {
             tray: false,
             discord: false,
             discord_client_id: String::new(),
+            np_lyrics_size: 1,
+            romanize: false,
         }
     }
 }
@@ -500,6 +511,9 @@ pub struct App {
     pub np_art: Option<String>,
     /// Icône dans la zone de notification (Windows) : fermer cache la fenêtre.
     pub tray: bool,
+    /// Taille des paroles du mode focus, et romanisation (Paramètres).
+    pub np_lyric_size: f32,
+    pub romanize: bool,
     pub np_fade: Option<(std::time::Instant, Option<String>)>,
     /// Nouveau morceau dont la pochette n'est pas encore prête (depuis quand).
     pub np_waiting: Option<std::time::Instant>,
@@ -660,6 +674,8 @@ impl App {
             controls_anim: None,
             np_art: None,
             tray: false,
+            np_lyric_size: NP_LYRIC_SIZES[1],
+            romanize: false,
             np_fade: None,
             np_waiting: None,
             np_split: 0.0,
@@ -909,6 +925,8 @@ impl App {
             .store(settings.notifications, std::sync::atomic::Ordering::Relaxed);
         self.lib.offline_mode = settings.offline_mode;
         self.tray = settings.tray;
+        self.np_lyric_size = NP_LYRIC_SIZES[settings.np_lyrics_size.min(NP_LYRIC_SIZES.len() - 1)];
+        self.romanize = settings.romanize;
         self.notify
             .discord
             .enabled
@@ -954,6 +972,11 @@ impl App {
             notifications: self.notifications_on(),
             offline_mode: self.lib.offline_mode,
             tray: self.tray,
+            np_lyrics_size: NP_LYRIC_SIZES
+                .iter()
+                .position(|s| *s == self.np_lyric_size)
+                .unwrap_or(1),
+            romanize: self.romanize,
             discord: self.discord_on(),
             discord_client_id: self.discord_client_id(),
         };

@@ -14,7 +14,7 @@ use ytmr_catalog::{Album, AlbumSummary, Artist, ArtistSummary, SearchAll};
 use ytmr_core::{Repeat, Status, Track};
 
 use crate::app::{
-    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP, NP_LYRIC_SIZE,
+    App, CARD, HERO, LYRIC_SIZE, LYRICS_SCROLL, LYRICS_TOP, Load, Message, NP_GAP,
     NP_LYRICS_SCROLL, NP_PAD, PAGE_SCROLL, Panel, Phase, QUEUE_SCROLL, QueueDrag, RightPanel,
     Route, SEARCH_INPUT, THUMB, View,
 };
@@ -1143,7 +1143,7 @@ fn now_playing(app: &App) -> El<'_> {
             app.np_lyrics_text_width(),
             app.np_lyrics_view.height,
             false,
-            NP_LYRIC_SIZE,
+            app.np_lyric_size,
             split,
         ))
         .width(Length::Fixed(lyrics_w))
@@ -1300,7 +1300,7 @@ fn lyrics_body<'a>(
             let sung = shown.sung;
             let mut list = column![Space::new().height(Length::Fixed(LYRICS_TOP))];
             let heights = crate::app::lyric_heights(
-                lines.iter().map(|l| l.text.chars().count()),
+                crate::app::line_lengths(lyrics, app.romanize).into_iter(),
                 text_width,
                 size,
             );
@@ -1320,7 +1320,21 @@ fn lyrics_body<'a>(
                 } else {
                     line.text.as_str()
                 };
-                let words = container(text(words).size(size).font(BOLD))
+                // Romanisation (réglage) : la lecture en petit sous la ligne.
+                let romaji = app
+                    .romanize
+                    .then(|| lyrics.romanized.get(i).and_then(Option::as_deref))
+                    .flatten();
+                let words: El<'_> = match romaji {
+                    Some(r) => column![
+                        text(words).size(size).font(BOLD),
+                        text(r).size(size * crate::app::ROMAJI_SCALE).font(SEMIBOLD),
+                    ]
+                    .spacing(2)
+                    .into(),
+                    None => text(words).size(size).font(BOLD).into(),
+                };
+                let words = container(words)
                     .height(Length::Fixed(height))
                     .align_y(Alignment::Center);
                 if !interactive {

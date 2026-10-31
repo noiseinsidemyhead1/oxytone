@@ -29,6 +29,7 @@ pub enum Key {
     OfflineMode,
     Tray,
     Discord,
+    Romanize,
 }
 
 #[derive(Debug, Clone, Copy)]

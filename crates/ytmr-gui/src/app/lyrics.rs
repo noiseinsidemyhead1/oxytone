@@ -9,14 +9,49 @@ use super::*;
 /// ligne longue passe sur plusieurs lignes de texte. Estimation volontairement
 /// large (0,62 × la taille par caractère, gras) : un peu d'air plutôt qu'un
 /// chevauchement. Sert à l'affichage et au défilement (même calcul).
-pub fn lyric_heights(texts: impl Iterator<Item = usize>, width: f32, size: f32) -> Vec<f32> {
+/// `texts` : (caractères de la ligne, caractères de sa romanisation affichée).
+pub fn lyric_heights(
+    texts: impl Iterator<Item = (usize, Option<usize>)>,
+    width: f32,
+    size: f32,
+) -> Vec<f32> {
     let per_line = ((width / (size * 0.62)).floor() as usize).max(8);
     // Hauteur d'une ligne de texte et écart entre deux lignes, à l'échelle.
     let (text_h, gap) = (size * 1.35, size * 0.8);
+    // Romanisation : texte plus petit sous la ligne.
+    let small = size * ROMAJI_SCALE;
+    let small_per_line = ((width / (small * 0.55)).floor() as usize).max(8);
     texts
-        .map(|chars| {
+        .map(|(chars, romaji)| {
             let rows = chars.max(1).div_ceil(per_line).min(5) as f32;
-            rows * text_h + gap
+            let extra = romaji.map_or(0.0, |r| {
+                r.max(1).div_ceil(small_per_line).min(4) as f32 * small * 1.35
+            });
+            rows * text_h + extra + gap
+        })
+        .collect()
+}
+
+/// Taille de la romanisation par rapport aux paroles.
+pub const ROMAJI_SCALE: f32 = 0.55;
+
+/// Longueurs des lignes et de leur romanisation (affichée si le réglage l'est).
+pub fn line_lengths(
+    lyrics: &ytmr_catalog::lyrics::Lyrics,
+    romanize: bool,
+) -> Vec<(usize, Option<usize>)> {
+    let ytmr_catalog::lyrics::LyricsBody::Synced(lines) = &lyrics.body else {
+        return Vec::new();
+    };
+    lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| {
+            let romaji = romanize
+                .then(|| lyrics.romanized.get(i).cloned().flatten())
+                .flatten()
+                .map(|r| r.chars().count());
+            (l.text.chars().count(), romaji)
         })
         .collect()
 }
@@ -163,7 +198,7 @@ impl App {
                 NP_LYRICS_SCROLL,
                 self.np_lyrics_text_width(),
                 self.np_lyrics_view.height,
-                NP_LYRIC_SIZE,
+                self.np_lyric_size,
             ));
         }
         out
@@ -171,6 +206,12 @@ impl App {
 
     /// Fait glisser les paroles jusqu'à la ligne chantée (quand elle change),
     /// dans le panneau de droite et dans la vue « En cours ».
+    /// Réglage des paroles changé (taille, romanisation) : on se recale.
+    pub(crate) fn relayout_lyrics(&mut self) {
+        self.lyrics_line = None;
+        self.follow_lyrics();
+    }
+
     pub(super) fn follow_lyrics(&mut self) {
         // Les paroles du morceau quitté s'estompent encore : on ne bouge pas.
         if self
@@ -201,10 +242,10 @@ impl App {
         self.lyrics_line_at = std::time::Instant::now();
         self.lyrics_line = line;
         // La ligne chantée (son milieu) se place aux deux cinquièmes du panneau.
-        let ytmr_catalog::lyrics::LyricsBody::Synced(lines) = &lyrics.body else {
+        if !matches!(lyrics.body, ytmr_catalog::lyrics::LyricsBody::Synced(_)) {
             return;
-        };
-        let lengths: Vec<usize> = lines.iter().map(|l| l.text.chars().count()).collect();
+        }
+        let lengths = line_lengths(lyrics, self.romanize);
         for (scroll, width, view_height, size) in surfaces {
             let heights = lyric_heights(lengths.iter().copied(), width, size);
             let index = line.unwrap_or(0).min(heights.len().saturating_sub(1));

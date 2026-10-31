@@ -3622,6 +3622,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13bee6c73da26345c729282832b60b0363cf3dd9f4bfd81d8551b7a1c889a113"
 
 [[package]]
+name = "pinyin"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e225f595052d9c46045755be4b8d7950b6d9f3c33e0c0b74ba58f11bbfa8c64b"
+
+[[package]]
 name = "piper"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6612,6 +6618,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "yomikata-core"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a404426f8b222e2d5d8dc625cf636a7f6e90b67d5b934e9b8a0c9ed6a9110f6"
+
+[[package]]
 name = "ytmapi-rs"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6662,12 +6674,14 @@ name = "ytmr-catalog"
 version = "0.1.0"
 dependencies = [
  "futures-util",
+ "pinyin",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "yomikata-core",
  "ytmapi-rs",
  "ytmr-core",
 ]

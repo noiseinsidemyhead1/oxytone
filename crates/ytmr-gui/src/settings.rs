@@ -37,6 +37,8 @@ pub enum Settings {
     OfflineMode(bool),
     Tray(bool),
     Discord(bool),
+    LyricsSize(usize),
+    Romanize(bool),
     DiscordId(String),
 }
 
@@ -116,6 +118,19 @@ impl App {
                     self.send(Command::SetOffline(on)),
                     self.scan_offline(),
                 ])
+            }
+            Settings::LyricsSize(index) => {
+                self.np_lyric_size =
+                    crate::app::NP_LYRIC_SIZES[index.min(crate::app::NP_LYRIC_SIZES.len() - 1)];
+                self.save_ui();
+                self.relayout_lyrics();
+                Task::none()
+            }
+            Settings::Romanize(on) => {
+                self.romanize = on;
+                self.save_ui();
+                self.relayout_lyrics();
+                Task::none()
             }
             Settings::Discord(on) => {
                 self.notify
@@ -627,6 +642,56 @@ pub fn settings_page(app: &App) -> El<'_> {
                 ]
                 .spacing(16)
                 .align_y(Alignment::Center)
+                .into()
+            ),
+            section_title("Paroles"),
+            card(
+                column![
+                    row![
+                        column![
+                            text("Taille dans le mode focus").size(15).font(SEMIBOLD),
+                            muted("Les paroles synchronisées à côté de la pochette."),
+                        ]
+                        .spacing(4)
+                        .width(Length::Fill),
+                        row(["Petite", "Moyenne", "Grande"].into_iter().enumerate().map(
+                            |(i, label)| {
+                                let active =
+                                    crate::app::NP_LYRIC_SIZES.get(i) == Some(&app.np_lyric_size);
+                                button(text(label).size(13).font(SEMIBOLD))
+                                    .padding(Padding::from([7, 14]))
+                                    .style(move |theme, status| {
+                                        if active {
+                                            style::pill(accent)(theme, status)
+                                        } else {
+                                            style::pill_ghost(theme, status)
+                                        }
+                                    })
+                                    .on_press(Message::Settings(Settings::LyricsSize(i)))
+                                    .into()
+                            }
+                        ))
+                        .spacing(6),
+                    ]
+                    .spacing(16)
+                    .align_y(Alignment::Center),
+                    row![
+                        column![
+                            text("Romanisation").size(15).font(SEMIBOLD),
+                            muted("Sous les paroles en japonais, coréen ou chinois, leur lecture en lettres latines (romaji de NetEase quand il existe)."),
+                        ]
+                        .spacing(4)
+                        .width(Length::Fill),
+                        switch(
+                            app.anims.get(Key::Romanize, 0.0),
+                            accent,
+                            Message::Settings(Settings::Romanize(!app.romanize)),
+                        ),
+                    ]
+                    .spacing(16)
+                    .align_y(Alignment::Center),
+                ]
+                .spacing(18)
                 .into()
             ),
             section_title("Discord"),
