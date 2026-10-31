@@ -10,6 +10,15 @@ fn main() -> Result<()> {
     configure_renderer();
     #[cfg(windows)]
     refresh_path();
+    // Dossier de travail sûr : celui qu'on reçoit peut avoir disparu (dossier
+    // temporaire de l'installateur), et Windows refuse alors de lancer mpv.
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Into::into))
+        && let Err(e) = std::env::set_current_dir::<std::path::PathBuf>(dir)
+    {
+        eprintln!("dossier de travail : {e}");
+    }
     // ytmr tourne déjà (peut-être caché près de l'horloge) : on le ramène.
     if !ytmr_gui::claim_instance() {
         return Ok(());

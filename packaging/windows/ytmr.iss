@@ -53,15 +53,17 @@ Name: "autostart"; Description: "Lancer ytmr au démarrage de Windows"; Flags: u
 Source: "{#ExePath}"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\ytmr"; Filename: "{app}\ytmr.exe"
-Name: "{autodesktop}\ytmr"; Filename: "{app}\ytmr.exe"; Tasks: desktopicon
+Name: "{autoprograms}\ytmr"; Filename: "{app}\ytmr.exe"; WorkingDir: "{app}"
+Name: "{autodesktop}\ytmr"; Filename: "{app}\ytmr.exe"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
 ; Démarrage avec Windows (retiré à la désinstallation).
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "ytmr"; ValueData: """{app}\ytmr.exe"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
-Filename: "{app}\ytmr.exe"; Description: "Lancer ytmr"; Flags: nowait postinstall skipifsilent
+; Dossier de travail = celui de ytmr : celui de l'installateur (temporaire) est
+; supprimé à sa fermeture, et Windows refusait alors de lancer mpv et yt-dlp.
+Filename: "{app}\ytmr.exe"; WorkingDir: "{app}"; Description: "Lancer ytmr"; Flags: nowait postinstall skipifsilent
 
 [Code]
 // Désinstallation : ytmr est retiré, réglages et téléchargements restent,

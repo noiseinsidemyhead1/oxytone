@@ -133,8 +133,10 @@ pub struct PlayerConfig {
     /// C'est ici qu'on s'adapte quand YouTube change ses règles, sans recompiler.
     pub ytdl_raw_options: Vec<String>,
     /// Client YouTube de yt-dlp pour un démarrage à froid : son immédiat mais
-    /// qualité moindre (AAC ~96 kb/s). Vide (défaut) = toujours la meilleure
-    /// qualité, quelques secondes d'attente au premier morceau seulement.
+    /// qualité moindre (AAC ~96 kb/s) pour le morceau lancé ; les suivants,
+    /// préparés d'avance, restent en meilleure qualité. `android` par défaut :
+    /// vide = meilleure qualité dès le premier morceau, mais ~5 s d'attente
+    /// imposées par YouTube sans compte Premium.
     /// Ignoré quand `cookies_from_browser` est renseigné.
     pub fast_start_client: String,
     /// Navigateur où YouTube est connecté (`firefox`, ou `firefox:<dossier du profil>`
@@ -154,7 +156,7 @@ impl Default for PlayerConfig {
             ytdlp_path: None,
             volume: 70,
             ytdl_raw_options: Vec::new(),
-            fast_start_client: String::new(),
+            fast_start_client: "android".into(),
             cookies_from_browser: String::new(),
             audio_cache_mb: 2048,
         }

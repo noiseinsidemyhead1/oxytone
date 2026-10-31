@@ -145,7 +145,12 @@ async fn probe(program: &Path) -> Option<Tool> {
     let output = match tokio::time::timeout(VERSION_TIMEOUT, output).await {
         Ok(Ok(output)) => output,
         Ok(Err(e)) => {
-            tracing::debug!(program = %program.display(), error = %e, "outil non lancé");
+            // Absent du PATH : normal (on essaie ailleurs) ; sinon c'est à noter.
+            if program.is_absolute() {
+                tracing::warn!(program = %program.display(), error = %e, "outil non lancé");
+            } else {
+                tracing::debug!(program = %program.display(), error = %e, "outil non lancé");
+            }
             return None;
         }
         Err(_) => {
