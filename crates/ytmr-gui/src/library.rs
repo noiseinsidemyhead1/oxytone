@@ -254,6 +254,8 @@ pub enum Lib {
     HistoryLoaded(Result<Vec<Track>, String>),
     /// Garder / ne plus garder la playlist ouverte hors ligne.
     ToggleOffline,
+    /// Nouvel essai de connexion au compte (après une erreur réseau).
+    RetryAccount,
     /// Télécharger (`true`) ou retirer des téléchargements des morceaux.
     Download(Vec<Track>, bool),
     /// Tous les morceaux de l'album ouvert (l'album n'entre pas dans la
@@ -287,6 +289,19 @@ pub fn wait_for_account(mut rx: tokio::sync::watch::Receiver<AccountState>) -> T
         },
         |r| Message::Lib(Lib::AccountReady(r)),
     )
+}
+
+/// Échec dû au réseau (YouTube injoignable), pas à la session du navigateur.
+fn is_network_error(e: &str) -> bool {
+    [
+        "error sending request",
+        "Web error",
+        "timed out",
+        "dns",
+        "connexion refusée",
+    ]
+    .iter()
+    .any(|m| e.contains(m))
 }
 
 /// Lance une opération sur le compte (`None` = pas connecté).
@@ -1105,9 +1120,24 @@ impl App {
                 }
             }
             Lib::AccountReady(Err(e)) => {
+                let network = is_network_error(&e);
                 self.lib.account = AccountView::Unavailable(e);
                 self.lib.playlists = None;
-                Task::none()
+                // YouTube injoignable (réseau) : nouvel essai seul chaque minute.
+                if network && !self.lib.offline_mode {
+                    Task::perform(tokio::time::sleep(Duration::from_secs(60)), |()| {
+                        Message::Lib(Lib::RetryAccount)
+                    })
+                } else {
+                    Task::none()
+                }
+            }
+            Lib::RetryAccount => {
+                if !matches!(self.lib.account, AccountView::Unavailable(_)) {
+                    return Task::none();
+                }
+                self.lib.account = AccountView::Connecting;
+                self.reconnect_task().unwrap_or_else(Task::none)
             }
             Lib::PlaylistsLoaded(result) => {
                 match result {
@@ -1989,6 +2019,10 @@ pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
     let message = match &app.lib.account {
         AccountView::Ready(_) => return None,
         AccountView::Connecting => "Connexion à ton compte YouTube…".to_owned(),
+        // Réseau : pas la peine de parler des cookies (c'était trompeur).
+        AccountView::Unavailable(e) if is_network_error(e) => {
+            "YouTube est injoignable pour l'instant (connexion Internet). Nouvel essai automatique chaque minute, ou « Se reconnecter » en bas à gauche.".to_owned()
+        }
         AccountView::Unavailable(e) => format!(
             "Compte YouTube indisponible : {e}\n\nIl faut `cookies_from_browser = \"firefox\"` dans la section [player] de config.toml, et être connecté à YouTube dans Firefox."
         ),
