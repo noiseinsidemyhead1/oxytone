@@ -31,8 +31,9 @@ use ytmr_core::{AppPaths, Config};
 pub use backend::Backend;
 
 /// Une seule instance : `false` si ytmr tourne déjà (sa fenêtre a été ramenée).
-pub fn claim_instance() -> bool {
-    instance::claim()
+/// `wait` : redémarrage, l'instance précédente est en train de se fermer.
+pub fn claim_instance(wait: bool) -> bool {
+    instance::claim(wait)
 }
 
 pub fn run(config: Config, paths: AppPaths) -> iced::Result {

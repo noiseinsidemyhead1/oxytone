@@ -158,6 +158,8 @@ pub struct ResolverOptions {
     pub fast_client: Option<String>,
     /// `firefox`, ou `firefox:<profil>` : session YouTube à utiliser.
     pub cookies_from_browser: Option<String>,
+    /// Session capturée par la fenêtre de connexion de ytmr (prioritaire).
+    pub session: Option<Vec<crate::session::SessionCookie>>,
     /// `clé=valeur` ajoutées à chaque appel de l'exécutable. S'il y en a, le
     /// worker n'est pas utilisé (ses options ne se traduisent pas toutes).
     pub raw_options: Vec<String>,
@@ -173,6 +175,7 @@ pub struct YtDlpResolver {
     common_args: Vec<String>,
     fast_client: Option<String>,
     cookies: Option<String>,
+    session: Option<Vec<crate::session::SessionCookie>>,
     node: bool,
     worker_allowed: bool,
     worker: Mutex<Option<Arc<Worker>>>,
@@ -208,6 +211,7 @@ impl YtDlpResolver {
             common_args,
             fast_client: options.fast_client,
             cookies: options.cookies_from_browser,
+            session: options.session,
             node,
             worker_allowed: options.raw_options.is_empty(),
             worker: Mutex::default(),
@@ -237,12 +241,17 @@ impl YtDlpResolver {
         if self.node {
             options["js_runtimes"] = json!({ "node": {} });
         }
-        if let Some(browser) = &self.cookies {
+        if let Some(session) = &self.session {
+            // Le worker range ces cookies dans le pot de yt-dlp.
+            options["ytmr_cookies"] = json!(session);
+        } else if let Some(browser) = &self.cookies {
             let (name, profile) = match browser.split_once(':') {
                 Some((name, profile)) => (name, Some(profile)),
                 None => (browser.as_str(), None),
             };
             options["cookiesfrombrowser"] = json!([name, profile]);
+        }
+        if self.session.is_some() || self.cookies.is_some() {
             options["extractor_args"] = json!({ "youtube": {
                 "player_client": [ACCOUNT_CLIENT],
                 "player_skip": ACCOUNT_SKIP.split(',').collect::<Vec<_>>(),
@@ -258,10 +267,11 @@ impl YtDlpResolver {
 
     /// Session YouTube du navigateur configuré, lue par le worker.
     pub async fn browser_cookie(&self) -> Result<String, String> {
-        let browser = self
-            .cookies
-            .clone()
-            .ok_or("aucun navigateur configuré (player.cookies_from_browser)")?;
+        // Connexion faite dans ytmr : pas besoin du navigateur.
+        if let Some(session) = &self.session {
+            return Ok(crate::session::cookie_header(session));
+        }
+        let browser = self.cookies.clone().ok_or("compte YouTube non connecté")?;
         let worker = self
             .live_worker()
             .ok_or("le worker yt-dlp n'est pas prêt")?;

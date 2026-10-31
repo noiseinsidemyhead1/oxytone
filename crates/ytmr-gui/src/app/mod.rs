@@ -344,6 +344,9 @@ pub enum Message {
     Noop,
     CloseRequested,
     Import(crate::import::Imp),
+    /// « Se connecter » : fenêtre de connexion Google, puis redémarrage.
+    Login,
+    LoginDone(Result<Vec<ytmr_player::session::SessionCookie>, String>),
     Releases(crate::releases::Rel),
     /// Minuteur de sommeil : réglé, ou annulé (`None`).
     Sleep(Option<SleepChoice>),
@@ -497,6 +500,12 @@ pub struct App {
     /// Onglet des résultats, et recherches récentes (les plus récentes d'abord).
     pub search_tab: SearchTab,
     pub recent_searches: Vec<String>,
+    /// Session YouTube chiffrée (« Se connecter »).
+    pub session_file: Option<std::path::PathBuf>,
+    /// Fenêtre de connexion ouverte (le bouton attend).
+    pub logging_in: bool,
+    /// Redémarrer après la fermeture (connexion réussie).
+    pub relaunch: bool,
     /// Nouveautés des artistes suivis (rangée de l'accueil).
     pub releases: Vec<ytmr_catalog::AlbumSummary>,
     /// Fenêtre « Importer depuis Spotify » ouverte.
@@ -674,6 +683,9 @@ impl App {
             search_shown: String::new(),
             search_tab: SearchTab::All,
             recent_searches: Vec::new(),
+            session_file: Some(crate::backend::session_file(&config.1)),
+            logging_in: false,
+            relaunch: false,
             releases: Vec::new(),
             import: None,
             search_pending: None,

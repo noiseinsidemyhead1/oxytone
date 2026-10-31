@@ -95,6 +95,17 @@ impl App {
         self.anims.aim(Key::Romanize, on(self.romanize), 0.0);
     }
 
+    /// Fin de l'appli ; après une connexion, ytmr se relance aussitôt.
+    fn exit(&self) -> Task<Message> {
+        if self.relaunch
+            && let Ok(exe) = std::env::current_exe()
+            && let Err(e) = std::process::Command::new(exe).arg("--relaunch").spawn()
+        {
+            tracing::warn!(error = %e, "redémarrage de ytmr");
+        }
+        iced::exit()
+    }
+
     pub(super) fn update_inner(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::BackendReady(result) => match result.map(|slot| slot.take()) {
@@ -671,6 +682,7 @@ impl App {
                     // Seulement si ytmr a vraiment démarré (l'icône existe) : sur
                     // l'écran d'erreur, fermer doit quitter.
                     if self.tray
+                        && !self.relaunch
                         && matches!(self.phase, Phase::Ready(_))
                         && !ytmr_os::tray::quit_requested()
                     {
@@ -685,7 +697,7 @@ impl App {
                     Phase::Ready(backend) => {
                         Task::perform(backend.shutdown(), |()| Message::ShutdownDone)
                     }
-                    _ => iced::exit(),
+                    _ => self.exit(),
                 }
             }
             // Mode focus : les paroles défilent seules, la molette n'y fait rien.
@@ -960,6 +972,64 @@ impl App {
             Message::Settings(message) => self.update_settings(message),
             Message::Stats(message) => self.update_stats(message),
             Message::Import(message) => self.update_import(message),
+            Message::Login => {
+                if self.logging_in {
+                    return Task::none();
+                }
+                // La fenêtre de connexion utilise le moteur web de Windows.
+                if cfg!(not(windows)) {
+                    return self.show_toast(
+                        "Sous Linux : mets cookies_from_browser = \"firefox\" dans config.toml"
+                            .into(),
+                    );
+                }
+                let Ok(exe) = std::env::current_exe() else {
+                    return self.show_toast("Connexion impossible : ytmr introuvable".into());
+                };
+                self.logging_in = true;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let output = crate::backend::login_command(&exe)
+                                .output()
+                                .map_err(|e| format!("fenêtre de connexion : {e}"))?;
+                            let line = String::from_utf8_lossy(&output.stdout);
+                            let line = line.trim();
+                            if line.is_empty() {
+                                return Err("Connexion annulée".to_owned());
+                            }
+                            serde_json::from_str::<Vec<ytmr_player::session::SessionCookie>>(line)
+                                .map_err(|e| format!("session illisible : {e}"))
+                        })
+                        .await
+                        .map_err(|e| e.to_string())?
+                    },
+                    Message::LoginDone,
+                )
+            }
+            Message::LoginDone(result) => {
+                self.logging_in = false;
+                let cookies = match result {
+                    Ok(cookies) if ytmr_player::session::is_signed_in(&cookies) => cookies,
+                    Ok(_) => return self.show_toast("Connexion incomplète, réessaie".into()),
+                    Err(e) => return self.show_toast(e),
+                };
+                let saved = self
+                    .session_file
+                    .as_deref()
+                    .ok_or_else(|| "dossier de données inconnu".to_owned())
+                    .and_then(|path| crate::backend::save_session(path, &cookies));
+                if let Err(e) = saved {
+                    return self.show_toast(format!("Session non enregistrée : {e}"));
+                }
+                if let Some(marker) = self.lib.cache_dir.as_ref().map(|d| d.join("disconnected")) {
+                    let _ = std::fs::remove_file(marker);
+                }
+                tracing::info!("compte YouTube relié : redémarrage");
+                // yt-dlp, mpv et le compte lisent la session au démarrage.
+                self.relaunch = true;
+                self.update(Message::CloseRequested)
+            }
             Message::Releases(message) => self.update_releases(message),
             Message::Sleep(choice) => {
                 let restore = self.sleep_volume.take();
@@ -1011,7 +1081,7 @@ impl App {
             Message::Coll(message) => self.update_collection(message),
             Message::Window(action) => self.update_window(action),
             Message::Noop => Task::none(),
-            Message::ShutdownDone => iced::exit(),
+            Message::ShutdownDone => self.exit(),
         }
     }
 }

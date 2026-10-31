@@ -17,9 +17,20 @@ const REPLY: &str = "ytmr-ok";
 
 /// `true` : cette instance est la seule (elle continue). `false` : une autre
 /// tourne déjà, sa fenêtre a été ramenée ; celle-ci doit s'arrêter.
-pub fn claim() -> bool {
+pub fn claim(wait: bool) -> bool {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, PORT));
-    match TcpListener::bind(addr) {
+    // Redémarrage : l'ancienne instance libère le port en quelques instants.
+    let mut bound = TcpListener::bind(addr);
+    if wait {
+        for _ in 0..50 {
+            if bound.is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+            bound = TcpListener::bind(addr);
+        }
+    }
+    match bound {
         Ok(listener) => {
             let spawned = std::thread::Builder::new()
                 .name("ytmr-instance".into())

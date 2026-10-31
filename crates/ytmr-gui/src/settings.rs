@@ -370,6 +370,38 @@ fn clear_audio(dir: &Path) {
     }
 }
 
+/// État du compte YouTube, et connexion / déconnexion.
+fn account_row(app: &App) -> El<'_> {
+    use crate::library::AccountView;
+    let (status, action): (String, El<'_>) = match &app.lib.account {
+        AccountView::Ready(_) => (
+            match &app.lib.profile {
+                Some(p) => format!("Connecté : {}", p.name),
+                None => "Connecté".to_owned(),
+            },
+            button(text("Se déconnecter").size(13).font(SEMIBOLD))
+                .padding(Padding::from([7, 16]))
+                .style(style::pill_ghost)
+                .on_press(Message::Lib(crate::library::Lib::Disconnect))
+                .into(),
+        ),
+        AccountView::Connecting => ("Connexion…".to_owned(), Space::new().into()),
+        _ => ("Non connecté".to_owned(), crate::library::login_button(app)),
+    };
+    row![
+        column![
+            text("Compte YouTube").size(15).font(SEMIBOLD),
+            muted(format!("{status}. La connexion se fait dans une fenêtre Google, une seule fois ; la session reste sur ce PC, chiffrée.")),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+        action,
+    ]
+    .spacing(16)
+    .align_y(Alignment::Center)
+    .into()
+}
+
 /// Couleurs proposées pour l'accent fixe.
 const ACCENTS: [[u8; 3]; 7] = [
     [0xff, 0x4d, 0x73],
@@ -906,6 +938,7 @@ pub fn settings_page(app: &App) -> El<'_> {
             section_title("Compte"),
             card(
                 column![
+                    account_row(app),
                     row![
                         column![
                             text("Historique d'écoute").size(15).font(SEMIBOLD),

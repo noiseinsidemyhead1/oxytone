@@ -12,6 +12,7 @@ pub mod discord;
 #[cfg(windows)]
 pub mod fullscreen;
 mod notify;
+pub mod secret;
 #[cfg(windows)]
 pub mod taskbar;
 #[cfg(windows)]

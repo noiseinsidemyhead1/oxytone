@@ -63,7 +63,14 @@ impl Backend {
             config.player.ytdlp_path.as_deref(),
         )
         .await?;
-        let fast_client = config.player.fast_start_client();
+        // Session capturée par « Se connecter » (prioritaire sur le navigateur).
+        let session = load_session(&session_file(paths));
+        // Avec un compte, pas de démarrage rapide : les clients rapides
+        // n'acceptent pas les cookies (et perdraient la qualité Premium).
+        let fast_client = config
+            .player
+            .fast_start_client()
+            .filter(|_| session.is_none());
         let ytdl_options = config.player.ytdl_options();
 
         // Le catalogue se connecte à sa première utilisation : pas de réseau
@@ -77,6 +84,7 @@ impl Backend {
             ResolverOptions {
                 fast_client: fast_client.map(str::to_owned),
                 cookies_from_browser: config.player.cookies_from_browser().map(str::to_owned),
+                session,
                 raw_options: config.player.ytdl_raw_options.clone(),
                 cache_file: Some(paths.cache_dir.join("streams.json")),
                 audio_cache: ytmr_player::AudioCache::new(
@@ -161,6 +169,55 @@ impl Backend {
             }
         }
     }
+}
+
+/// Fichier de la session YouTube (chiffrée par Windows).
+pub fn session_file(paths: &AppPaths) -> std::path::PathBuf {
+    paths.data_dir.join("youtube-session.bin")
+}
+
+/// Session enregistrée par « Se connecter » (`None` : aucune, ou illisible).
+pub fn load_session(path: &std::path::Path) -> Option<Vec<ytmr_player::session::SessionCookie>> {
+    let sealed = std::fs::read(path).ok()?;
+    let clear = match ytmr_os::secret::unprotect(&sealed) {
+        Ok(clear) => clear,
+        Err(e) => {
+            tracing::warn!("session YouTube illisible : {e}");
+            return None;
+        }
+    };
+    serde_json::from_slice(&clear)
+        .ok()
+        .filter(|c: &Vec<_>| ytmr_player::session::is_signed_in(c))
+}
+
+/// `ytmr --login` : la fenêtre de connexion, dont la sortie est la session.
+pub fn login_command(exe: &std::path::Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--login")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    cmd
+}
+
+/// Enregistre la session (chiffrée ; fichier réservé à l'utilisateur).
+pub fn save_session(
+    path: &std::path::Path,
+    cookies: &[ytmr_player::session::SessionCookie],
+) -> Result<(), String> {
+    let clear = serde_json::to_vec(cookies).map_err(|e| e.to_string())?;
+    let sealed = ytmr_os::secret::protect(&clear)?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(path, sealed).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
 }
 
 /// Installe (au besoin) puis démarre le yt-dlp permanent, en tâche de fond

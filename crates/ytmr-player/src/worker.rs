@@ -39,6 +39,9 @@ import yt_dlp, yt_dlp.version
 opts = json.loads(sys.argv[1])
 if "cookiesfrombrowser" in opts:
     opts["cookiesfrombrowser"] = tuple(opts["cookiesfrombrowser"])
+# Session capturée par la fenêtre de connexion de ytmr (cookies déjà lus).
+session = opts.pop("ytmr_cookies", None) or []
+has_account = "cookiesfrombrowser" in opts or bool(session)
 local = threading.local()
 out = threading.Lock()
 
@@ -73,7 +76,18 @@ except Exception:
 
 def ydl():
     if not hasattr(local, "ydl"):
-        local.ydl = yt_dlp.YoutubeDL(opts)
+        y = yt_dlp.YoutubeDL(opts)
+        if session:
+            import http.cookiejar
+            for c in session:
+                domain = c["domain"]
+                y.cookiejar.set_cookie(http.cookiejar.Cookie(
+                    0, c["name"], c["value"], None, False,
+                    domain, True, domain.startswith("."),
+                    c.get("path") or "/", True, bool(c.get("secure")),
+                    c.get("expires"), False, None, None, {},
+                ))
+        local.ydl = y
     return local.ydl
 
 def emit(obj):
@@ -100,7 +114,7 @@ def work(req):
         if req.get("op") == "premium":
             # Au lancement, en tâche de fond : le premier vrai morceau profite
             # déjà de la détection Premium.
-            if "cookiesfrombrowser" in opts and premium["known"] is None:
+            if has_account and premium["known"] is None:
                 ydl().extract_info(
                     "https://music.youtube.com/watch?v=dQw4w9WgXcQ", download=False
                 )

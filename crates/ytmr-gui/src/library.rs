@@ -1149,6 +1149,9 @@ impl App {
                 Task::none()
             }
             Lib::Disconnect => {
+                if let Some(path) = &self.session_file {
+                    let _ = std::fs::remove_file(path);
+                }
                 self.lib.account = AccountView::Disconnected;
                 self.lib.profile = None;
                 self.lib.playlists = None;
@@ -2098,11 +2101,20 @@ pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
         AccountView::Unavailable(e) if is_network_error(e) => {
             "YouTube est injoignable pour l'instant (connexion Internet). Nouvel essai automatique chaque minute, ou « Se reconnecter » en bas à gauche.".to_owned()
         }
-        AccountView::Unavailable(e) => format!(
-            "Compte YouTube indisponible : {e}\n\nIl faut `cookies_from_browser = \"firefox\"` dans la section [player] de config.toml, et être connecté à YouTube dans Firefox."
-        ),
-        AccountView::Disconnected => {
-            "Compte YouTube déconnecté. Reconnecte-le en bas à gauche.".to_owned()
+        AccountView::Unavailable(_) | AccountView::Disconnected => {
+            return Some(
+                container(
+                    column![
+                        text("Connecte ton compte YouTube").size(20).font(BOLD),
+                        muted("Pour retrouver tes playlists, tes titres likés et ta bibliothèque, et écouter en qualité Premium si tu l'as."),
+                        login_button(app),
+                    ]
+                    .spacing(12)
+                    .max_width(520),
+                )
+                .padding(Padding::from([40, 0]))
+                .into(),
+            );
         }
     };
     Some(
@@ -2110,6 +2122,27 @@ pub(crate) fn not_connected<'a>(app: &App) -> Option<El<'a>> {
             .padding(Padding::from([40, 0]))
             .into(),
     )
+}
+
+/// Bouton « Se connecter » (fenêtre de connexion Google).
+pub(crate) fn login_button<'a>(app: &App) -> El<'a> {
+    let label = if app.logging_in {
+        "Connexion en cours…"
+    } else {
+        "Se connecter à YouTube"
+    };
+    button(
+        row![
+            icon(Icon::Person, 15.0, style::ON_ACCENT),
+            text(label).size(14).font(SEMIBOLD),
+        ]
+        .spacing(8)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([9, 18]))
+    .style(style::pill(app.accent))
+    .on_press_maybe((!app.logging_in).then_some(Message::Login))
+    .into()
 }
 
 pub fn playlist_page(app: &App) -> El<'_> {
@@ -2967,25 +3000,10 @@ pub fn account_widget(app: &App) -> El<'_> {
             .into()
         }
         AccountView::Connecting => muted("Connexion au compte YouTube…"),
-        AccountView::Disconnected => button(
-            row![
-                icon(Icon::Logout, 15.0, style::TEXT),
-                text("Se connecter (session Firefox)")
-                    .size(13)
-                    .font(SEMIBOLD),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center),
-        )
-        .width(Length::Fill)
-        .padding(Padding::from([8, 12]))
-        .style(style::pill_ghost)
-        .on_press(Message::Lib(Lib::Reconnect))
-        .into(),
-        AccountView::Unavailable(e) => row![
+        AccountView::Unavailable(e) if is_network_error(e) => row![
             column![
-                text("Compte indisponible").size(13).font(SEMIBOLD),
-                text(e.chars().take(80).collect::<String>())
+                text("YouTube injoignable").size(13).font(SEMIBOLD),
+                text("Nouvel essai chaque minute")
                     .size(11)
                     .color(style::TEXT_FAINT),
             ]
@@ -3001,6 +3019,25 @@ pub fn account_widget(app: &App) -> El<'_> {
         ]
         .spacing(8)
         .align_y(Alignment::Center)
+        .into(),
+        AccountView::Unavailable(_) | AccountView::Disconnected => button(
+            row![
+                icon(Icon::Person, 15.0, style::TEXT),
+                text(if app.logging_in {
+                    "Connexion en cours…"
+                } else {
+                    "Se connecter à YouTube"
+                })
+                .size(13)
+                .font(SEMIBOLD),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
+        )
+        .width(Length::Fill)
+        .padding(Padding::from([8, 12]))
+        .style(style::pill_ghost)
+        .on_press_maybe((!app.logging_in).then_some(Message::Login))
         .into(),
     }
 }

@@ -6,6 +6,9 @@
 use anyhow::{Context, Result};
 use ytmr_core::{AppPaths, Config};
 
+#[cfg(windows)]
+mod login;
+
 fn main() -> Result<()> {
     configure_renderer();
     #[cfg(windows)]
@@ -19,11 +22,20 @@ fn main() -> Result<()> {
     {
         eprintln!("dossier de travail : {e}");
     }
+    let args: Vec<String> = std::env::args().collect();
+    let paths = AppPaths::discover()?;
+    // `ytmr --login` : seulement la fenêtre de connexion (lancée par ytmr).
+    #[cfg(windows)]
+    if args.iter().any(|a| a == "--login") {
+        std::process::exit(login::run(paths.cache_dir.join("webview-login")));
+    }
     // ytmr tourne déjà (peut-être caché près de l'horloge) : on le ramène.
-    if !ytmr_gui::claim_instance() {
+    // `--relaunch` (redémarrage après la connexion) : on attend que
+    // l'instance précédente ait fini de se fermer.
+    let relaunch = args.iter().any(|a| a == "--relaunch");
+    if !ytmr_gui::claim_instance(relaunch) {
         return Ok(());
     }
-    let paths = AppPaths::discover()?;
     let config_file = paths.config_file();
     let mut config = Config::load_or_create(&config_file)
         .with_context(|| format!("chargement de {}", config_file.display()))?;

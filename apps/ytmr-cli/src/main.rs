@@ -134,6 +134,7 @@ async fn play(config: &Config, query: &str, all: bool, autoplay: bool) -> Result
         ResolverOptions {
             fast_client: fast_client.map(str::to_owned),
             cookies_from_browser: config.player.cookies_from_browser().map(str::to_owned),
+            session: None,
             raw_options: config.player.ytdl_raw_options.clone(),
             cache_file: None,
             audio_cache: None,
