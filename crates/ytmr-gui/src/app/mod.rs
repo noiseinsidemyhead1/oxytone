@@ -346,6 +346,8 @@ pub enum Message {
     /// Minuteur de sommeil : réglé, ou annulé (`None`).
     Sleep(Option<SleepChoice>),
     SleepTick,
+    /// Ctrl + Z : remet le dernier morceau retiré de la file.
+    UndoRemove,
     Toast(String),
     SearchTab(SearchTab),
     /// Relancer une recherche récente.
@@ -574,6 +576,10 @@ pub struct App {
     /// Dernier clic gauche (menus ouverts par un bouton).
     pub left_point: iced::Point,
     pub sleep: Option<Sleep>,
+    /// Morceaux retirés de la file (Ctrl + Z les remet à leur place).
+    undo_removed: Vec<(Track, usize)>,
+    /// Morceau remis par Ctrl + Z, à replacer dès que la file revient.
+    undo_move: Option<(String, usize)>,
     /// Volume d'avant la baisse progressive (rendu à l'arrêt).
     sleep_volume: Option<u8>,
     pub context_menu: Option<(iced::Point, crate::context::Target)>,
@@ -690,6 +696,8 @@ impl App {
             context_point: iced::Point::ORIGIN,
             left_point: iced::Point::ORIGIN,
             sleep: None,
+            undo_removed: Vec::new(),
+            undo_move: None,
             sleep_volume: None,
             context_menu: None,
             lyrics: HashMap::new(),

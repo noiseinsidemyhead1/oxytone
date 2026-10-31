@@ -36,6 +36,7 @@ impl App {
                 Task::none()
             }
             Key::Character("l" | "L") if !modifiers.control() => self.like_shortcut(),
+            Key::Character("z" | "Z") if modifiers.control() => self.update(Message::UndoRemove),
             Key::Character("m" | "M") if !modifiers.control() => self.update(Message::ToggleMute),
             Key::Named(key::Named::ArrowUp) => {
                 let volume = self.state.volume.saturating_add(5).min(100);

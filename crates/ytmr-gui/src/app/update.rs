@@ -597,7 +597,26 @@ impl App {
                 }
                 Task::none()
             }
-            Message::Remove(id) => self.send(Command::Remove(id)),
+            Message::Remove(id) => {
+                // Gardé pour Ctrl + Z (20 derniers retraits).
+                if let Some(index) = self.queue.entries.iter().position(|e| e.id == id) {
+                    let track = self.queue.entries[index].track.clone();
+                    self.undo_removed.push((track, index));
+                    if self.undo_removed.len() > 20 {
+                        self.undo_removed.remove(0);
+                    }
+                }
+                let toast = self.show_toast("Retiré de la file · Ctrl + Z pour annuler".into());
+                Task::batch([self.send(Command::Remove(id)), toast])
+            }
+            Message::UndoRemove => {
+                let Some((track, index)) = self.undo_removed.pop() else {
+                    return Task::none();
+                };
+                // Remis en fin de file, puis replacé quand la file revient.
+                self.undo_move = Some((track.video_id.clone(), index));
+                self.send(Command::Enqueue(vec![track]))
+            }
             Message::ClearQueue => self.send(Command::ClearUpcoming),
             // Une fenêtre (ajout à une playlist, menu) couvre la page : ce qui
             // est dessous ne réagit pas au survol (ni préchargement inutile).

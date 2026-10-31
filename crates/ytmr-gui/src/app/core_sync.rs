@@ -83,6 +83,19 @@ impl App {
                     self.queue_fade = Some(crate::anim::QueueFade::new(now));
                 }
                 self.queue = queue;
+                // Morceau remis par Ctrl + Z : à sa place d'avant.
+                let replace = self.undo_move.take().and_then(|(video_id, to)| {
+                    let entry = self
+                        .queue
+                        .entries
+                        .iter()
+                        .rposition(|e| e.track.video_id == video_id)?;
+                    let id = self.queue.entries[entry].id;
+                    (entry != to).then(|| self.send(Command::Move { id, to: to.max(1) }))
+                });
+                if let Some(task) = replace {
+                    return Task::batch([task, self.request_visible_covers()]);
+                }
                 // Seulement les lignes visibles : une file de 900 titres ne doit
                 // pas déclencher 900 téléchargements.
                 self.request_visible_covers()
