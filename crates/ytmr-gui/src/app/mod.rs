@@ -116,6 +116,23 @@ pub enum SearchTab {
     Artists,
 }
 
+/// Minuteur de sommeil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sleep {
+    /// Arrêt à cet instant (le volume baisse pendant `SLEEP_FADE` avant).
+    At(std::time::Instant),
+    EndOfTrack,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SleepChoice {
+    Minutes(u64),
+    EndOfTrack,
+}
+
+/// Baisse progressive du volume avant l'arrêt du minuteur.
+pub const SLEEP_FADE: Duration = Duration::from_secs(30);
+
 /// Recherches récentes gardées.
 pub const RECENT_SEARCHES: usize = 12;
 
@@ -326,6 +343,9 @@ pub enum Message {
     Noop,
     CloseRequested,
     Import(crate::import::Imp),
+    /// Minuteur de sommeil : réglé, ou annulé (`None`).
+    Sleep(Option<SleepChoice>),
+    SleepTick,
     Toast(String),
     SearchTab(SearchTab),
     /// Relancer une recherche récente.
@@ -551,6 +571,11 @@ pub struct App {
     pub scale_factor: f32,
     /// Dernier clic droit (position dans la fenêtre).
     pub context_point: iced::Point,
+    /// Dernier clic gauche (menus ouverts par un bouton).
+    pub left_point: iced::Point,
+    pub sleep: Option<Sleep>,
+    /// Volume d'avant la baisse progressive (rendu à l'arrêt).
+    sleep_volume: Option<u8>,
     pub context_menu: Option<(iced::Point, crate::context::Target)>,
     /// Paroles par morceau (`Ready(None)` : aucune source n'en a).
     pub lyrics: HashMap<String, Load<Option<Lyrics>>>,
@@ -663,6 +688,9 @@ impl App {
             window_size: iced::Size::new(1320.0, 860.0),
             scale_factor: 1.0,
             context_point: iced::Point::ORIGIN,
+            left_point: iced::Point::ORIGIN,
+            sleep: None,
+            sleep_volume: None,
             context_menu: None,
             lyrics: HashMap::new(),
             suggestions: Vec::new(),
@@ -770,6 +798,11 @@ impl App {
                 )) => Some(Message::QueueDrag(QueueDrag::Release)),
                 _ => None,
             }));
+        }
+        // Minuteur de sommeil : une vérification par seconde.
+        if matches!(self.sleep, Some(Sleep::At(_))) {
+            subscriptions
+                .push(iced::time::every(Duration::from_secs(1)).map(|_| Message::SleepTick));
         }
         // Fichier CSV déposé sur la fenêtre pendant un import Spotify.
         if self.import.is_some() {

@@ -32,6 +32,8 @@ pub enum Target {
     Album(AlbumSummary),
     Artist(ArtistSummary),
     Playlist(PlaylistSummary),
+    /// Minuteur de sommeil (bouton lune de la barre).
+    Sleep,
 }
 
 #[derive(Debug, Clone)]
@@ -46,6 +48,8 @@ pub enum Ctx {
     ArtistRadio(String),
     ArtistSongs(Result<Vec<Track>, String>),
     Copy(String),
+    /// Position du dernier clic gauche.
+    LeftPoint(Point),
 }
 
 /// Raccourci pour les vues : message d'ouverture du menu.
@@ -56,6 +60,10 @@ pub fn open(target: Target) -> Message {
 impl App {
     pub fn update_context(&mut self, message: Ctx) -> Task<Message> {
         match message {
+            Ctx::LeftPoint(point) => {
+                self.left_point = point;
+                Task::none()
+            }
             Ctx::Point(point) => {
                 self.context_point = point;
                 // Un clic droit ailleurs referme le menu ouvert.
@@ -73,7 +81,12 @@ impl App {
                     }
                     other => other,
                 };
-                self.context_menu = Some((self.context_point, target));
+                let point = if matches!(target, Target::Sleep) {
+                    self.left_point
+                } else {
+                    self.context_point
+                };
+                self.context_menu = Some((point, target));
                 Task::none()
             }
             Ctx::Close => {
@@ -207,6 +220,8 @@ fn item_icon(label: &str) -> Icon {
         "Ouvrir la playlist" => Icon::Library,
         "Retirer de la bibliothèque" | "Ne plus suivre" => Icon::HeartFilled,
         "Ajouter à la bibliothèque" | "Suivre" => Icon::Heart,
+        "Fin du morceau" | "15 minutes" | "30 minutes" | "45 minutes" | "1 heure" => Icon::Moon,
+        "Annuler le minuteur" => Icon::Close,
         _ => Icon::Music,
     }
 }
@@ -360,6 +375,18 @@ fn items(app: &App, target: &Target) -> Vec<(&'static str, Message)> {
                 ))),
             ));
         }
+        Target::Sleep => {
+            use crate::app::SleepChoice;
+            let set = |c: SleepChoice| close_then(Message::Sleep(Some(c)));
+            out.push(("15 minutes", set(SleepChoice::Minutes(15))));
+            out.push(("30 minutes", set(SleepChoice::Minutes(30))));
+            out.push(("45 minutes", set(SleepChoice::Minutes(45))));
+            out.push(("1 heure", set(SleepChoice::Minutes(60))));
+            out.push(("Fin du morceau", set(SleepChoice::EndOfTrack)));
+            if app.sleep.is_some() {
+                out.push(("Annuler le minuteur", close_then(Message::Sleep(None))));
+            }
+        }
         Target::Playlist(p) => {
             out.push((
                 "Ouvrir la playlist",
@@ -453,15 +480,18 @@ pub fn menu(app: &App) -> Option<El<'_>> {
 pub struct PointCatcher<'a, Message, Theme, Renderer> {
     content: Element<'a, Message, Theme, Renderer>,
     on_right: Box<dyn Fn(Point) -> Message + 'a>,
+    on_left: Box<dyn Fn(Point) -> Message + 'a>,
 }
 
 pub fn catch_points<'a, Message, Theme, Renderer>(
     content: impl Into<Element<'a, Message, Theme, Renderer>>,
     on_right: impl Fn(Point) -> Message + 'a,
+    on_left: impl Fn(Point) -> Message + 'a,
 ) -> PointCatcher<'a, Message, Theme, Renderer> {
     PointCatcher {
         content: content.into(),
         on_right: Box::new(on_right),
+        on_left: Box::new(on_left),
     }
 }
 
@@ -521,6 +551,13 @@ where
         {
             // Publié avant la cible : les messages sont traités dans l'ordre.
             shell.publish((self.on_right)(position));
+        }
+        // Clic gauche : position gardée pour les menus ouverts par un bouton
+        // (minuteur de sommeil).
+        if let Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) = event
+            && let Some(position) = cursor.position()
+        {
+            shell.publish((self.on_left)(position));
         }
         self.content.as_widget_mut().update(
             &mut tree.children[0],

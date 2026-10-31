@@ -30,6 +30,15 @@ impl App {
                     self.follow_lyrics();
                     return report;
                 }
+                // Minuteur « fin du morceau » : le suivant s'arrête aussitôt.
+                if self.sleep == Some(Sleep::EndOfTrack) && previous.is_some() {
+                    self.sleep = None;
+                    return Task::batch([
+                        self.send(Command::Pause),
+                        self.send(Command::Seek(Duration::ZERO)),
+                        self.show_toast("Bonne nuit".to_owned()),
+                    ]);
+                }
                 // Nouveau morceau : les anciennes paroles s'estompent (figées sur
                 // leur dernière ligne), puis la liste remonte et les nouvelles
                 // apparaissent en fondu. Avant : saut en haut et « Chargement… ».

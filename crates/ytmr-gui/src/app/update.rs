@@ -931,6 +931,52 @@ impl App {
             Message::Settings(message) => self.update_settings(message),
             Message::Stats(message) => self.update_stats(message),
             Message::Import(message) => self.update_import(message),
+            Message::Sleep(choice) => {
+                let restore = self.sleep_volume.take();
+                self.sleep = choice.map(|c| match c {
+                    SleepChoice::Minutes(m) => {
+                        Sleep::At(std::time::Instant::now() + Duration::from_secs(m * 60))
+                    }
+                    SleepChoice::EndOfTrack => Sleep::EndOfTrack,
+                });
+                let toast = self.show_toast(match choice {
+                    Some(SleepChoice::Minutes(60)) => "Arrêt dans 1 heure".to_owned(),
+                    Some(SleepChoice::Minutes(m)) => format!("Arrêt dans {m} minutes"),
+                    Some(SleepChoice::EndOfTrack) => "Arrêt à la fin du morceau".to_owned(),
+                    None => "Minuteur annulé".to_owned(),
+                });
+                // Annulé pendant la baisse : le volume revient.
+                match restore {
+                    Some(volume) => Task::batch([toast, self.send(Command::SetVolume(volume))]),
+                    None => toast,
+                }
+            }
+            Message::SleepTick => {
+                let Some(Sleep::At(at)) = self.sleep else {
+                    return Task::none();
+                };
+                let left = at.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    // Arrêt : pause, puis le volume d'avant (pour la prochaine écoute).
+                    self.sleep = None;
+                    let volume = self.sleep_volume.take().unwrap_or(self.state.volume);
+                    return Task::batch([
+                        self.send(Command::Pause),
+                        self.send(Command::SetVolume(volume)),
+                        self.show_toast("Bonne nuit".to_owned()),
+                    ]);
+                }
+                if left <= SLEEP_FADE && self.state.status == Status::Playing {
+                    // Baisse progressive sur les dernières secondes.
+                    let start = *self.sleep_volume.get_or_insert(self.state.volume);
+                    let level = left.as_secs_f32() / SLEEP_FADE.as_secs_f32();
+                    let volume = (f32::from(start) * level).round() as u8;
+                    if volume != self.state.volume {
+                        return self.send(Command::SetVolume(volume));
+                    }
+                }
+                Task::none()
+            }
             Message::Toast(message) => self.show_toast(message),
             Message::Coll(message) => self.update_collection(message),
             Message::Window(action) => self.update_window(action),

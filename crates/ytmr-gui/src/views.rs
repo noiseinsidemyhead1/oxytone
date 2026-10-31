@@ -129,6 +129,7 @@ pub fn view(app: &App) -> El<'_> {
             .height(Length::Fill)
             .style(style::window_bg),
         |point| Message::Context(crate::context::Ctx::Point(point)),
+        |point| Message::Context(crate::context::Ctx::LeftPoint(point)),
     )
     .into()
 }
@@ -2210,7 +2211,22 @@ fn player_bar(app: &App) -> El<'_> {
         Icon::Volume
     };
     let lyrics_open = app.lyrics_shown();
+    let sleep_tip = match app.sleep {
+        Some(crate::app::Sleep::At(at)) => {
+            let left = at.saturating_duration_since(std::time::Instant::now());
+            format!("Arrêt dans {} min", left.as_secs().div_ceil(60))
+        }
+        Some(crate::app::Sleep::EndOfTrack) => "Arrêt à la fin du morceau".to_owned(),
+        None => "Minuteur de sommeil".to_owned(),
+    };
     let right = row![
+        icon_tip(
+            Icon::Moon,
+            17.0,
+            lit(app.sleep.is_some()),
+            Message::Context(crate::context::Ctx::Open(crate::context::Target::Sleep)),
+            sleep_tip,
+        ),
         icon_tip(
             Icon::Mic,
             17.0,
