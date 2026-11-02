@@ -9,6 +9,12 @@
 //! yt-dlp s'installe tout seul dans un environnement Python privé (dossier de
 //! cache de ytmr), sans rien toucher au Python du système. Sans Python, ytmr
 //! continue simplement avec l'exécutable.
+//!
+//! Au lancement ([`launch`]), le worker démarre tout de suite avec
+//! l'environnement existant (~0,5 s) ; la mise à jour quotidienne de yt-dlp
+//! ([`update_if_due`]) se fait ensuite en fond. Avant, elle passait d'abord :
+//! ~1 s de plus chaque jour, 11 à 14 s les jours de nouvelle version (mesuré
+//! le 2026-11-02).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -158,6 +164,8 @@ pub struct Worker {
     pending: Pending,
     next_id: AtomicU64,
     alive: Arc<AtomicBool>,
+    /// Version de yt-dlp chargée par ce processus.
+    version: String,
     _child: Child,
 }
 
@@ -187,7 +195,8 @@ impl Worker {
             .map_err(|e| e.to_string())?
             .ok_or("le worker yt-dlp s'est arrêté au démarrage")?;
         let ready: Value = serde_json::from_str(&ready).map_err(|e| e.to_string())?;
-        tracing::info!(version = %ready["version"], "worker yt-dlp prêt");
+        let version = ready["version"].as_str().unwrap_or_default().to_owned();
+        tracing::info!(%version, "worker yt-dlp prêt");
 
         let pending: Pending = Arc::default();
         let alive = Arc::new(AtomicBool::new(true));
@@ -197,8 +206,14 @@ impl Worker {
             pending,
             next_id: AtomicU64::new(1),
             alive,
+            version,
             _child: child,
         })
+    }
+
+    /// Version de yt-dlp chargée par ce processus.
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     pub fn is_alive(&self) -> bool {
@@ -285,13 +300,157 @@ async fn read_loop(
     tracing::warn!("worker yt-dlp arrêté");
 }
 
+/// Démarre le worker au plus vite.
+///
+/// Environnement présent : le worker part tout de suite, sans vérification ni
+/// mise à jour (c'est son démarrage qui vérifie). S'il ne démarre pas,
+/// l'environnement est réparé (yt-dlp réinstallé de force : un simple
+/// `--upgrade` ne fait rien si ses métadonnées sont restées) ; en dernier
+/// recours, ou si Python lui-même ne répond plus, il est recréé de zéro.
+/// Environnement absent : création complète ([`ensure_env`]).
+pub async fn launch(dir: &Path, options: &Value) -> Result<Worker, String> {
+    let python = venv_python(dir);
+    if python.exists() {
+        match Worker::spawn(&python, options).await {
+            Ok(worker) => return Ok(worker),
+            Err(e) => tracing::warn!("environnement yt-dlp inutilisable ({e}) : réparation"),
+        }
+        if run(&python, ["-c", "import sys"], false).await.is_ok() {
+            match run(&python, PIP_REPAIR, false).await {
+                Ok(()) => {
+                    let _ = std::fs::write(dir.join(MARKER), b"");
+                    match Worker::spawn(&python, options).await {
+                        Ok(worker) => return Ok(worker),
+                        Err(e) => tracing::warn!("worker toujours en échec après réparation : {e}"),
+                    }
+                }
+                Err(e) => tracing::warn!("réinstallation de yt-dlp : {e}"),
+            }
+        }
+        // Python de l'environnement cassé (interpréteur déplacé ou
+        // désinstallé) ou réparation sans effet : on le recrée de zéro. Garde :
+        // seulement un dossier qui est bien un environnement Python.
+        if !dir.join("pyvenv.cfg").exists() {
+            return Err(format!(
+                "{} n'est pas un environnement Python",
+                dir.display()
+            ));
+        }
+        tracing::warn!(dir = %dir.display(), "environnement Python recréé");
+        std::fs::remove_dir_all(dir)
+            .map_err(|e| format!("suppression de {} : {e}", dir.display()))?;
+    }
+    let python = ensure_env(dir).await?;
+    Worker::spawn(&python, options).await
+}
+
+/// Mise à jour quotidienne de yt-dlp, à lancer en fond une fois le worker
+/// prêt (priorité basse). Le worker en cours garde sa version en mémoire.
+/// Rend la version installée si elle diffère de `running` (le worker est
+/// alors à relancer pour en profiter).
+pub async fn update_if_due(dir: &Path, running: &str) -> Result<Option<String>, String> {
+    if !update_due(dir) {
+        return Ok(None);
+    }
+    let python = venv_python(dir);
+    remove_pip_leftovers(dir);
+    tracing::info!("mise à jour de yt-dlp en fond");
+    let started = std::time::Instant::now();
+    run(&python, PIP_UPGRADE, true).await?;
+    let _ = std::fs::write(dir.join(MARKER), b"");
+    let installed = installed_version(&python).await?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis(),
+        %installed,
+        running,
+        "mise à jour de yt-dlp terminée"
+    );
+    Ok((installed != running).then_some(installed))
+}
+
+/// Sous Windows, pip ne peut pas effacer une bibliothèque compilée (`.pyd`)
+/// chargée par le worker en cours : il la renomme `~…` et la laisse (vérifié
+/// le 2026-11-02 avec pycryptodomex). À la mise à jour suivante, plus aucun
+/// processus ne la tient : on l'efface.
+fn remove_pip_leftovers(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join("Lib").join("site-packages")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry.file_name().to_string_lossy().starts_with('~') {
+            let path = entry.path();
+            let removed = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = removed {
+                tracing::debug!(path = %path.display(), error = %e, "reste de pip");
+            }
+        }
+    }
+}
+
+/// Python de l'environnement privé (qu'il existe ou non).
+pub fn python_path(dir: &Path) -> PathBuf {
+    venv_python(dir)
+}
+
+/// Marqueur de la dernière mise à jour de yt-dlp.
+const MARKER: &str = "ytmr-updated";
+
+const PIP_UPGRADE: [&str; 7] = [
+    "-m",
+    "pip",
+    "install",
+    "--quiet",
+    "--disable-pip-version-check",
+    "--upgrade",
+    "yt-dlp[default]",
+];
+
+const PIP_REPAIR: [&str; 8] = [
+    "-m",
+    "pip",
+    "install",
+    "--quiet",
+    "--disable-pip-version-check",
+    "--upgrade",
+    "--force-reinstall",
+    "yt-dlp[default]",
+];
+
+/// Dernière mise à jour il y a plus d'un jour (ou jamais).
+fn update_due(dir: &Path) -> bool {
+    std::fs::metadata(dir.join(MARKER))
+        .and_then(|m| m.modified())
+        .map(|t| SystemTime::now().duration_since(t).unwrap_or_default() > UPDATE_EVERY)
+        .unwrap_or(true)
+}
+
+async fn installed_version(python: &Path) -> Result<String, String> {
+    let mut cmd = crate::process::command(python);
+    cmd.args([
+        "-c",
+        "import yt_dlp.version; print(yt_dlp.version.__version__)",
+    ])
+    .stdin(Stdio::null())
+    .stderr(Stdio::null())
+    .kill_on_drop(true);
+    let output = tokio::time::timeout(INSTALL_TIMEOUT, cmd.output())
+        .await
+        .map_err(|_| "version de yt-dlp : trop long".to_owned())?
+        .map_err(|e| format!("version de yt-dlp : {e}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 /// Python de l'environnement privé, créé et rempli au premier appel.
 ///
 /// Peut prendre une minute la première fois (téléchargement de yt-dlp) : à
 /// appeler en tâche de fond. Met yt-dlp à jour une fois par jour.
 pub async fn ensure_env(dir: &Path) -> Result<PathBuf, String> {
     let python = venv_python(dir);
-    let marker = dir.join("ytmr-updated");
+    let marker = dir.join(MARKER);
     if !python.exists() {
         tracing::info!(dir = %dir.display(), "création de l'environnement Python pour yt-dlp");
         let (launcher, args) = system_python()
@@ -303,28 +462,13 @@ pub async fn ensure_env(dir: &Path) -> Result<PathBuf, String> {
                 .map(String::as_str)
                 .chain(["-m", "venv"])
                 .chain([dir.to_str().unwrap_or_default()]),
+            false,
         )
         .await?;
     }
-    let stale = std::fs::metadata(&marker)
-        .and_then(|m| m.modified())
-        .map(|t| SystemTime::now().duration_since(t).unwrap_or_default() > UPDATE_EVERY)
-        .unwrap_or(true);
-    if stale || !has_yt_dlp(&python).await {
+    if update_due(dir) || !has_yt_dlp(&python).await {
         tracing::info!("installation / mise à jour de yt-dlp dans l'environnement privé");
-        run(
-            &python,
-            [
-                "-m",
-                "pip",
-                "install",
-                "--quiet",
-                "--disable-pip-version-check",
-                "--upgrade",
-                "yt-dlp[default]",
-            ],
-        )
-        .await?;
+        run(&python, PIP_UPGRADE, false).await?;
         let _ = std::fs::write(&marker, b"");
     }
     Ok(python)
@@ -339,7 +483,7 @@ fn venv_python(dir: &Path) -> PathBuf {
 }
 
 async fn has_yt_dlp(python: &Path) -> bool {
-    run(python, ["-c", "import yt_dlp"]).await.is_ok()
+    run(python, ["-c", "import yt_dlp"], false).await.is_ok()
 }
 
 /// Lanceur Python du système : `py -3` sous Windows, `python3` ailleurs.
@@ -351,7 +495,7 @@ async fn system_python() -> Option<(PathBuf, Vec<String>)> {
     };
     for (program, args) in candidates {
         let check = args.iter().copied().chain(["-c", "import venv"]);
-        if run(Path::new(program), check).await.is_ok() {
+        if run(Path::new(program), check, false).await.is_ok() {
             return Some((
                 PathBuf::from(program),
                 args.iter().map(|s| (*s).to_owned()).collect(),
@@ -361,8 +505,16 @@ async fn system_python() -> Option<(PathBuf, Vec<String>)> {
     None
 }
 
-async fn run<'a>(program: &Path, args: impl IntoIterator<Item = &'a str>) -> Result<(), String> {
+/// `low` : priorité processeur basse (travail de fond).
+async fn run<'a>(
+    program: &Path,
+    args: impl IntoIterator<Item = &'a str>,
+    low: bool,
+) -> Result<(), String> {
     let mut cmd = crate::process::command(program);
+    if low {
+        crate::process::below_normal_priority(&mut cmd);
+    }
     cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -381,5 +533,56 @@ async fn run<'a>(program: &Path, args: impl IntoIterator<Item = &'a str>) -> Res
             program.display(),
             stderr.lines().last().unwrap_or("sans message")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lancement réel sur un environnement jetable :
+    /// `YTMR_TEST_ENV=<dossier> cargo test -p ytmr-player --release -- --ignored --nocapture launch_then_update`.
+    /// Pendant la mise à jour, l'ancien worker résout un morceau ; après une
+    /// nouvelle version, un nouveau worker est lancé et résout à son tour.
+    #[tokio::test]
+    #[ignore = "réseau, installe yt-dlp dans YTMR_TEST_ENV"]
+    async fn launch_then_update() {
+        let dir = PathBuf::from(std::env::var("YTMR_TEST_ENV").expect("YTMR_TEST_ENV"));
+        let options = json!({ "quiet": true, "no_warnings": true, "noplaylist": true,
+                              "skip_download": true, "js_runtimes": { "node": {} } });
+        let url = "https://music.youtube.com/watch?v=dQw4w9WgXcQ";
+        let started = std::time::Instant::now();
+        let worker = launch(&dir, &options).await.expect("launch");
+        println!(
+            "worker prêt : {} ms (yt-dlp {})",
+            started.elapsed().as_millis(),
+            worker.version()
+        );
+
+        let started = std::time::Instant::now();
+        let (update, during) = tokio::join!(
+            update_if_due(&dir, worker.version()),
+            worker.extract(url, "bestaudio/best"),
+        );
+        println!(
+            "mise à jour : {} ms -> {:?} ; résolution pendant la mise à jour : {}",
+            started.elapsed().as_millis(),
+            update,
+            if during.is_ok() { "ok" } else { "échec" }
+        );
+        if let Ok(Some(_)) = update {
+            let started = std::time::Instant::now();
+            let fresh = Worker::spawn(&python_path(&dir), &options)
+                .await
+                .expect("relance");
+            let resolved = fresh.extract(url, "bestaudio/best").await;
+            println!(
+                "relance : yt-dlp {} prêt et résolution {} en {} ms ; ancien worker vivant : {}",
+                fresh.version(),
+                if resolved.is_ok() { "ok" } else { "en échec" },
+                started.elapsed().as_millis(),
+                worker.is_alive()
+            );
+        }
     }
 }

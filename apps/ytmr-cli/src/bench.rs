@@ -16,7 +16,7 @@ use ytmr_catalog::Catalog;
 use ytmr_core::{AppPaths, Config};
 use ytmr_player::resolve::itag_param;
 use ytmr_player::session::SessionCookie;
-use ytmr_player::worker::{self, Worker};
+use ytmr_player::worker;
 use ytmr_player::{
     Dependencies, MediaSource, MpvPlayer, Player, PlayerEvent, Priority, Resolver, ResolverOptions,
     StartMode, YtDlpResolver,
@@ -111,12 +111,11 @@ pub async fn run(config: &Config, paths: &AppPaths, opts: Options) -> Result<()>
     ));
     // Le worker comme dans l'appli (branché bien avant le premier clic).
     if let Some(options) = resolver.worker_options() {
-        let python = worker::ensure_env(&paths.cache_dir.join("ytdlp-env"))
+        let started = Instant::now();
+        let w = worker::launch(&paths.cache_dir.join("ytdlp-env"), &options)
             .await
             .map_err(anyhow::Error::msg)?;
-        let w = Worker::spawn(&python, &options)
-            .await
-            .map_err(anyhow::Error::msg)?;
+        println!("worker prêt en {} ms", started.elapsed().as_millis());
         resolver.attach_worker(w);
         // Détection Premium du worker, faite en fond au lancement.
         tokio::time::sleep(Duration::from_secs(5)).await;

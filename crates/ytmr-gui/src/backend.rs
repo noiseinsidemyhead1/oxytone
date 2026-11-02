@@ -244,17 +244,15 @@ fn start_worker(
     let resolver = Arc::clone(resolver);
     tokio::spawn(async move {
         let started = std::time::Instant::now();
-        let worker = match worker::ensure_env(&env_dir).await {
-            Ok(python) => Worker::spawn(&python, &options).await,
-            Err(e) => Err(e),
-        };
-        match worker {
+        match worker::launch(&env_dir, &options).await {
             Ok(w) => {
+                let version = w.version().to_owned();
                 resolver.attach_worker(w);
                 tracing::info!(
                     elapsed_ms = started.elapsed().as_millis(),
                     "worker yt-dlp branché"
                 );
+                update_worker(Arc::clone(&resolver), env_dir, options, version);
             }
             Err(e) => {
                 tracing::warn!("worker yt-dlp indisponible : {e}");
@@ -263,6 +261,33 @@ fn start_worker(
             }
         }
         account.send_replace(connect_account(&resolver).await);
+    });
+}
+
+/// Mise à jour quotidienne de yt-dlp en fond. Si une nouvelle version arrive,
+/// un nouveau worker la charge et remplace l'ancien : les résolutions en
+/// cours finissent sur l'ancien, qui s'arrête ensuite de lui-même (dernière
+/// référence libérée). Un correctif de yt-dlp sert donc dès ce lancement.
+fn update_worker(
+    resolver: Arc<YtDlpResolver>,
+    env_dir: std::path::PathBuf,
+    options: serde_json::Value,
+    running: String,
+) {
+    tokio::spawn(async move {
+        match worker::update_if_due(&env_dir, &running).await {
+            Ok(None) => {}
+            Ok(Some(version)) => {
+                match Worker::spawn(&worker::python_path(&env_dir), &options).await {
+                    Ok(w) => {
+                        resolver.attach_worker(w);
+                        tracing::info!(%version, "worker yt-dlp relancé sur la nouvelle version");
+                    }
+                    Err(e) => tracing::warn!("relance du worker après mise à jour : {e}"),
+                }
+            }
+            Err(e) => tracing::warn!("mise à jour de yt-dlp en fond : {e}"),
+        }
     });
 }
 
