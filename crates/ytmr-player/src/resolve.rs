@@ -42,6 +42,11 @@ use crate::worker::Worker;
 const ACCOUNT_CLIENT: &str = "web_music";
 const ACCOUNT_SKIP: &str = "webpage,configs";
 
+/// Avec la session de « Se connecter », attente maximale du worker au
+/// lancement (seul lui sait se servir de la session ; l'exécutable jouerait
+/// sans compte : format 251 et ~4 s d'attente `available_at`, mesuré le
+/// 2026-11-02). Couvre la mise à jour quotidienne de yt-dlp.
+const WORKER_WAIT: Duration = Duration::from_secs(15);
 /// Au-delà, yt-dlp est considéré bloqué.
 const RESOLVE_TIMEOUT: Duration = Duration::from_secs(30);
 /// Une adresse est jetée du cache un peu avant son expiration réelle.
@@ -180,6 +185,8 @@ pub struct YtDlpResolver {
     node: bool,
     worker_allowed: bool,
     worker: Mutex<Option<Arc<Worker>>>,
+    /// Passe à `true` quand le worker est branché.
+    worker_attached: watch::Sender<bool>,
     cache_file: Option<PathBuf>,
     cache: Mutex<HashMap<String, MediaSource>>,
     audio: Option<Arc<crate::AudioCache>>,
@@ -216,6 +223,7 @@ impl YtDlpResolver {
             node,
             worker_allowed: options.raw_options.is_empty(),
             worker: Mutex::default(),
+            worker_attached: watch::Sender::new(false),
             cache_file: options.cache_file,
             cache: Mutex::new(cache),
             audio: options.audio_cache,
@@ -264,6 +272,32 @@ impl YtDlpResolver {
     /// Branche le worker : les résolutions « qualité » passeront par lui.
     pub fn attach_worker(&self, worker: Worker) {
         *lock(&self.worker) = Some(Arc::new(worker));
+        self.worker_attached.send_replace(true);
+    }
+
+    /// Worker à utiliser pour cette résolution, s'il y a lieu.
+    ///
+    /// Toujours pour la qualité ; aussi pour un démarrage à froid sans client
+    /// rapide (cas d'un compte) : l'exécutable donnerait le même résultat en
+    /// plus lent, et sans la session de « Se connecter », qu'il ne reçoit pas.
+    async fn worker_for(&self, mode: StartMode) -> Option<Arc<Worker>> {
+        if mode == StartMode::Fast && self.fast_client.is_some() {
+            return None;
+        }
+        if let Some(worker) = self.live_worker() {
+            return Some(worker);
+        }
+        if self.session.is_some() && self.worker_allowed {
+            let mut attached = self.worker_attached.subscribe();
+            if tokio::time::timeout(WORKER_WAIT, attached.wait_for(|a| *a))
+                .await
+                .is_err()
+            {
+                tracing::warn!("worker yt-dlp pas prêt : lecture sans le compte (exécutable)");
+            }
+            return self.live_worker();
+        }
+        None
     }
 
     /// Session YouTube du navigateur configuré, lue par le worker.
@@ -338,8 +372,7 @@ impl YtDlpResolver {
                 let _slot = semaphore.acquire().await.map_err(|_| PlayerError::Closed)?;
                 let file_ms = queued.elapsed().as_millis();
                 let started = std::time::Instant::now();
-                let (source, available_at) =
-                    match self.live_worker().filter(|_| mode == StartMode::Quality) {
+                let (source, available_at) = match self.worker_for(mode).await {
                         Some(worker) => {
                             tracing::Span::current().record("voie", "worker");
                             match self.run_worker(&worker, video_id).await {
