@@ -84,6 +84,9 @@ pub enum PlayerEvent {
     Started(EntryId),
     /// Le morceau est ouvert et le son va sortir.
     Loaded,
+    /// Le son sort vraiment (`playback-restart` de mpv : après une ouverture
+    /// ou un saut). Sert à mesurer le démarrage.
+    Restarted,
     Paused(bool),
     /// Position courante, envoyée au plus toutes les 250 ms.
     Position(Duration),

@@ -7907,10 +7907,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "serde_json",
  "tokio",
  "tracing",
  "ytmr-catalog",
  "ytmr-core",
+ "ytmr-os",
  "ytmr-player",
 ]
 

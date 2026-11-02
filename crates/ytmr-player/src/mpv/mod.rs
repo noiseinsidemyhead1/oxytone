@@ -275,6 +275,7 @@ async fn translate_events(
                 entry.map(PlayerEvent::Started)
             }
             Some("file-loaded") => Some(PlayerEvent::Loaded),
+            Some("playback-restart") => Some(PlayerEvent::Restarted),
             Some("end-file") => Some(PlayerEvent::Ended {
                 entry,
                 reason: end_reason(&msg),

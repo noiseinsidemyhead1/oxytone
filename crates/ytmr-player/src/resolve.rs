@@ -30,6 +30,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, watch};
+use tracing::Instrument;
 
 use crate::PlayerError;
 use crate::deps::{Dependencies, JsRuntime};
@@ -318,33 +319,70 @@ impl YtDlpResolver {
         mode: StartMode,
         priority: Priority,
     ) -> Result<MediaSource, PlayerError> {
-        let semaphore = match priority {
-            Priority::Urgent => &self.urgent,
-            Priority::Background => &self.background,
-        };
-        let (source, available_at) = {
-            let _slot = semaphore.acquire().await.map_err(|_| PlayerError::Closed)?;
-            match self.live_worker().filter(|_| mode == StartMode::Quality) {
-                Some(worker) => match self.run_worker(&worker, video_id).await {
-                    Ok(resolved) => resolved,
-                    Err(e) => {
-                        tracing::warn!(error = %e, video_id, "worker en échec, repli sur l'exécutable");
-                        self.run(video_id, mode, priority).await?
-                    }
-                },
-                None => self.run(video_id, mode, priority).await?,
+        // Mesure : file d'attente, yt-dlp (exécutable ou worker), attente
+        // `available_at`. Résumé sur la cible `ytmr::timing`.
+        let span = tracing::info_span!(
+            "résolution",
+            video_id,
+            ?mode,
+            ?priority,
+            voie = tracing::field::Empty,
+        );
+        async {
+            let semaphore = match priority {
+                Priority::Urgent => &self.urgent,
+                Priority::Background => &self.background,
+            };
+            let queued = std::time::Instant::now();
+            let (source, available_at, file_ms, ytdlp_ms) = {
+                let _slot = semaphore.acquire().await.map_err(|_| PlayerError::Closed)?;
+                let file_ms = queued.elapsed().as_millis();
+                let started = std::time::Instant::now();
+                let (source, available_at) =
+                    match self.live_worker().filter(|_| mode == StartMode::Quality) {
+                        Some(worker) => {
+                            tracing::Span::current().record("voie", "worker");
+                            match self.run_worker(&worker, video_id).await {
+                                Ok(resolved) => resolved,
+                                Err(e) => {
+                                    tracing::warn!(error = %e, video_id, "worker en échec, repli sur l'exécutable");
+                                    tracing::Span::current().record("voie", "worker+exe");
+                                    self.run(video_id, mode, priority).await?
+                                }
+                            }
+                        }
+                        None => {
+                            tracing::Span::current().record("voie", "exe");
+                            self.run(video_id, mode, priority).await?
+                        }
+                    };
+                (source, available_at, file_ms, started.elapsed().as_millis())
+            };
+            let mut wait_ms = 0;
+            if let Some(wait) = available_at.and_then(|t| t.duration_since(SystemTime::now()).ok())
+            {
+                tracing::debug!(
+                    video_id,
+                    wait_ms = wait.as_millis(),
+                    "attente de disponibilité du flux"
+                );
+                wait_ms = wait.as_millis();
+                tokio::time::sleep(wait).await;
             }
-        };
-        if let Some(wait) = available_at.and_then(|t| t.duration_since(SystemTime::now()).ok()) {
             tracing::debug!(
-                video_id,
-                wait_ms = wait.as_millis(),
-                "attente de disponibilité du flux"
+                target: "ytmr::timing",
+                file_ms,
+                ytdlp_ms,
+                attente_ms = wait_ms,
+                quality = ?source.quality,
+                itag = itag_param(&source.url),
+                "résolution mesurée"
             );
-            tokio::time::sleep(wait).await;
+            self.remember(video_id, &source);
+            Ok(source)
         }
-        self.remember(video_id, &source);
-        Ok(source)
+        .instrument(span)
+        .await
     }
 
     async fn run_worker(
@@ -673,6 +711,15 @@ impl YtDlpInfo {
 
 fn unix(secs: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(secs)
+}
+
+/// Format YouTube (`itag=`) d'une URL googlevideo, pour les mesures.
+pub fn itag_param(url: &str) -> Option<u32> {
+    let query = url.split_once('?')?.1;
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("itag="))
+        .and_then(|v| v.parse().ok())
 }
 
 /// Lit `expire=<unix>` dans une URL googlevideo.

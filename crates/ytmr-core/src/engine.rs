@@ -24,6 +24,7 @@ use tokio::task::{JoinHandle, JoinSet};
 // Horloge de tokio : figeable dans les tests.
 use serde::{Deserialize, Serialize};
 use tokio::time::Instant;
+use tracing::Instrument;
 use ytmr_player::{
     AudioDevice, AudioEffects, EndReason, EntryId, MediaSource, Player, PlayerError, PlayerEvent,
     Priority, QualityPreference, Resolver, StartMode, StreamQuality,
@@ -350,6 +351,7 @@ fn spawn_with_queue<P: Player, R: Resolver, C: Radio>(
         preloading: None,
         preload_failed: None,
         awaiting_preload: None,
+        cold: None,
         load_generation: 0,
         paused: false,
         radio_inflight: false,
@@ -410,6 +412,36 @@ enum TaskDone {
     },
 }
 
+/// Chronométrage d'un démarrage à froid : clic → URL résolue → mpv ouvre le
+/// flux (`file-loaded`) → le son sort (`playback-restart`).
+struct ColdTiming {
+    span: tracing::Span,
+    generation: u64,
+    began: Instant,
+    resolved: Option<Duration>,
+    loaded: Option<Duration>,
+    quality: Option<StreamQuality>,
+}
+
+impl ColdTiming {
+    fn finish(self) {
+        let total = self.began.elapsed();
+        let resolved = self.resolved.unwrap_or_default();
+        let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        self.span.in_scope(|| {
+            tracing::info!(
+                target: "ytmr::timing",
+                resolution_ms = ms(resolved),
+                mpv_ouverture_ms = self.loaded.map(|l| ms(l.saturating_sub(resolved))),
+                mpv_son_ms = ms(total.saturating_sub(resolved)),
+                total_ms = ms(total),
+                quality = ?self.quality,
+                "démarrage à froid"
+            );
+        });
+    }
+}
+
 struct Engine<P, R, C> {
     player: P,
     player_events: broadcast::Receiver<PlayerEvent>,
@@ -433,6 +465,8 @@ struct Engine<P, R, C> {
     preload_failed: Option<QueueId>,
     /// Démarrage en attente du préchargement en cours (génération de chargement).
     awaiting_preload: Option<u64>,
+    /// Mesure du démarrage à froid en cours (journal `ytmr::timing`).
+    cold: Option<ColdTiming>,
     load_generation: u64,
     paused: bool,
     radio_inflight: bool,
@@ -919,6 +953,7 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             self.resume_at = None;
         }
         self.preload_failed = None;
+        self.cold = None;
         // File presque vide : la radio peut se préparer pendant le chargement.
         self.maybe_fetch_radio();
 
@@ -965,16 +1000,28 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
     fn spawn_start(&mut self, id: QueueId, video_id: String) {
         let resolver = Arc::clone(&self.resolver);
         let generation = self.load_generation;
-        self.tasks.spawn(async move {
-            let result = resolver
-                .resolve(&video_id, StartMode::Fast, Priority::Urgent)
-                .await;
-            TaskDone::Start {
-                generation,
-                id,
-                result,
-            }
+        let span = tracing::info_span!("démarrage_à_froid", video_id = %video_id);
+        self.cold = Some(ColdTiming {
+            span: span.clone(),
+            generation,
+            began: Instant::now(),
+            resolved: None,
+            loaded: None,
+            quality: None,
         });
+        self.tasks.spawn(
+            async move {
+                let result = resolver
+                    .resolve(&video_id, StartMode::Fast, Priority::Urgent)
+                    .await;
+                TaskDone::Start {
+                    generation,
+                    id,
+                    result,
+                }
+            }
+            .instrument(span),
+        );
     }
 
     fn reset_track_state(&mut self, track: &Track) {
@@ -1140,6 +1187,10 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
                 if generation != self.load_generation {
                     return;
                 }
+                if let Some(cold) = self.cold.as_mut().filter(|c| c.generation == generation) {
+                    cold.resolved = Some(cold.began.elapsed());
+                    cold.quality = result.as_ref().ok().map(|s| s.quality);
+                }
                 let source = result.unwrap_or_else(|e| {
                     tracing::warn!(error = %e, "résolution échouée, repli sur le hook yt-dlp de mpv");
                     let url = self
@@ -1272,6 +1323,9 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
         match event {
             PlayerEvent::Started(entry) => self.on_started(entry).await,
             PlayerEvent::Loaded => {
+                if let Some(cold) = self.cold.as_mut().filter(|c| c.resolved.is_some()) {
+                    cold.loaded.get_or_insert(cold.began.elapsed());
+                }
                 if self.current_entry.is_some() {
                     self.state.status = if self.paused {
                         Status::Paused
@@ -1304,6 +1358,11 @@ impl<P: Player, R: Resolver, C: Radio> Engine<P, R, C> {
             PlayerEvent::Volume(volume) => self.state.volume = volume,
             PlayerEvent::AudioDevices(devices) => self.state.audio_devices = devices,
             PlayerEvent::Ended { entry, reason } => self.on_ended(entry, reason).await,
+            PlayerEvent::Restarted => {
+                if let Some(cold) = self.cold.take_if(|c| c.resolved.is_some()) {
+                    cold.finish();
+                }
+            }
             PlayerEvent::Idle => {}
             PlayerEvent::Exited => {
                 self.player_alive = false;

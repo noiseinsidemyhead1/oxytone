@@ -3,6 +3,8 @@
 //! En clair : une télécommande en mode texte. Toute la logique (file, préchargement,
 //! radio) est dans `ytmr-core` ; ici on ne fait que traduire le clavier en commandes.
 
+mod bench;
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,6 +44,20 @@ enum Command {
         #[arg(required = true)]
         query: Vec<String>,
     },
+    /// Mesure le démarrage à froid (morceaux jamais résolus, mpv à volume 0).
+    BenchCold {
+        /// Avec la session « Se connecter » de l'appli.
+        #[arg(long)]
+        account: bool,
+        /// Client rapide sans compte (défaut : celui de la config).
+        #[arg(long)]
+        client: Option<String>,
+        #[arg(long, default_value_t = 10)]
+        count: usize,
+        /// Saute les N premiers morceaux de la liste (pour en prendre d'autres).
+        #[arg(long, default_value_t = 0)]
+        skip: usize,
+    },
 }
 
 const HELP: &str = "[entrée]/p pause · n suivant · b précédent · s 1:30 aller à · +/- ou v 50 volume\n\
@@ -64,6 +80,24 @@ fn main() -> Result<()> {
                 no_autoplay,
                 query,
             } => play(&config, &query.join(" "), all, !no_autoplay).await,
+            Command::BenchCold {
+                account,
+                client,
+                count,
+                skip,
+            } => {
+                bench::run(
+                    &config,
+                    &paths,
+                    bench::Options {
+                        account,
+                        client,
+                        count,
+                        skip,
+                    },
+                )
+                .await
+            }
         }
     });
     // La lecture de stdin bloque un thread jusqu'à la prochaine ligne : sans
