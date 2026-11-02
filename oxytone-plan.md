@@ -1,6 +1,6 @@
-# ytmr — client YouTube Music natif en Rust
+# oxytone — client YouTube Music natif en Rust
 
-Nom de travail : `ytmr` (à changer librement).
+Nom : `oxytone` (nom de travail `ytmr` jusqu'au 2026-11-02).
 
 ## 1. Est-ce pertinent ?
 
@@ -20,18 +20,18 @@ Règle d'or : **on ne touche pas à l'extraction des flux**. Signature, paramèt
 ## 2. Architecture
 
 ```
-ytmr/                      (workspace Cargo)
+oxytone/                      (workspace Cargo)
 ├── crates/
-│   ├── ytmr-core/        état du lecteur, file d'attente, bus d'événements
-│   ├── ytmr-catalog/     wrapper autour de ytmapi-rs (recherche, albums, playlists, radio)
-│   ├── ytmr-player/      trait Player + implémentation mpv (JSON IPC)
-│   ├── ytmr-api/         serveur HTTP + WebSocket (axum) pour le CYD et autres clients
-│   ├── ytmr-media/       jaquettes : cache disque, resize, conversion RGB565
-│   ├── ytmr-os/          MPRIS (Linux) / SMTC (Windows) via souvlaki
-│   └── ytmr-gui/         interface native iced (rendu logiciel tiny-skia) + assemblage de l'appli
+│   ├── oxytone-core/        état du lecteur, file d'attente, bus d'événements
+│   ├── oxytone-catalog/     wrapper autour de ytmapi-rs (recherche, albums, playlists, radio)
+│   ├── oxytone-player/      trait Player + implémentation mpv (JSON IPC)
+│   ├── oxytone-api/         serveur HTTP + WebSocket (axum) pour le CYD et autres clients
+│   ├── oxytone-media/       jaquettes : cache disque, resize, conversion RGB565
+│   ├── oxytone-os/          MPRIS (Linux) / SMTC (Windows) via souvlaki
+│   └── oxytone-gui/         interface native iced (rendu logiciel tiny-skia) + assemblage de l'appli
 └── apps/
-    ├── ytmr/             binaire GUI (assemble tout)
-    └── ytmr-cli/         binaire headless (debug, usage sans GUI)
+    ├── oxytone/             binaire GUI (assemble tout)
+    └── oxytone-cli/         binaire headless (debug, usage sans GUI)
 ```
 
 ### Choix techniques
@@ -46,7 +46,7 @@ ytmr/                      (workspace Cargo)
 | GUI | `iced` 0.14, rendu logiciel `tiny-skia` | pur Rust, architecture Elm ; la webview (WebView2) a été essayée puis écartée le 2026-10-29 : ~133 Mo pour une page vide. Le rendu GPU d'iced coûte 90 à 190 Mo de pilote graphique ; tiny-skia ~21 Mo pour 0,1 % de CPU |
 | Intégration OS | `souvlaki` | une seule API pour MPRIS (Linux) et SMTC (Windows) : touches média, overlay Windows |
 | Images | `image` + cache disque | resize et encodage des jaquettes |
-| Config / chemins | `serde` + `toml` + `directories` | `~/.config/ytmr` sous Linux, `%APPDATA%\ytmr` sous Windows |
+| Config / chemins | `serde` + `toml` + `directories` | `~/.config/oxytone` sous Linux, `%APPDATA%\oxytone` sous Windows |
 | Logs | `tracing` + `tracing-subscriber` | logs structurés, fichier rotatif |
 
 > En clair : mpv est un lecteur vidéo/audio en ligne de commande très solide. On le lance en arrière-plan et on lui parle par un petit canal (un socket sous Linux, un named pipe sous Windows), comme une télécommande.
@@ -96,7 +96,7 @@ Workspace, `rustfmt`, `clippy -D warnings`, CI GitHub Actions (Linux + Windows),
 Validation : `cargo build` et `cargo clippy` passent sur les deux OS en CI.
 
 **Phase 1 — Lecture headless**
-`ytmr-catalog` (recherche non authentifiée) et `ytmr-player` (mpv IPC). CLI : `ytmr-cli play "daft punk around the world"`.
+`oxytone-catalog` (recherche non authentifiée) et `oxytone-player` (mpv IPC). CLI : `oxytone-cli play "daft punk around the world"`.
 Validation : le son sort sous CachyOS et Windows, pause/reprise/seek fonctionnent depuis la CLI.
 
 **Phase 2 — Core et file d'attente**
@@ -104,7 +104,7 @@ Machine à états, file d'attente, shuffle, repeat, autoplay (radio via la watch
 Validation : tests unitaires sur la file d'attente ; enchaînement automatique de 3 morceaux sans trou notable.
 
 **Phase 3 — API et jaquettes**
-`ytmr-api` + `ytmr-media` (cache, resize, RGB565).
+`oxytone-api` + `oxytone-media` (cache, resize, RGB565).
 Validation : `curl` sur toutes les routes, client WS de test (`websocat`), une jaquette RGB565 décodée correctement par un petit script de vérification.
 
 **Phase 4 — GUI native iced** *(ex-phase 6, avancée à la demande de l'utilisateur le 2026-10-29)*
@@ -139,7 +139,7 @@ Le temps avant que le son démarre dépend surtout du réseau et de yt-dlp (~0,5
 
 ## 6. Risques
 
-- **Changements côté YouTube.** Pour la lecture, il suffit de mettre à jour yt-dlp. Pour le catalogue, il faut mettre à jour `ytmapi-rs` ; isoler ce crate derrière `ytmr-catalog` limite l'impact.
+- **Changements côté YouTube.** Pour la lecture, il suffit de mettre à jour yt-dlp. Pour le catalogue, il faut mettre à jour `ytmapi-rs` ; isoler ce crate derrière `oxytone-catalog` limite l'impact.
 - **CGU YouTube.** Usage perso uniquement, pas de redistribution de contenu.
 - **Exposition réseau de l'API.** Écoute en localhost par défaut, token obligatoire en LAN, pas de CORS ouvert.
 
@@ -148,13 +148,13 @@ Le temps avant que le son démarre dépend surtout du réseau et de yt-dlp (~0,5
 À coller dans Claude Code depuis un dossier vide.
 
 ```text
-Tu vas développer "ytmr", un client YouTube Music natif en Rust, multiplateforme (Linux CachyOS et Windows 11). Le plan complet est dans ytmr-plan.md à la racine : lis-le entièrement avant toute chose et respecte l'architecture, les choix techniques et l'ordre des phases.
+Tu vas développer "oxytone", un client YouTube Music natif en Rust, multiplateforme (Linux CachyOS et Windows 11). Le plan complet est dans oxytone-plan.md à la racine : lis-le entièrement avant toute chose et respecte l'architecture, les choix techniques et l'ordre des phases.
 
 Règles de travail :
 1. Commence par créer CLAUDE.md : résumé du projet, conventions, commandes utiles (build, test, clippy, lancement), état d'avancement par phase. Mets-le à jour à la fin de chaque phase.
 2. Travaille UNE phase à la fois. À la fin de chaque phase, arrête-toi, résume ce qui a été fait, donne-moi les commandes exactes pour valider le critère de la phase, et attends mon accord avant de continuer.
 3. N'invente aucune API de crate. Ajoute les dépendances avec `cargo add` (dernières versions stables), puis vérifie les signatures réelles via docs.rs ou `cargo doc --open` / le code source dans ~/.cargo/registry avant de les utiliser. C'est critique pour ytmapi-rs, souvlaki et iced, dont les API évoluent vite.
-4. Ne réimplémente JAMAIS l'extraction des flux YouTube (signature, paramètre n, PO tokens). La lecture passe exclusivement par mpv lancé en processus fils, piloté par JSON IPC (socket Unix sous Linux, named pipe \\.\pipe\ytmr-mpv sous Windows), mpv utilisant yt-dlp. Vérifie au démarrage que mpv et yt-dlp sont présents et donne un message d'erreur clair sinon.
+4. Ne réimplémente JAMAIS l'extraction des flux YouTube (signature, paramètre n, PO tokens). La lecture passe exclusivement par mpv lancé en processus fils, piloté par JSON IPC (socket Unix sous Linux, named pipe \\.\pipe\oxytone-mpv sous Windows), mpv utilisant yt-dlp. Vérifie au démarrage que mpv et yt-dlp sont présents et donne un message d'erreur clair sinon.
 5. La lecture est derrière un trait `Player` (async) pour pouvoir changer d'implémentation plus tard.
 6. Le crate core est la seule source de vérité. La GUI et l'API envoient des commandes et s'abonnent aux événements (tokio::sync::broadcast + watch pour l'état courant). Aucune logique métier dans la GUI ou l'API.
 7. Qualité : `cargo fmt`, `cargo clippy --workspace --all-targets -- -D warnings` et `cargo test --workspace` doivent passer à chaque fin de phase. Pas de `unwrap()` hors tests ; erreurs avec `thiserror` dans les libs et `anyhow` dans les binaires. Logs avec `tracing`.

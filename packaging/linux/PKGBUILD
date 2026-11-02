@@ -1,15 +1,15 @@
-# Paquet Arch / CachyOS de ytmr, construit depuis le dépôt Git.
+# Paquet Arch / CachyOS d'oxytone, construit depuis le dépôt Git.
 #
-# En clair : `makepkg -si` dans ce dossier compile ytmr et l'installe
+# En clair : `makepkg -si` dans ce dossier compile oxytone et l'installe
 # (binaire, icône, entrée du menu des applications). mpv, yt-dlp et node sont
 # installés comme dépendances ; python (mode rapide de yt-dlp) est conseillé.
-pkgname=ytmr-git
-_name=ytmr
+pkgname=oxytone-git
+_name=oxytone
 pkgver=0.1.0
 pkgrel=1
 pkgdesc="Client YouTube Music natif et léger (Rust, iced)"
 arch=('x86_64')
-url="https://github.com/noiseinsidemyhead1/ytmr"
+url="https://github.com/noiseinsidemyhead1/oxytone"
 license=('MIT' 'Apache-2.0')
 depends=('mpv' 'yt-dlp' 'nodejs' 'gcc-libs' 'glibc' 'fontconfig' 'libxkbcommon' 'wayland'
          'libx11' 'libxcursor' 'libxi' 'libxrandr' 'vulkan-icd-loader')
@@ -17,7 +17,10 @@ makedepends=('git' 'cargo')
 optdepends=('python: démarrage plus rapide des morceaux (yt-dlp gardé en mémoire)'
             'firefox: compte YouTube (session lue par yt-dlp)')
 provides=("$_name")
-conflicts=("$_name")
+# Ancien nom : le paquet ytmr-git est remplacé (ses données sont reprises au
+# premier lancement d'oxytone).
+conflicts=("$_name" 'ytmr' 'ytmr-git')
+replaces=('ytmr-git')
 source=("$_name::git+$url.git")
 sha256sums=('SKIP')
 
@@ -42,7 +45,7 @@ build() {
 package() {
     cd "$_name"
     install -Dm755 "target/release/oxytone" "$pkgdir/usr/bin/oxytone"
-    install -Dm644 "packaging/linux/ytmr.desktop" "$pkgdir/usr/share/applications/ytmr.desktop"
+    install -Dm644 "packaging/linux/oxytone.desktop" "$pkgdir/usr/share/applications/oxytone.desktop"
     install -Dm644 "packaging/linux/oxytone.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/oxytone.png"
     install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/$pkgname/LICENSE-MIT"
     install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/$pkgname/LICENSE-APACHE"
