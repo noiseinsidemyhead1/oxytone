@@ -4121,6 +4121,151 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxytone"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "oxytone-core",
+ "oxytone-gui",
+ "serde_json",
+ "tao",
+ "tracing",
+ "winreg",
+ "winresource",
+ "wry",
+]
+
+[[package]]
+name = "oxytone-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "futures-util",
+ "oxytone-catalog",
+ "oxytone-core",
+ "oxytone-media",
+ "oxytone-player",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "oxytone-catalog"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "oxytone-core",
+ "pinyin",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "yomikata-core",
+ "ytmapi-rs",
+]
+
+[[package]]
+name = "oxytone-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "oxytone-catalog",
+ "oxytone-core",
+ "oxytone-os",
+ "oxytone-player",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "oxytone-core"
+version = "0.1.0"
+dependencies = [
+ "directories",
+ "fastrand",
+ "getrandom 0.4.3",
+ "oxytone-player",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "oxytone-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "fastrand",
+ "iced",
+ "oxytone-api",
+ "oxytone-catalog",
+ "oxytone-core",
+ "oxytone-media",
+ "oxytone-os",
+ "oxytone-player",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "oxytone-media"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "image",
+ "reqwest",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "oxytone-os"
+version = "0.1.0"
+dependencies = [
+ "discord-rich-presence",
+ "notify-rust",
+ "oxytone-core",
+ "oxytone-media",
+ "souvlaki",
+ "tauri-winrt-notification",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "windows 0.62.2",
+ "winreg",
+]
+
+[[package]]
+name = "oxytone-player"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "pango"
 version = "0.18.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7850,151 +7995,6 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "tokio",
-]
-
-[[package]]
-name = "ytmr"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "serde_json",
- "tao",
- "tracing",
- "winreg",
- "winresource",
- "wry",
- "ytmr-core",
- "ytmr-gui",
-]
-
-[[package]]
-name = "ytmr-api"
-version = "0.1.0"
-dependencies = [
- "axum",
- "futures-util",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "ytmr-catalog",
- "ytmr-core",
- "ytmr-media",
- "ytmr-player",
-]
-
-[[package]]
-name = "ytmr-catalog"
-version = "0.1.0"
-dependencies = [
- "futures-util",
- "pinyin",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "yomikata-core",
- "ytmapi-rs",
- "ytmr-core",
-]
-
-[[package]]
-name = "ytmr-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "serde_json",
- "tokio",
- "tracing",
- "ytmr-catalog",
- "ytmr-core",
- "ytmr-os",
- "ytmr-player",
-]
-
-[[package]]
-name = "ytmr-core"
-version = "0.1.0"
-dependencies = [
- "directories",
- "fastrand",
- "getrandom 0.4.3",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml 1.1.8+spec-1.1.0",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
- "ytmr-player",
-]
-
-[[package]]
-name = "ytmr-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "fastrand",
- "iced",
- "raw-window-handle",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
- "ytmr-api",
- "ytmr-catalog",
- "ytmr-core",
- "ytmr-media",
- "ytmr-os",
- "ytmr-player",
-]
-
-[[package]]
-name = "ytmr-media"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "image",
- "reqwest",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "ytmr-os"
-version = "0.1.0"
-dependencies = [
- "discord-rich-presence",
- "notify-rust",
- "souvlaki",
- "tauri-winrt-notification",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
- "windows 0.62.2",
- "winreg",
- "ytmr-core",
- "ytmr-media",
-]
-
-[[package]]
-name = "ytmr-player"
-version = "0.1.0"
-dependencies = [
- "reqwest",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
- "tracing",
 ]
 
 [[package]]

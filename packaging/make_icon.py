@@ -1,4 +1,4 @@
-"""Icône de ytmr (même dessin que `app_icon` de ytmr-gui) : disque dégradé
+"""Icône d'oxytone (même dessin que `app_icon` d'oxytone-gui) : disque dégradé
 rose-violet percé au centre, en .ico multi-tailles (Windows) et .png (Linux).
 
 Usage : python packaging/make_icon.py
@@ -31,11 +31,11 @@ def main() -> None:
     sizes = [16, 24, 32, 48, 64, 128, 256]
     images = [draw(s) for s in sizes]
     images[-1].save(
-        HERE / "windows" / "ytmr.ico",
+        HERE / "windows" / "oxytone.ico",
         sizes=[(s, s) for s in sizes],
         append_images=images[:-1],
     )
-    images[-1].save(HERE / "linux" / "ytmr.png")
+    images[-1].save(HERE / "linux" / "oxytone.png")
     print("icônes écrites")
 
 

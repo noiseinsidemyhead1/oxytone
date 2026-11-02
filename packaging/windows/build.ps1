@@ -1,11 +1,11 @@
-﻿# Fabrique l'installateur Windows : dist\ytmr-setup-<version>.exe
+﻿# Fabrique l'installateur Windows : dist\oxytone-setup-<version>.exe
 #
-# En clair : compile ytmr en release, puis Inno Setup emballe ytmr.exe dans
+# En clair : compile oxytone en release, puis Inno Setup emballe oxytone.exe dans
 # un installateur. Prérequis une fois : `scoop install inno-setup`.
 #
 # Usage (depuis la racine du dépôt, dans PowerShell) :
 #   powershell -ExecutionPolicy Bypass -File packaging\windows\build.ps1
-#   ... -TargetDir target\alt    # si ytmr est ouvert (target\release verrouillé)
+#   ... -TargetDir target\alt    # si oxytone est ouvert (target\release verrouillé)
 
 param(
     [string]$TargetDir = "target"
@@ -20,16 +20,16 @@ $match = Select-String -Path "Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | 
 if (-not $match) { throw "version introuvable dans Cargo.toml" }
 $version = $match.Matches[0].Groups[1].Value
 
-Write-Host "Compilation de ytmr $version (release)..."
-cargo build --release -p ytmr --target-dir $TargetDir
+Write-Host "Compilation d'oxytone $version (release)..."
+cargo build --release -p oxytone --target-dir $TargetDir
 if ($LASTEXITCODE -ne 0) { throw "échec de la compilation" }
 
-$exe = Resolve-Path (Join-Path $TargetDir "release\ytmr.exe")
+$exe = Resolve-Path (Join-Path $TargetDir "release\oxytone.exe")
 $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
 if (-not $iscc) { throw "Inno Setup introuvable : scoop install inno-setup" }
 
 Write-Host "Installateur..."
-& $iscc "/DAppVersion=$version" "/DExePath=$exe" "packaging\windows\ytmr.iss"
+& $iscc "/DAppVersion=$version" "/DExePath=$exe" "packaging\windows\oxytone.iss"
 if ($LASTEXITCODE -ne 0) { throw "échec d'Inno Setup" }
 
-Write-Host "Prêt : dist\ytmr-setup-$version.exe"
+Write-Host "Prêt : dist\oxytone-setup-$version.exe"
