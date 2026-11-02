@@ -15,9 +15,20 @@ const PORT: u16 = 26541;
 const HELLO: &str = "oxytone-show";
 const REPLY: &str = "oxytone-ok";
 
-/// `true` : cette instance est la seule (elle continue). `false` : une autre
-/// tourne déjà, sa fenêtre a été ramenée ; celle-ci doit s'arrêter.
-pub fn claim(wait: bool) -> bool {
+/// Résultat de [`claim`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Instance {
+    /// Seule instance : on continue.
+    Alone,
+    /// Un oxytone tourne déjà, sa fenêtre a été ramenée : on s'arrête.
+    Exit,
+    /// Le port est tenu par un programme qui ne répond pas comme oxytone :
+    /// en pratique ytmr (l'ancien nom), qui écoute sur le même port. On
+    /// continue, sans instance unique.
+    Foreign,
+}
+
+pub fn claim(wait: bool) -> Instance {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, PORT));
     // Redémarrage : l'ancienne instance libère le port en quelques instants.
     let mut bound = TcpListener::bind(addr);
@@ -38,10 +49,11 @@ pub fn claim(wait: bool) -> bool {
             if let Err(e) = spawned {
                 tracing::warn!(error = %e, "instance unique");
             }
-            true
+            Instance::Alone
         }
         // Port pris : une instance d'oxytone (ou un autre programme).
-        Err(_) => !announce(addr),
+        Err(_) if announce(addr) => Instance::Exit,
+        Err(_) => Instance::Foreign,
     }
 }
 
@@ -72,4 +84,27 @@ fn announce(addr: SocketAddr) -> bool {
     }
     let mut line = String::new();
     BufReader::new(&stream).read_line(&mut line).is_ok() && line.trim() == REPLY
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Un programme tient le port d'instance sans répondre comme oxytone :
+    /// c'est ce que fait ytmr (l'ancien nom), qui lit le message, ne le
+    /// reconnaît pas et ne répond rien. → `Foreign` (la migration attendra).
+    /// Port réel (26541) : ni ytmr ni oxytone ne doivent être ouverts.
+    #[test]
+    #[ignore = "utilise le port 26541 (ni ytmr ni oxytone ouverts)"]
+    fn a_program_that_does_not_answer_like_oxytone_is_foreign() {
+        let fake_ytmr = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, PORT))).unwrap();
+        let ytmr = std::thread::spawn(move || {
+            let (stream, _) = fake_ytmr.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            line
+        });
+        assert_eq!(claim(false), Instance::Foreign);
+        assert_eq!(ytmr.join().unwrap().trim(), HELLO);
+    }
 }

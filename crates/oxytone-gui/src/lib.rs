@@ -30,14 +30,18 @@ use oxytone_core::{AppPaths, Config};
 
 pub use backend::Backend;
 
-/// Une seule instance : `false` si oxytone tourne déjà (sa fenêtre a été ramenée).
+pub use instance::Instance;
+
+/// Une seule instance (voir [`Instance`]).
 /// `wait` : redémarrage, l'instance précédente est en train de se fermer.
-pub fn claim_instance(wait: bool) -> bool {
+pub fn claim_instance(wait: bool) -> Instance {
     instance::claim(wait)
 }
 
-pub fn run(config: Config, paths: AppPaths) -> iced::Result {
-    let boot = Arc::new((config, paths));
+/// `blocked` : raison de ne pas démarrer le moteur (ytmr encore ouvert pendant
+/// la migration) ; la fenêtre l'affiche à la place.
+pub fn run(config: Config, paths: AppPaths, blocked: Option<String>) -> iced::Result {
+    let boot = Arc::new((config, paths, blocked));
     iced::application(
         move || app::App::boot(Arc::clone(&boot)),
         app::App::update,

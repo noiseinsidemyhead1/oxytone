@@ -4127,6 +4127,7 @@ dependencies = [
  "anyhow",
  "oxytone-core",
  "oxytone-gui",
+ "oxytone-os",
  "serde_json",
  "tao",
  "tracing",

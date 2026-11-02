@@ -4,7 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use anyhow::{Context, Result};
-use oxytone_core::{AppPaths, Config};
+use oxytone_core::{AppPaths, Config, migrate};
 
 #[cfg(windows)]
 mod login;
@@ -23,7 +23,7 @@ fn main() -> Result<()> {
         eprintln!("dossier de travail : {e}");
     }
     let args: Vec<String> = std::env::args().collect();
-    let paths = AppPaths::discover()?;
+    let mut paths = AppPaths::discover()?;
     // `oxytone --login` : seulement la fenêtre de connexion (lancée par oxytone).
     #[cfg(windows)]
     if args.iter().any(|a| a == "--login") {
@@ -33,18 +33,55 @@ fn main() -> Result<()> {
     // `--relaunch` (redémarrage après la connexion) : on attend que
     // l'instance précédente ait fini de se fermer.
     let relaunch = args.iter().any(|a| a == "--relaunch");
-    if !oxytone_gui::claim_instance(relaunch) {
+    let instance = oxytone_gui::claim_instance(relaunch);
+    if instance == oxytone_gui::Instance::Exit {
         return Ok(());
     }
+    // Premier lancement après ytmr : ses dossiers sont déplacés (voir
+    // `oxytone_core::migrate`). ytmr ouvert (il tient le port d'instance) :
+    // rien n'est déplacé et la fenêtre demande de le fermer.
+    let migration = AppPaths::legacy()
+        .ok()
+        .map(|old| migrate::migrate(&old, &paths, instance == oxytone_gui::Instance::Foreign));
+    if let Some(m) = &migration {
+        paths = m.paths.clone();
+    }
+    let blocked = migration
+        .as_ref()
+        .is_some_and(|m| m.outcome == migrate::Outcome::Blocked)
+        .then(|| "Ferme ytmr pour terminer la migration, puis relance oxytone.".to_owned());
+
     let config_file = paths.config_file();
     let mut config = Config::load_or_create(&config_file)
         .with_context(|| format!("chargement de {}", config_file.display()))?;
     let _log = oxytone_core::logging::init(&config.log.filter, Some(&paths.log_dir()));
+    if let Some(m) = &migration {
+        log_steps(&m.steps);
+        if m.outcome != migrate::Outcome::Nothing {
+            tracing::info!(outcome = ?m.outcome, paths = ?m.paths, "migration depuis ytmr");
+        }
+    }
+    #[cfg(windows)]
+    if blocked.is_none()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        log_steps(&oxytone_os::legacy::migrate_registry(&exe));
+    }
     if config.api.ensure_token()? {
         config.save(&config_file)?;
         tracing::info!("token d'API généré dans la config (écoute réseau)");
     }
-    oxytone_gui::run(config, paths).context("interface graphique")
+    oxytone_gui::run(config, paths, blocked).context("interface graphique")
+}
+
+fn log_steps(steps: &[migrate::Step]) {
+    for step in steps {
+        if step.ok {
+            tracing::info!("migration : {}", step.message);
+        } else {
+            tracing::warn!("migration : {}", step.message);
+        }
+    }
 }
 
 /// Choix du rendu, qu'iced et wgpu ne lisent que dans l'environnement.

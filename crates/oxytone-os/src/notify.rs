@@ -13,7 +13,7 @@ use tokio::runtime::Handle;
 /// Identifiant d'application des notifications Windows (enregistré au premier
 /// envoi pour que la bulle porte le nom « oxytone », pas celui de PowerShell).
 #[cfg(windows)]
-const APP_ID: &str = "ytmr.player";
+const APP_ID: &str = "oxytone.player";
 
 /// Réglages partagés avec l'interface.
 #[derive(Clone, Default)]
@@ -118,7 +118,7 @@ fn show(title: &str, body: &str, cover: Option<&std::path::Path>) -> Result<(), 
     n.show().map(|_| ()).map_err(|e| e.to_string())
 }
 
-/// `HKCU\Software\Classes\AppUserModelId\ytmr.player` → `DisplayName = ytmr` :
+/// `HKCU\Software\Classes\AppUserModelId\oxytone.player` → `DisplayName = oxytone` :
 /// c'est ainsi qu'une appli non empaquetée donne son nom à ses notifications.
 #[cfg(windows)]
 #[allow(unsafe_code)] // API du registre Win32.
@@ -146,7 +146,7 @@ fn register_app_id() {
         // Icône à côté du nom : une image du disque d'oxytone, déposée une fois
         // dans son dossier (Windows veut un chemin de fichier).
         let Some(dir) =
-            std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("ytmr"))
+            std::env::var_os("LOCALAPPDATA").map(|d| std::path::PathBuf::from(d).join("oxytone"))
         else {
             return;
         };

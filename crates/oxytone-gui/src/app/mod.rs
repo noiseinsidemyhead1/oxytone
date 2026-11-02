@@ -643,18 +643,22 @@ pub struct App {
 }
 
 impl App {
-    pub fn boot(config: Arc<(Config, AppPaths)>) -> (Self, Task<Message>) {
-        let start = {
-            let config = Arc::clone(&config);
-            Task::perform(
-                async move {
-                    Backend::start(&config.0, &config.1)
-                        .await
-                        .map(Slot::new)
-                        .map_err(|e| format!("{e:#}"))
-                },
-                Message::BackendReady,
-            )
+    pub fn boot(config: Arc<(Config, AppPaths, Option<String>)>) -> (Self, Task<Message>) {
+        let start = match config.2.clone() {
+            // ytmr encore ouvert : pas de moteur (ports et fichiers pris).
+            Some(reason) => Task::done(Message::BackendReady(Err(reason))),
+            None => {
+                let config = Arc::clone(&config);
+                Task::perform(
+                    async move {
+                        Backend::start(&config.0, &config.1)
+                            .await
+                            .map(Slot::new)
+                            .map_err(|e| format!("{e:#}"))
+                    },
+                    Message::BackendReady,
+                )
+            }
         };
         let size = window::oldest()
             .and_then(window::size)

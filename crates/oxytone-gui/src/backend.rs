@@ -328,3 +328,129 @@ async fn connect_account(resolver: &YtDlpResolver) -> AccountState {
     }
     AccountState::Unavailable(last)
 }
+
+#[cfg(test)]
+mod migration_tests {
+    use std::path::{Path, PathBuf};
+
+    use oxytone_core::AppPaths;
+    use oxytone_core::migrate::{Outcome, migrate, pending};
+
+    fn layout(root: &Path, name: &str) -> AppPaths {
+        AppPaths {
+            config_dir: root.join("Roaming").join(name).join("config"),
+            data_dir: root.join("Roaming").join(name).join("data"),
+            cache_dir: root.join("Local").join(name).join("cache"),
+        }
+    }
+
+    /// Nombre de fichiers et octets sous les trois dossiers.
+    fn inventory(paths: &AppPaths) -> (u64, u64) {
+        fn walk(dir: &Path, acc: &mut (u64, u64)) {
+            for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, acc);
+                } else if let Ok(meta) = entry.metadata() {
+                    acc.0 += 1;
+                    acc.1 += meta.len();
+                }
+            }
+        }
+        let mut acc = (0, 0);
+        for dir in [&paths.config_dir, &paths.data_dir, &paths.cache_dir] {
+            walk(dir, &mut acc);
+        }
+        acc
+    }
+
+    /// Migration sur une **copie** des vrais dossiers, jamais sur les vrais :
+    /// `OXYTONE_TEST_MIGRATION=<dossier>` qui contient `Roaming\ytmr\{config,data}`
+    /// et `Local\ytmr\cache` (copiés avec robocopy).
+    #[tokio::test]
+    #[ignore = "copie des vraies données dans OXYTONE_TEST_MIGRATION"]
+    async fn migrates_a_copy_of_real_data() {
+        let root = PathBuf::from(
+            oxytone_core::env::var("TEST_MIGRATION").expect("OXYTONE_TEST_MIGRATION"),
+        );
+        let (old, new) = (layout(&root, "ytmr"), layout(&root, "oxytone"));
+        assert!(pending(&old, &new), "rien à migrer dans {}", root.display());
+        let before = inventory(&old);
+        println!("avant : {} fichiers, {} Mo", before.0, before.1 >> 20);
+
+        // 1. ytmr ouvert : rien ne bouge.
+        let m = migrate(&old, &new, true);
+        assert_eq!(m.outcome, Outcome::Blocked);
+        assert_eq!(inventory(&old), before);
+        assert!(!root.join("Roaming").join("oxytone").exists());
+        println!("1. ytmr ouvert : {:?}, rien déplacé", m.outcome);
+
+        // 2. Échec en cours de route : un fichier des données ouvert sans
+        // partage (comme un programme qui le tient) empêche son déplacement.
+        let locked = old.data_dir.join("plays.jsonl");
+        #[cfg(windows)]
+        let handle = {
+            use std::os::windows::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&locked)
+                .expect("verrou")
+        };
+        let m = migrate(&old, &new, false);
+        #[cfg(windows)]
+        {
+            assert_eq!(m.outcome, Outcome::Partial, "{:?}", m.steps);
+            assert_eq!(m.paths.data_dir, old.data_dir);
+            assert!(locked.exists());
+            // La session reste lisible là où elle est.
+            assert!(super::load_session(&m.paths.data_dir.join("youtube-session.bin")).is_some());
+            drop(handle);
+        }
+        for s in &m.steps {
+            println!("2. {} {}", if s.ok { "ok " } else { "!! " }, s.message);
+        }
+
+        // 3. Lancement suivant : le reste est déplacé, les dossiers d'oxytone
+        // déjà présents sont gardés.
+        let m = migrate(&old, &new, false);
+        for s in &m.steps {
+            println!("3. {} {}", if s.ok { "ok " } else { "!! " }, s.message);
+        }
+        assert_eq!(m.paths.data_dir, new.data_dir);
+        assert!(!pending(&old, &new));
+        assert_eq!(migrate(&old, &new, false).outcome, Outcome::Nothing);
+
+        // Rien de perdu : mêmes fichiers, mêmes octets.
+        let after = inventory(&new);
+        println!("après : {} fichiers, {} Mo", after.0, after.1 >> 20);
+        assert_eq!(after, before);
+        assert!(!root.join("Roaming").join("ytmr").exists());
+        assert!(!root.join("Local").join("ytmr").exists());
+
+        // Session (DPAPI : liée à l'utilisateur Windows, pas au chemin).
+        let session = super::load_session(&new.data_dir.join("youtube-session.bin"));
+        println!(
+            "session déchiffrée après déplacement : {}",
+            session.as_ref().map_or(0, Vec::len)
+        );
+        assert!(session.is_some());
+        for file in ["session.json", "plays.jsonl"] {
+            assert!(new.data_dir.join(file).exists(), "{file}");
+        }
+        assert!(new.cache_dir.join("streams.json").exists());
+
+        // Worker : l'environnement Python déplacé démarre (ou est recréé).
+        let started = std::time::Instant::now();
+        let options =
+            serde_json::json!({ "quiet": true, "no_warnings": true, "skip_download": true });
+        let worker = oxytone_player::worker::launch(&new.cache_dir.join("ytdlp-env"), &options)
+            .await
+            .expect("worker");
+        println!(
+            "worker prêt en {} ms (yt-dlp {}) depuis l'environnement déplacé",
+            started.elapsed().as_millis(),
+            worker.version()
+        );
+    }
+}

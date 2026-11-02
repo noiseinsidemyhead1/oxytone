@@ -49,7 +49,16 @@ pub struct AppPaths {
 
 impl AppPaths {
     pub fn discover() -> Result<Self, ConfigError> {
-        let dirs = ProjectDirs::from("", "", "ytmr").ok_or(ConfigError::NoHomeDir)?;
+        Self::named("oxytone")
+    }
+
+    /// Dossiers de ytmr, l'ancien nom (voir [`crate::migrate`]).
+    pub fn legacy() -> Result<Self, ConfigError> {
+        Self::named(crate::migrate::LEGACY_NAME)
+    }
+
+    fn named(name: &str) -> Result<Self, ConfigError> {
+        let dirs = ProjectDirs::from("", "", name).ok_or(ConfigError::NoHomeDir)?;
         Ok(Self {
             config_dir: dirs.config_dir().to_path_buf(),
             cache_dir: dirs.cache_dir().to_path_buf(),

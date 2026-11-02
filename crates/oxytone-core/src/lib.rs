@@ -6,6 +6,7 @@
 pub mod config;
 pub mod engine;
 pub mod logging;
+pub mod migrate;
 pub mod queue;
 pub mod stats;
 pub mod track;

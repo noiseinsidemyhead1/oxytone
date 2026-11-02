@@ -12,6 +12,8 @@ pub mod browser;
 pub mod discord;
 #[cfg(windows)]
 pub mod fullscreen;
+#[cfg(windows)]
+pub mod legacy;
 mod notify;
 pub mod secret;
 #[cfg(windows)]
