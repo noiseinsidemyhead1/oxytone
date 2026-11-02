@@ -48,6 +48,9 @@ if "cookiesfrombrowser" in opts:
 # Session capturée par la fenêtre de connexion de ytmr (cookies déjà lus).
 session = opts.pop("ytmr_cookies", None) or []
 has_account = "cookiesfrombrowser" in opts or bool(session)
+# Arguments d'extracteur du lancement ; une requête peut demander un autre
+# client (démarrage rapide sans compte, `client`).
+base_args = opts.get("extractor_args") or {}
 local = threading.local()
 out = threading.Lock()
 
@@ -136,6 +139,16 @@ def work(req):
             y.params["format"] = fmt
             y.format_selector = y.build_format_selector(fmt)
             local.fmt = fmt
+        # yt-dlp relit `extractor_args` à chaque extraction
+        # (`InfoExtractor._configuration_arg`) : chaque fil a son YoutubeDL.
+        client = req.get("client")
+        if getattr(local, "client", None) != client:
+            if client:
+                youtube = dict(base_args.get("youtube", {}), player_client=[client])
+                y.params["extractor_args"] = dict(base_args, youtube=youtube)
+            else:
+                y.params["extractor_args"] = base_args
+            local.client = client
         info = y.extract_info(req["url"], download=False)
         emit({"id": req["id"], "ok": {
             "url": info.get("url"),
@@ -222,8 +235,16 @@ impl Worker {
 
     /// Infos yt-dlp (`url`, `vcodec`, `available_at`, `http_headers`) pour `url`.
     /// `format` : sélecteur yt-dlp (qualité choisie dans les Paramètres).
-    pub async fn extract(&self, url: &str, format: &str) -> Result<Value, String> {
-        self.request(json!({ "url": url, "format": format })).await
+    /// `client` : client YouTube pour cette requête (démarrage rapide), sinon
+    /// ceux du lancement.
+    pub async fn extract(
+        &self,
+        url: &str,
+        format: &str,
+        client: Option<&str>,
+    ) -> Result<Value, String> {
+        self.request(json!({ "url": url, "format": format, "client": client }))
+            .await
     }
 
     /// En-tête `Cookie` YouTube de la session du navigateur (`firefox`,
@@ -562,7 +583,7 @@ mod tests {
         let started = std::time::Instant::now();
         let (update, during) = tokio::join!(
             update_if_due(&dir, worker.version()),
-            worker.extract(url, "bestaudio/best"),
+            worker.extract(url, "bestaudio/best", None),
         );
         println!(
             "mise à jour : {} ms -> {:?} ; résolution pendant la mise à jour : {}",
@@ -575,7 +596,7 @@ mod tests {
             let fresh = Worker::spawn(&python_path(&dir), &options)
                 .await
                 .expect("relance");
-            let resolved = fresh.extract(url, "bestaudio/best").await;
+            let resolved = fresh.extract(url, "bestaudio/best", None).await;
             println!(
                 "relance : yt-dlp {} prêt et résolution {} en {} ms ; ancien worker vivant : {}",
                 fresh.version(),

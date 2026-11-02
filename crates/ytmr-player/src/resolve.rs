@@ -275,15 +275,12 @@ impl YtDlpResolver {
         self.worker_attached.send_replace(true);
     }
 
-    /// Worker à utiliser pour cette résolution, s'il y a lieu.
-    ///
-    /// Toujours pour la qualité ; aussi pour un démarrage à froid sans client
-    /// rapide (cas d'un compte) : l'exécutable donnerait le même résultat en
-    /// plus lent, et sans la session de « Se connecter », qu'il ne reçoit pas.
-    async fn worker_for(&self, mode: StartMode) -> Option<Arc<Worker>> {
-        if mode == StartMode::Fast && self.fast_client.is_some() {
-            return None;
-        }
+    /// Worker à utiliser pour cette résolution, s'il est prêt (sinon :
+    /// l'exécutable). Toujours, démarrage rapide compris : l'exécutable met
+    /// ~1,25 s rien qu'à démarrer, et ne reçoit pas la session de « Se
+    /// connecter ». Avec cette session, le worker est attendu (sans lui, la
+    /// lecture se ferait sans le compte).
+    async fn worker_for(&self) -> Option<Arc<Worker>> {
         if let Some(worker) = self.live_worker() {
             return Some(worker);
         }
@@ -372,10 +369,10 @@ impl YtDlpResolver {
                 let _slot = semaphore.acquire().await.map_err(|_| PlayerError::Closed)?;
                 let file_ms = queued.elapsed().as_millis();
                 let started = std::time::Instant::now();
-                let (source, available_at) = match self.worker_for(mode).await {
+                let (source, available_at) = match self.worker_for().await {
                         Some(worker) => {
                             tracing::Span::current().record("voie", "worker");
-                            match self.run_worker(&worker, video_id).await {
+                            match self.run_worker(&worker, video_id, mode).await {
                                 Ok(resolved) => resolved,
                                 Err(e) => {
                                     tracing::warn!(error = %e, video_id, "worker en échec, repli sur l'exécutable");
@@ -422,12 +419,17 @@ impl YtDlpResolver {
         &self,
         worker: &Worker,
         video_id: &str,
+        mode: StartMode,
     ) -> Result<(MediaSource, Option<SystemTime>), PlayerError> {
         let started = std::time::Instant::now();
         let url = format!("https://music.youtube.com/watch?v={video_id}");
         let format = lock(&self.quality).format();
+        let client = match mode {
+            StartMode::Fast => self.fast_client.as_deref(),
+            StartMode::Quality => None,
+        };
         let value = worker
-            .extract(&url, format)
+            .extract(&url, format, client)
             .await
             .map_err(|e| PlayerError::Resolve(format!("{video_id} : {e}")))?;
         let info: YtDlpInfo = serde_json::from_value(value)
